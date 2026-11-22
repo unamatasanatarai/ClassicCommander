@@ -65,6 +65,61 @@ public enum CommanderTests {
     }
 
     public static func run(testRunner: (String, () throws -> Void) -> Void) {
+        testRunner("View menu: sort by column / unsorted / reverse, Show filters that stay, hidden files saved") {
+            let fm = FileManager.default
+            let dir = fm.temporaryDirectory.appendingPathComponent("ViewMenu-\(UUID().uuidString)").resolvingSymlinksInPath()
+            defer { try? fm.removeItem(at: dir) }
+            try fm.createDirectory(at: dir.appendingPathComponent("sub"), withIntermediateDirectories: true)
+            let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+            for (name, size, age) in [("b.txt", 300, 3.0), ("a.md", 100, 1.0), ("c.log", 200, 2.0), ("run.sh", 10, 4.0), (".hidden", 1, 5.0)] {
+                try Data(repeating: 65, count: size).write(to: dir.appendingPathComponent(name))
+                try fm.setAttributes([.modificationDate: t0 + age * 1000], ofItemAtPath: dir.appendingPathComponent(name).path)
+            }
+            try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.appendingPathComponent("run.sh").path)
+            let view = CommanderView(model: CommanderModel(left: PanelModel(directory: dir), right: PanelModel(directory: dir)))
+            view.frame = NSRect(x: 0, y: 0, width: 1000, height: 600)
+            view.layout()
+            var saved: [Settings] = []
+            view.onSettingsChange = { saved.append($0) }
+            let panel = view.leftView.model
+            func files() -> [String] { panel.realEntries.filter { $0.kind == .file }.map(\.name) }
+            try expect(files() == ["a.md", "b.txt", "c.log", "run.sh"], "by name, dotfiles hidden: \(files())")
+            view.perform(.sortBySize)
+            try expect(files() == ["run.sh", "a.md", "c.log", "b.txt"], "by size: \(files())")
+            view.perform(.reverseOrder)
+            try expect(files() == ["b.txt", "c.log", "a.md", "run.sh"] && !panel.sortOrder.ascending, "reversed: \(files())")
+            view.perform(.sortByDate)
+            try expect(panel.sortOrder.column == .date && panel.sortOrder.ascending && files() == ["a.md", "c.log", "b.txt", "run.sh"],
+                       "a new column sorts ascending: \(files())")
+            view.perform(.sortByExtension)
+            try expect(files() == ["c.log", "a.md", "run.sh", "b.txt"], "by extension: \(files())")
+            view.perform(.sortUnsorted)
+            try expect(panel.sortOrder.column == .unsorted && Set(files()) == ["a.md", "b.txt", "c.log", "run.sh"], "unsorted lists all")
+            view.perform(.sortByName)
+
+            view.perform(.showPrograms)
+            try expect(files() == ["run.sh"] && panel.realEntries.contains { $0.name == "sub" }, "programs (folders stay): \(files())")
+            panel.setShowFilter(.mask("*.txt *.md"), visibleRows: 20)
+            try expect(files() == ["a.md", "b.txt"], "mask: \(files())")
+            _ = panel.go(to: dir.appendingPathComponent("sub"), visibleRows: 20)
+            _ = panel.goUp(visibleRows: 20)
+            try expect(files() == ["a.md", "b.txt"], "the Show filter stays when changing folders")
+            panel.focus(name: "a.md", visibleRows: 20)
+            _ = panel.toggleMarkAtCursor()
+            view.perform(.showPrograms)
+            try expect(panel.marked.isEmpty, "marks on hidden files are dropped")
+            view.perform(.showAllFiles)
+            try expect(files().count == 4, "all files again")
+
+            view.perform(.toggleHiddenFiles)
+            try expect(files().contains(".hidden") && saved.last?.display.showHiddenFiles == true, "hidden files shown and saved")
+            try expect(view.rightView.model.realEntries.contains { $0.name == ".hidden" }, "both panels")
+            view.perform(.toggleHiddenFiles)
+            try expect(!files().contains(".hidden"), "hidden again")
+            view.perform(.toggleFunctionKeyBar)
+            try expect(view.functionBar.isHidden && saved.last?.display.showFunctionKeyBar == false, "button bar toggled")
+        }
+
         testRunner("Open terminal here: configurable app, {dir} as one argument, ⌃⇧T, saved with the settings") {
             let folder = URL(fileURLWithPath: "/tmp/a b/$HOME \"x\"")
             guard case let .openFolder(app, f) = TerminalLauncher.launch(appPath: "", template: "  ", folder: folder) else {

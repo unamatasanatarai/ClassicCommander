@@ -93,6 +93,9 @@ public enum CommandAction: String, CaseIterable, Codable {
     case ftpConnect, ftpNewConnection, ftpDisconnect, ftpTransfers, refresh
     case swapPanels
     case openTerminal
+    case sortByName, sortByExtension, sortByDate, sortBySize, sortUnsorted, reverseOrder
+    case showAllFiles, showPrograms, showCustomFilter
+    case toggleHiddenFiles, toggleFunctionKeyBar, toggleFolderBrackets
 
     public var label: String {
         switch self {
@@ -127,6 +130,18 @@ public enum CommandAction: String, CaseIterable, Codable {
         case .ftpNewConnection: return "FTP new connection"
         case .ftpDisconnect: return "FTP disconnect"
         case .ftpTransfers: return "FTP transfers window"
+        case .sortByName: return "Sort by name"
+        case .sortByExtension: return "Sort by extension"
+        case .sortByDate: return "Sort by date/time"
+        case .sortBySize: return "Sort by size"
+        case .sortUnsorted: return "Unsorted (file system order)"
+        case .reverseOrder: return "Reverse sort order"
+        case .showAllFiles: return "Show all files (remove the Show filter)"
+        case .showPrograms: return "Show programs only"
+        case .showCustomFilter: return "Show files matching a mask…"
+        case .toggleHiddenFiles: return "Show hidden (dot) files"
+        case .toggleFunctionKeyBar: return "Show the function key button bar"
+        case .toggleFolderBrackets: return "Show [brackets] around folder names"
         case .openTerminal: return "Open terminal here (in the active panel's folder)"
         case .swapPanels: return "Swap panels (left ↔ right, as Ctrl+U in Total Commander)"
         case .refresh: return "Refresh (re-read folder)"
@@ -192,6 +207,20 @@ public struct KeyBindings: Equatable, Codable {
         .ftpTransfers: [],
         .swapPanels: [KeyCombo(32, .control)],
         .openTerminal: [KeyCombo(17, [.control, .shift])],
+        // Total Commander's Ctrl+F3…F7 (sort) and Ctrl+F10…F12 (show) without F keys:
+        // ⌃3…⌃7 sort, ⌃8 / ⌃9 / ⌃0 show all / programs / custom.
+        .sortByName: [KeyCombo(20, .control)],
+        .sortByExtension: [KeyCombo(21, .control)],
+        .sortByDate: [KeyCombo(23, .control)],
+        .sortBySize: [KeyCombo(22, .control)],
+        .sortUnsorted: [KeyCombo(26, .control)],
+        .reverseOrder: [],
+        .showAllFiles: [KeyCombo(28, .control)],
+        .showPrograms: [KeyCombo(25, .control)],
+        .showCustomFilter: [KeyCombo(29, .control)],
+        .toggleHiddenFiles: [KeyCombo(47, [.command, .shift])],    // Finder's ⌘⇧.
+        .toggleFunctionKeyBar: [],
+        .toggleFolderBrackets: [],
         .refresh: [KeyCombo(15, .control)],
     ])
 

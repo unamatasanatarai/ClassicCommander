@@ -8,8 +8,12 @@ public struct DisplayOptions: Equatable, Codable {
     public var showFunctionKeyBar: Bool
     /// The floppy icon in the menu bar.
     public var showStatusBarIcon: Bool
+    /// View → Hidden files: list dotfiles (".git", ".zshrc").
+    public var showHiddenFiles: Bool = false
 
-    public init(showFolderBrackets: Bool = true, showFunctionKeyBar: Bool = true, showStatusBarIcon: Bool = true) {
+    public init(showFolderBrackets: Bool = true, showFunctionKeyBar: Bool = true, showStatusBarIcon: Bool = true,
+                showHiddenFiles: Bool = false) {
+        self.showHiddenFiles = showHiddenFiles
         self.showFolderBrackets = showFolderBrackets
         self.showFunctionKeyBar = showFunctionKeyBar
         self.showStatusBarIcon = showStatusBarIcon
@@ -20,6 +24,7 @@ public struct DisplayOptions: Equatable, Codable {
         showFolderBrackets = try c.decodeIfPresent(Bool.self, forKey: .showFolderBrackets) ?? true
         showFunctionKeyBar = try c.decodeIfPresent(Bool.self, forKey: .showFunctionKeyBar) ?? true
         showStatusBarIcon = try c.decodeIfPresent(Bool.self, forKey: .showStatusBarIcon) ?? true
+        showHiddenFiles = try c.decodeIfPresent(Bool.self, forKey: .showHiddenFiles) ?? false
     }
 
     public static let standard = DisplayOptions()

@@ -20,6 +20,9 @@ public final class PanelModel {
     public private(set) var virtualTitle: String?
     /// Quick Filter (⌃S) text; nil when the panel is not filtered. Cleared on changing directory.
     public private(set) var quickFilter: String?
+    /// View → Show: which files the panel lists (folders always). Unlike the Quick Filter it stays
+    /// when changing folders.
+    public private(set) var showFilter: PanelShowFilter = .all
     public private(set) var cursor: Int = 0
     public private(set) var scrollTop: Int = 0
     /// Last error from reading a directory, shown in the panel footer until the next navigation.
@@ -245,8 +248,39 @@ public final class PanelModel {
     }
 
     private func filtered(_ list: [FileEntry]) -> [FileEntry] {
-        guard let f = quickFilter else { return list }
-        return list.filter { $0.kind == .parent || Self.quickMatches($0.name, f) }
+        let shown = showFilter == .all ? list : list.filter { $0.kind != .file || showFilter.shows($0) }
+        guard let f = quickFilter else { return shown }
+        return shown.filter { $0.kind == .parent || Self.quickMatches($0.name, f) }
+    }
+
+    /// View → Show: All files / Programs / Custom mask. Marks on files it hides are removed,
+    /// so nothing invisible is copied or deleted.
+    public func setShowFilter(_ filter: PanelShowFilter, visibleRows: Int) {
+        let focused = currentEntry?.name
+        showFilter = filter
+        entries = filtered(allEntries)
+        marked = marked.intersection(entries.map(\.name))
+        cursor = focused.flatMap { n in entries.firstIndex { $0.name == n } } ?? 0
+        ensureCursorVisible(visibleRows: visibleRows)
+    }
+
+    /// View → Sort by: sets the column (ascending), keeping the direction if it already sorts by it.
+    public func setSort(_ column: SortColumn, visibleRows: Int) {
+        guard sortOrder.column != column else { return }
+        sort(by: column, visibleRows: visibleRows)
+    }
+
+    /// View → Reverse order.
+    public func reverseSort(visibleRows: Int) {
+        sort(by: sortOrder.column, visibleRows: visibleRows)
+    }
+
+    /// Re-reads the folder with another lister (e.g. hidden files shown or not), keeping the cursor.
+    public func setLister(_ newLister: DirectoryListing, visibleRows: Int) {
+        lister = newLister
+        let focused = currentEntry?.name
+        _ = load(directory, focusing: focused)
+        ensureCursorVisible(visibleRows: visibleRows)
     }
 
     // MARK: Sorting
@@ -427,6 +461,7 @@ public final class PanelModel {
         swap(&allEntries, &other.allEntries)
         swap(&virtualTitle, &other.virtualTitle)
         swap(&quickFilter, &other.quickFilter)
+        swap(&showFilter, &other.showFilter)
         swap(&cursor, &other.cursor)
         swap(&scrollTop, &other.scrollTop)
         swap(&errorMessage, &other.errorMessage)
@@ -461,5 +496,35 @@ public final class PanelModel {
             return "Access denied: \(url.lastPathComponent)"
         }
         return "Cannot read \(url.lastPathComponent): \(ns.localizedDescription)"
+    }
+}
+
+/// View → Show (Total Commander's Ctrl+F10 / F11 / F12).
+public enum PanelShowFilter: Equatable {
+    case all
+    /// Programs: executable files and the usual macOS program/script types.
+    case programs
+    /// A user-defined mask such as "*.txt *.md" or "*.* | *.tmp".
+    case mask(String)
+
+    static let programExtensions: Set<String> = ["app", "command", "tool", "sh", "bash", "zsh", "py", "pl", "rb", "pkg", "jar"]
+
+    public func shows(_ entry: FileEntry) -> Bool {
+        switch self {
+        case .all: return true
+        case .programs:
+            if let p = entry.permissions, p & 0o111 != 0 { return true }
+            return Self.programExtensions.contains((entry.name as NSString).pathExtension.lowercased())
+        case .mask(let text): return FileMask(text).matches(entry)
+        }
+    }
+
+    /// Shown in the panel footer while active.
+    public var label: String? {
+        switch self {
+        case .all: return nil
+        case .programs: return "Programs"
+        case .mask(let text): return text
+        }
     }
 }

@@ -304,6 +304,8 @@ public final class PanelView: NSView {
                 case .date?:
                     // Too narrow for the time: show just the date rather than a cut-off time.
                     drawCell(formatter.date(entry, includeTime: col.width >= Self.fullDateWidth), col, y, color, digitFont)
+                case .unsorted?:
+                    break   // not a column
                 case nil:
                     drawCell(formatter.attributes(entry), col, y, color, digitFont)
                 }
@@ -328,7 +330,8 @@ public final class PanelView: NSView {
 
     private func drawStatus(_ l: Layout) {
         guard !isStatusCovered else { return }
-        let text = busyText ?? model.errorMessage ?? formatter.summary(model.realEntries, selected: model.selectionTotals)
+        var text = busyText ?? model.errorMessage ?? formatter.summary(model.realEntries, selected: model.selectionTotals)
+        if busyText == nil, model.errorMessage == nil, let filter = model.showFilter.label { text = "[Show: \(filter)]  " + text }
         drawText(text, in: l.status.insetBy(dx: 4, dy: 0), color: palette.chromeText, font: PanelFont.regular)
     }
 

@@ -26,6 +26,7 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
     private let functionBarCheckbox = NSButton(checkboxWithTitle: "Show function key buttons (Copy, Move, NewFolder, Delete)",
                                                target: nil, action: nil)
     private let statusIconCheckbox = NSButton(checkboxWithTitle: "Show icon in the menu bar", target: nil, action: nil)
+    let hiddenFilesCheckbox = NSButton(checkboxWithTitle: "Show hidden files (names starting with a dot)  ⌘⇧.", target: nil, action: nil)
     private let sizeCheckbox = NSButton(checkboxWithTitle: "Space calculates the size of folders",
                                         target: nil, action: nil)
     /// FTP/SFTP transfers at the same time: total, uploads, downloads (0 = the total).
@@ -63,6 +64,16 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         window.center()
         sync()
         isLive = true
+        // Settings changed elsewhere (View menu toggles) show up here and are not overwritten.
+        NotificationCenter.default.addObserver(self, selector: #selector(storeChanged), name: SettingsStore.didChange, object: store)
+    }
+
+    @objc private func storeChanged() {
+        guard store.settings != working else { return }
+        isLive = false
+        working = store.settings
+        isLive = true
+        sync()
     }
 
     @available(*, unavailable)
@@ -152,7 +163,9 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         functionBarCheckbox.action = #selector(displayToggled)
         statusIconCheckbox.target = self
         statusIconCheckbox.action = #selector(displayToggled)
-        let stack = NSStackView(views: [title, bracketsCheckbox, functionBarCheckbox, statusIconCheckbox])
+        hiddenFilesCheckbox.target = self
+        hiddenFilesCheckbox.action = #selector(displayToggled)
+        let stack = NSStackView(views: [title, bracketsCheckbox, functionBarCheckbox, statusIconCheckbox, hiddenFilesCheckbox])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
@@ -320,6 +333,7 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         bracketsCheckbox.state = working.display.showFolderBrackets ? .on : .off
         functionBarCheckbox.state = working.display.showFunctionKeyBar ? .on : .off
         statusIconCheckbox.state = working.display.showStatusBarIcon ? .on : .off
+        hiddenFilesCheckbox.state = working.display.showHiddenFiles ? .on : .off
         quickSearchPopup.selectItem(at: QuickSearchOptions.Activation.allCases.firstIndex(of: working.quickSearch.activation) ?? 0)
         sizeCheckbox.state = working.operation.spaceCalculatesFolderSize ? .on : .off
         moveDownCheckbox.state = working.operation.spaceMovesCursorDown ? .on : .off
@@ -371,6 +385,7 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         working.display.showFolderBrackets = bracketsCheckbox.state == .on
         working.display.showFunctionKeyBar = functionBarCheckbox.state == .on
         working.display.showStatusBarIcon = statusIconCheckbox.state == .on
+        working.display.showHiddenFiles = hiddenFilesCheckbox.state == .on
         previewActive.display = working.display
         previewInactive.display = working.display
     }

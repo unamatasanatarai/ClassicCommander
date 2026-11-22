@@ -20,8 +20,21 @@ public final class CommanderView: NSView {
     /// Open Lister windows (several can be open, as in Total Commander).
     public private(set) var listers: [ListerWindowController] = []
 
+    /// Saves settings changed from the View menu (hidden files, button bar, brackets).
+    public var onSettingsChange: ((Settings) -> Void)?
+    /// Last mask typed for View → Show → Custom (⌃F12).
+    private var lastShowMask = "*.txt *.md"
+
+    /// The lister for folders on this Mac, following View → Hidden files.
+    public var localLister: FileSystemLister { FileSystemLister(showHidden: settings.display.showHiddenFiles) }
+
     public var settings: Settings = .standard {
         didSet {
+            for view in [leftView, rightView] where !view.model.isRemote {
+                if (view.model.lister as? FileSystemLister)?.showHidden != settings.display.showHiddenFiles {
+                    view.model.setLister(localLister, visibleRows: view.visibleRows)
+                }
+            }
             for view in [leftView, rightView] {
                 view.theme = settings.theme
                 view.display = settings.display
@@ -293,6 +306,29 @@ public final class CommanderView: NSView {
         case .ftpTransfers: ftp.transfersWindow.present()
         case .swapPanels: swapPanels()
         case .openTerminal: openTerminal()
+        case .sortByName: panel.model.setSort(.name, visibleRows: rows)
+        case .sortByExtension: panel.model.setSort(.ext, visibleRows: rows)
+        case .sortByDate: panel.model.setSort(.date, visibleRows: rows)
+        case .sortBySize: panel.model.setSort(.size, visibleRows: rows)
+        case .sortUnsorted: panel.model.setSort(.unsorted, visibleRows: rows)
+        case .reverseOrder: panel.model.reverseSort(visibleRows: rows)
+        case .showAllFiles: panel.model.setShowFilter(.all, visibleRows: rows)
+        case .showPrograms: panel.model.setShowFilter(.programs, visibleRows: rows)
+        case .showCustomFilter:
+            guard let mask = askShowMask() else { return }
+            panel.model.setShowFilter(mask.isEmpty ? .all : .mask(mask), visibleRows: rows)
+        case .toggleHiddenFiles:
+            var s = settings
+            s.display.showHiddenFiles.toggle()
+            change(s)
+        case .toggleFunctionKeyBar:
+            var s = settings
+            s.display.showFunctionKeyBar.toggle()
+            change(s)
+        case .toggleFolderBrackets:
+            var s = settings
+            s.display.showFolderBrackets.toggle()
+            change(s)
         case .refresh:
             if panel.model.isRemote { ftp.refresh(panel) } else { panel.model.reload(visibleRows: rows); panel.invalidateVolumeInfo() }
         case .quickFilter:
@@ -303,6 +339,29 @@ public final class CommanderView: NSView {
             return
         }
         panel.needsDisplay = true
+    }
+
+    /// Applies a settings change made here and has it saved (Options shows it too).
+    private func change(_ new: Settings) {
+        settings = new
+        onSettingsChange?(new)
+    }
+
+    /// View → Show → Custom (⌃F12): asks for a mask like "*.txt *.md" or "*.* | *.tmp".
+    private func askShowMask() -> String? {
+        let alert = NSAlert()
+        alert.messageText = "Show only files matching"
+        alert.informativeText = "e.g. *.txt *.md   or   *.* | *.tmp *.log  (after | : excluded). Folders are always shown. Empty shows all files."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        if case .mask(let current) = activeView.model.showFilter { field.stringValue = current } else { field.stringValue = lastShowMask }
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        alert.addButton(withTitle: "Show")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let text = field.stringValue.trimmingCharacters(in: .whitespaces)
+        if !text.isEmpty { lastShowMask = text }
+        return text
     }
 
     /// Opens the configured terminal app in the active panel's folder (Options → Operation).

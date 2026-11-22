@@ -65,6 +65,8 @@ extension FileSystemLister {
 
 public enum SortColumn: Equatable, CaseIterable {
     case name, ext, size, date
+    /// The order the file system lists them in (folders still first), Total Commander's "Unsorted".
+    case unsorted
 }
 
 public struct SortOrder: Equatable {
@@ -82,7 +84,16 @@ public enum EntrySorting {
     /// (directories have no size or extension, so those sorts fall back to name), and a descending
     /// sort reverses each group, as Total Commander does.
     public static func sorted(_ entries: [FileEntry], by order: SortOrder = SortOrder()) -> [FileEntry] {
-        entries.sorted { a, b in
+        if order.column == .unsorted {
+            // Keep the listing order within each group; "reverse" reverses it.
+            let indexed = entries.enumerated().sorted { x, y in
+                let rx = rank(x.element.kind), ry = rank(y.element.kind)
+                if rx != ry { return rx < ry }
+                return order.ascending ? x.offset < y.offset : x.offset > y.offset
+            }
+            return indexed.map(\.element)
+        }
+        return entries.sorted { a, b in
             let ra = rank(a.kind), rb = rank(b.kind)
             if ra != rb { return ra < rb }
             let result = compare(a, b, column: a.kind == .file ? order.column : .name)
@@ -94,7 +105,7 @@ public enum EntrySorting {
         let byName = a.name.localizedStandardCompare(b.name)
         let primary: ComparisonResult
         switch column {
-        case .name:
+        case .name, .unsorted:
             return byName
         case .ext:
             primary = a.displayExtension.localizedStandardCompare(b.displayExtension)

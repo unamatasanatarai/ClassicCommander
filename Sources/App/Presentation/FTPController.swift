@@ -170,7 +170,7 @@ public final class FTPController {
         sessions[session.id] = nil
         session.client.close()
         let back = localBefore[side] ?? FileManager.default.homeDirectoryForCurrentUser
-        panel.model.switchSource(FileSystemLister(), to: back, visibleRows: panel.visibleRows)
+        panel.model.switchSource(commander.localLister, to: back, visibleRows: panel.visibleRows)
         panel.remote = nil
         panel.needsDisplay = true
         commander.updateFunctionBar()

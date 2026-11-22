@@ -1,7 +1,7 @@
 import Cocoa
 import os
 
-public final class AppDelegate: NSObject, NSApplicationDelegate {
+public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, NSMenuDelegate {
     private static let logger = Logger(subsystem: AppConfig.bundleIdentifier, category: "Application")
 
     private var statusBarController: StatusBarController?
@@ -16,6 +16,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        // No "Show Tab Bar / Show All Tabs" (macOS adds them to a menu named View).
+        NSWindow.allowsAutomaticWindowTabbing = false
         setupMainMenu()
 
         updateStatusBarIcon()
@@ -75,34 +77,47 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editMenuItem.submenu = editMenu
 
+        // View Menu (Total Commander's "Show" menu): sorting, filters and what is shown, for the active panel.
+        let viewMenuItem = NSMenuItem()
+        mainMenu.addItem(viewMenuItem)
+        let viewMenu = NSMenu(title: "View")
+        viewMenu.delegate = self
+        let sortMenu: [CommandAction] = [.sortByName, .sortByExtension, .sortByDate, .sortBySize, .sortUnsorted, .reverseOrder]
+        let showMenu: [CommandAction] = [.showAllFiles, .showPrograms, .showCustomFilter]
+        let toggles: [CommandAction] = [.toggleHiddenFiles, .toggleFunctionKeyBar, .toggleFolderBrackets]
+        for (i, group) in [sortMenu, showMenu, toggles, [.quickFilter, .refresh, .swapPanels]].enumerated() {
+            if i > 0 { viewMenu.addItem(.separator()) }
+            for action in group {
+                let item = NSMenuItem(title: Self.menuTitles[action] ?? action.label, action: #selector(netCommand(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = action.rawValue
+                viewMenu.addItem(item)
+            }
+        }
+        viewMenuItem.submenu = viewMenu
+
         // Commands Menu (Total Commander's tools)
         let commandsMenuItem = NSMenuItem()
         mainMenu.addItem(commandsMenuItem)
         let commandsMenu = NSMenu(title: "Commands")
-        let findItem = NSMenuItem(title: "Find Files…  (⌥7)", action: #selector(findFilesFromMenu), keyEquivalent: "")
-        findItem.target = self
-        commandsMenu.addItem(findItem)
-        let syncItem = NSMenuItem(title: "Synchronize Directories…", action: #selector(synchronizeFromMenu), keyEquivalent: "")
-        syncItem.target = self
-        commandsMenu.addItem(syncItem)
-        commandsMenu.addItem(.separator())
-        let terminalItem = NSMenuItem(title: "Open Terminal Here  (⌃⇧T)", action: #selector(netCommand(_:)), keyEquivalent: "")
-        terminalItem.target = self
-        terminalItem.representedObject = CommandAction.openTerminal.rawValue
-        commandsMenu.addItem(terminalItem)
-        let swapItem = NSMenuItem(title: "Swap Panels  (⌃U)", action: #selector(netCommand(_:)), keyEquivalent: "")
-        swapItem.target = self
-        swapItem.representedObject = CommandAction.swapPanels.rawValue
-        commandsMenu.addItem(swapItem)
+        commandsMenu.delegate = self
+        for action in [CommandAction.findFiles, .synchronizeDirs, nil, .openTerminal, .swapPanels] {
+            guard let action = action else { commandsMenu.addItem(.separator()); continue }
+            let item = NSMenuItem(title: Self.menuTitles[action] ?? action.label, action: #selector(netCommand(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = action.rawValue
+            commandsMenu.addItem(item)
+        }
         commandsMenuItem.submenu = commandsMenu
 
         // Net Menu (FTP, as in Total Commander)
         let netMenuItem = NSMenuItem()
         mainMenu.addItem(netMenuItem)
         let netMenu = NSMenu(title: "Net")
-        for (title, action) in [("FTP Connect…  (⌃F)", CommandAction.ftpConnect),
-                                ("FTP New Connection…  (⌃N)", .ftpNewConnection),
-                                ("FTP Disconnect  (⌃⇧F)", .ftpDisconnect),
+        netMenu.delegate = self
+        for (title, action) in [("FTP Connect…", CommandAction.ftpConnect),
+                                ("FTP New Connection…", .ftpNewConnection),
+                                ("FTP Disconnect", .ftpDisconnect),
                                 ("Transfers…", .ftpTransfers)] {
             let item = NSMenuItem(title: title, action: #selector(netCommand(_:)), keyEquivalent: "")
             item.target = self
@@ -151,20 +166,69 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    static let menuTitles: [CommandAction: String] = [
+        .findFiles: "Find Files…", .synchronizeDirs: "Synchronize Directories…", .openTerminal: "Open Terminal Here",
+        .ftpConnect: "FTP Connect…", .ftpNewConnection: "FTP New Connection…", .ftpDisconnect: "FTP Disconnect", .ftpTransfers: "Transfers…",
+        .sortByName: "Sort by Name", .sortByExtension: "Sort by Extension", .sortByDate: "Sort by Date/Time",
+        .sortBySize: "Sort by Size", .sortUnsorted: "Unsorted", .reverseOrder: "Reverse Order",
+        .showAllFiles: "All Files", .showPrograms: "Programs", .showCustomFilter: "Custom Filter…",
+        .toggleHiddenFiles: "Hidden Files", .toggleFunctionKeyBar: "Function Key Buttons", .toggleFolderBrackets: "[Brackets] Around Folders",
+        .quickFilter: "Quick Filter…", .refresh: "Refresh", .swapPanels: "Swap Panels",
+    ]
+
+    /// Commander menus show each item's current key (Options → Shortcuts may change it) in a
+    /// right-aligned column, like real menu shortcuts. They are drawn, not registered as menu key
+    /// equivalents, so the keys keep reaching text fields and the shortcut recorder.
+    public func menuNeedsUpdate(_ menu: NSMenu) {
+        guard let keys = commanderView?.settings.keys else { return }
+        let font = NSFont.menuFont(ofSize: 0)
+        var rows: [(NSMenuItem, String, String?)] = []
+        for item in menu.items {
+            guard let raw = item.representedObject as? String, let action = CommandAction(rawValue: raw) else { continue }
+            rows.append((item, Self.menuTitles[action] ?? action.label, keys.keys(for: action).first?.displayName))
+        }
+        func width(_ s: String) -> CGFloat { (s as NSString).size(withAttributes: [.font: font]).width }
+        let titleWidth = rows.map { width($0.1) }.max() ?? 0
+        let keyWidth = rows.compactMap { $0.2.map(width) }.max() ?? 0
+        let style = NSMutableParagraphStyle()
+        style.tabStops = [NSTextTab(textAlignment: .right, location: ceil(titleWidth + 40 + keyWidth))]
+        for (item, title, key) in rows {
+            item.title = title
+            guard let key = key else { item.attributedTitle = nil; continue }
+            item.attributedTitle = NSAttributedString(string: "\(title)\t\(key)", attributes: [.font: font, .paragraphStyle: style])
+        }
+    }
+
+    /// Ticks for the active panel's sort, Show filter and the View toggles.
+    public func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        guard let raw = item.representedObject as? String, let action = CommandAction(rawValue: raw),
+              let commander = commanderView else { return true }
+        let panel = commander.activeView.model
+        let display = commander.settings.display
+        var on: Bool?
+        switch action {
+        case .sortByName: on = panel.sortOrder.column == .name
+        case .sortByExtension: on = panel.sortOrder.column == .ext
+        case .sortByDate: on = panel.sortOrder.column == .date
+        case .sortBySize: on = panel.sortOrder.column == .size
+        case .sortUnsorted: on = panel.sortOrder.column == .unsorted
+        case .reverseOrder: on = !panel.sortOrder.ascending
+        case .showAllFiles: on = panel.showFilter == .all
+        case .showPrograms: on = panel.showFilter == .programs
+        case .showCustomFilter: if case .mask = panel.showFilter { on = true } else { on = false }
+        case .toggleHiddenFiles: on = display.showHiddenFiles
+        case .toggleFunctionKeyBar: on = display.showFunctionKeyBar
+        case .toggleFolderBrackets: on = display.showFolderBrackets
+        default: break
+        }
+        if let on = on { item.state = on ? .on : .off }
+        return true
+    }
+
     @objc private func netCommand(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String, let action = CommandAction(rawValue: raw) else { return }
         showWindow()
         commanderView?.perform(action)
-    }
-
-    @objc private func findFilesFromMenu() {
-        showWindow()
-        commanderView?.perform(.findFiles)
-    }
-
-    @objc private func synchronizeFromMenu() {
-        showWindow()
-        commanderView?.perform(.synchronizeDirs)
     }
 
     @objc private func showOptions() {
@@ -220,6 +284,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         let commander = CommanderView(model: model)
         commander.settings = settings.settings
+        commander.onSettingsChange = { [weak self] new in self?.settings.save(new) }
         NotificationCenter.default.addObserver(self, selector: #selector(settingsDidChange),
                                                name: SettingsStore.didChange, object: settings)
         commander.onOpenFile = { url in
