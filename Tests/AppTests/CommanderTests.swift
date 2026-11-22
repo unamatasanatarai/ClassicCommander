@@ -65,6 +65,36 @@ public enum CommanderTests {
     }
 
     public static func run(testRunner: (String, () throws -> Void) -> Void) {
+        testRunner("Menus show real, aligned shortcuts but never take the keys (they keep reaching the panels)") {
+            let delegate = AppDelegate()
+            let ctrl3 = AppDelegate.keyEquivalent(for: KeyCombo(20, .control))
+            try expect(ctrl3?.key == "3" && ctrl3?.modifiers == .control, "⌃3")
+            let hidden = AppDelegate.keyEquivalent(for: KeyCombo(47, [.command, .shift]))
+            try expect(hidden?.key == "." && hidden?.modifiers == [.command, .shift], "⇧⌘.")
+            try expect(AppDelegate.keyEquivalent(for: KeyCombo(99))?.key == String(Character(UnicodeScalar(NSF3FunctionKey)!)), "F3")
+            try expect(AppDelegate.keyEquivalent(for: KeyCombo(3, .control))?.key == "f", "⌃F letter")
+
+            let menu = NSMenu(title: "View")
+            menu.delegate = delegate
+            var fired = false
+            final class Target: NSObject { var hit: () -> Void = {}; @objc func go(_ s: Any?) { hit() } }
+            let target = Target()
+            target.hit = { fired = true }
+            let item = NSMenuItem(title: "Sort by Name", action: #selector(Target.go(_:)), keyEquivalent: "")
+            item.target = target
+            item.representedObject = CommandAction.sortByName.rawValue
+            menu.addItem(item)
+            let view = CommanderView(model: CommanderModel(left: PanelModel(directory: FileManager.default.temporaryDirectory),
+                                                           right: PanelModel(directory: FileManager.default.temporaryDirectory)))
+            delegate.commanderView = view
+            delegate.menuNeedsUpdate(menu)                    // the menu opens: the shortcut is shown
+            try expect(item.keyEquivalent == "3" && item.keyEquivalentModifierMask == .control, "shown while open")
+            delegate.menuDidClose(menu)                       // and removed when it closes
+            let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .control, timestamp: 0, windowNumber: 0,
+                                         context: nil, characters: "3", charactersIgnoringModifiers: "3", isARepeat: false, keyCode: 20)!
+            try expect(!menu.performKeyEquivalent(with: event) && !fired, "the menu does not take ⌃3")
+        }
+
         testRunner("View menu: sort by column / unsorted / reverse, Show filters that stay, hidden files saved") {
             let fm = FileManager.default
             let dir = fm.temporaryDirectory.appendingPathComponent("ViewMenu-\(UUID().uuidString)").resolvingSymlinksInPath()

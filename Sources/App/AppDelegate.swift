@@ -9,7 +9,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
     // Lazy window initialization: backing store and view hierarchy are allocated only on demand,
     // saving ~16MB of resident memory during routine background/status bar operation.
     private lazy var window: NSWindow = createWindow()
-    private var commanderView: CommanderView?
+    var commanderView: CommanderView?
     private let settings = SettingsStore()
     private var quitGate = DoublePressGate(interval: 1.5)
     private lazy var optionsController = OptionsWindowController(store: settings)
@@ -177,9 +177,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
     ]
 
     /// Commander menus show each item's current key (Options → Shortcuts may change it) as a real
-    /// menu shortcut, so macOS draws and aligns it like any other. The menus never *handle* those
-    /// keys (menuHasKeyEquivalent returns false): keys keep going to the panels, text fields and
-    /// the shortcut recorder exactly as before.
+    /// menu shortcut, so macOS draws and aligns it like any other. The shortcut exists only while
+    /// the menu is open (removed in menuDidClose), so a closed menu never takes a key: keys keep
+    /// going to the panels, text fields and the shortcut recorder exactly as before.
     public func menuNeedsUpdate(_ menu: NSMenu) {
         guard let keys = commanderView?.settings.keys else { return }
         for item in menu.items {
@@ -195,6 +195,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         }
     }
 
+    public func menuDidClose(_ menu: NSMenu) {
+        for item in menu.items where item.representedObject is String {
+            item.keyEquivalent = ""
+            item.keyEquivalentModifierMask = []
+        }
+    }
+
+    /// Key presses never consult these menus (and never trigger menuNeedsUpdate).
     public func menuHasKeyEquivalent(_ menu: NSMenu, for event: NSEvent, target: AutoreleasingUnsafeMutablePointer<AnyObject?>,
                                      action: AutoreleasingUnsafeMutablePointer<Selector?>) -> Bool {
         false
