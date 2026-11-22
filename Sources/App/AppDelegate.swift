@@ -176,27 +176,51 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         .quickFilter: "Quick Filter…", .refresh: "Refresh", .swapPanels: "Swap Panels",
     ]
 
-    /// Commander menus show each item's current key (Options → Shortcuts may change it) in a
-    /// right-aligned column, like real menu shortcuts. They are drawn, not registered as menu key
-    /// equivalents, so the keys keep reaching text fields and the shortcut recorder.
+    /// Commander menus show each item's current key (Options → Shortcuts may change it) as a real
+    /// menu shortcut, so macOS draws and aligns it like any other. The menus never *handle* those
+    /// keys (menuHasKeyEquivalent returns false): keys keep going to the panels, text fields and
+    /// the shortcut recorder exactly as before.
     public func menuNeedsUpdate(_ menu: NSMenu) {
         guard let keys = commanderView?.settings.keys else { return }
-        let font = NSFont.menuFont(ofSize: 0)
-        var rows: [(NSMenuItem, String, String?)] = []
         for item in menu.items {
             guard let raw = item.representedObject as? String, let action = CommandAction(rawValue: raw) else { continue }
-            rows.append((item, Self.menuTitles[action] ?? action.label, keys.keys(for: action).first?.displayName))
+            item.title = Self.menuTitles[action] ?? action.label
+            if let combo = keys.keys(for: action).first, let equivalent = Self.keyEquivalent(for: combo) {
+                item.keyEquivalent = equivalent.key
+                item.keyEquivalentModifierMask = equivalent.modifiers
+            } else {
+                item.keyEquivalent = ""
+                item.keyEquivalentModifierMask = []
+            }
         }
-        func width(_ s: String) -> CGFloat { (s as NSString).size(withAttributes: [.font: font]).width }
-        let titleWidth = rows.map { width($0.1) }.max() ?? 0
-        let keyWidth = rows.compactMap { $0.2.map(width) }.max() ?? 0
-        let style = NSMutableParagraphStyle()
-        style.tabStops = [NSTextTab(textAlignment: .right, location: ceil(titleWidth + 40 + keyWidth))]
-        for (item, title, key) in rows {
-            item.title = title
-            guard let key = key else { item.attributedTitle = nil; continue }
-            item.attributedTitle = NSAttributedString(string: "\(title)\t\(key)", attributes: [.font: font, .paragraphStyle: style])
-        }
+    }
+
+    public func menuHasKeyEquivalent(_ menu: NSMenu, for event: NSEvent, target: AutoreleasingUnsafeMutablePointer<AnyObject?>,
+                                     action: AutoreleasingUnsafeMutablePointer<Selector?>) -> Bool {
+        false
+    }
+
+    /// The menu-shortcut form of a key (character plus modifiers), or nil when a menu cannot show it.
+    static func keyEquivalent(for combo: KeyCombo) -> (key: String, modifiers: NSEvent.ModifierFlags)? {
+        var mods: NSEvent.ModifierFlags = []
+        if combo.modifiers.contains(.control) { mods.insert(.control) }
+        if combo.modifiers.contains(.option) { mods.insert(.option) }
+        if combo.modifiers.contains(.shift) { mods.insert(.shift) }
+        if combo.modifiers.contains(.command) { mods.insert(.command) }
+        func fn(_ code: Int) -> String { String(Character(UnicodeScalar(code)!)) }
+        let special: [UInt16: String] = [
+            KeyCode.returnKey: "\r", KeyCode.tab: "\t", KeyCode.space: " ", KeyCode.delete: "\u{8}", KeyCode.escape: "\u{1b}",
+            KeyCode.forwardDelete: fn(NSDeleteFunctionKey), KeyCode.left: fn(NSLeftArrowFunctionKey), KeyCode.right: fn(NSRightArrowFunctionKey),
+            KeyCode.up: fn(NSUpArrowFunctionKey), KeyCode.down: fn(NSDownArrowFunctionKey), KeyCode.home: fn(NSHomeFunctionKey),
+            KeyCode.end: fn(NSEndFunctionKey), KeyCode.pageUp: fn(NSPageUpFunctionKey), KeyCode.pageDown: fn(NSPageDownFunctionKey),
+            122: fn(NSF1FunctionKey), 120: fn(NSF2FunctionKey), 99: fn(NSF3FunctionKey), 118: fn(NSF4FunctionKey),
+            96: fn(NSF5FunctionKey), 97: fn(NSF6FunctionKey), 98: fn(NSF7FunctionKey), 100: fn(NSF8FunctionKey),
+            101: fn(NSF9FunctionKey), 109: fn(NSF10FunctionKey), 103: fn(NSF11FunctionKey), 111: fn(NSF12FunctionKey),
+        ]
+        if let key = special[combo.keyCode] { return (key, mods) }
+        // Letters, digits and punctuation: their (unshifted) character.
+        guard let name = KeyCode.names[combo.keyCode], name.count == 1 else { return nil }
+        return (name.lowercased(), mods)
     }
 
     /// Ticks for the active panel's sort, Show filter and the View toggles.
