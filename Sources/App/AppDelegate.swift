@@ -1,0 +1,252 @@
+import Cocoa
+import os
+
+public final class AppDelegate: NSObject, NSApplicationDelegate {
+    private static let logger = Logger(subsystem: AppConfig.bundleIdentifier, category: "Application")
+
+    private var statusBarController: StatusBarController?
+
+    // Lazy window initialization: backing store and view hierarchy are allocated only on demand,
+    // saving ~16MB of resident memory during routine background/status bar operation.
+    private lazy var window: NSWindow = createWindow()
+    private var commanderView: CommanderView?
+    private let settings = SettingsStore()
+    private var quitGate = DoublePressGate(interval: 1.5)
+    private lazy var optionsController = OptionsWindowController(store: settings)
+
+    public func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.regular)
+        setupMainMenu()
+
+        updateStatusBarIcon()
+        showWindow()
+        Self.logger.info("\(AppConfig.appName, privacy: .public) started successfully.")
+    }
+
+    public func showWindow() {
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func setupMainMenu() {
+        let mainMenu = NSMenu()
+
+        // Application Menu
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "About \(AppConfig.appName)", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
+        let prefsItem = NSMenuItem(title: "Preferences…", action: #selector(showOptions), keyEquivalent: ",")
+        prefsItem.target = self
+        appMenu.addItem(prefsItem)
+        appMenu.addItem(NSMenuItem.separator())
+
+        let hideItem = NSMenuItem(title: "Hide \(AppConfig.appName)", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(hideItem)
+
+        let hideOthersItem = NSMenuItem(title: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthersItem.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(hideOthersItem)
+
+        appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
+
+        // ⌘Q must be pressed twice so a stray keystroke never closes the commander.
+        let quitItem = NSMenuItem(title: "Quit \(AppConfig.appName)", action: #selector(quitPressed), keyEquivalent: "q")
+        quitItem.target = self
+        appMenu.addItem(quitItem)
+        appMenuItem.submenu = appMenu
+
+        // Edit Menu: text fields (FTP dialogs, Find Files, Options…) get ⌘X/⌘C/⌘V/⌘A/⌘Z only
+        // through these menu items, which go to whatever field has the focus.
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redoItem = editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Delete", action: #selector(NSText.delete(_:)), keyEquivalent: "")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenuItem.submenu = editMenu
+
+        // Commands Menu (Total Commander's tools)
+        let commandsMenuItem = NSMenuItem()
+        mainMenu.addItem(commandsMenuItem)
+        let commandsMenu = NSMenu(title: "Commands")
+        let findItem = NSMenuItem(title: "Find Files…  (⌥7)", action: #selector(findFilesFromMenu), keyEquivalent: "")
+        findItem.target = self
+        commandsMenu.addItem(findItem)
+        let syncItem = NSMenuItem(title: "Synchronize Directories…", action: #selector(synchronizeFromMenu), keyEquivalent: "")
+        syncItem.target = self
+        commandsMenu.addItem(syncItem)
+        commandsMenu.addItem(.separator())
+        let terminalItem = NSMenuItem(title: "Open Terminal Here  (⌃⇧T)", action: #selector(netCommand(_:)), keyEquivalent: "")
+        terminalItem.target = self
+        terminalItem.representedObject = CommandAction.openTerminal.rawValue
+        commandsMenu.addItem(terminalItem)
+        let swapItem = NSMenuItem(title: "Swap Panels  (⌃U)", action: #selector(netCommand(_:)), keyEquivalent: "")
+        swapItem.target = self
+        swapItem.representedObject = CommandAction.swapPanels.rawValue
+        commandsMenu.addItem(swapItem)
+        commandsMenuItem.submenu = commandsMenu
+
+        // Net Menu (FTP, as in Total Commander)
+        let netMenuItem = NSMenuItem()
+        mainMenu.addItem(netMenuItem)
+        let netMenu = NSMenu(title: "Net")
+        for (title, action) in [("FTP Connect…  (⌃F)", CommandAction.ftpConnect),
+                                ("FTP New Connection…  (⌃N)", .ftpNewConnection),
+                                ("FTP Disconnect  (⌃⇧F)", .ftpDisconnect),
+                                ("Transfers…", .ftpTransfers)] {
+            let item = NSMenuItem(title: title, action: #selector(netCommand(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = action.rawValue
+            netMenu.addItem(item)
+            if action == .ftpDisconnect { netMenu.addItem(.separator()) }
+        }
+        netMenuItem.submenu = netMenu
+
+        // Configuration Menu (Total Commander's home of Options…)
+        let configMenuItem = NSMenuItem()
+        mainMenu.addItem(configMenuItem)
+        let configMenu = NSMenu(title: "Configuration")
+        let optionsItem = NSMenuItem(title: "Options…", action: #selector(showOptions), keyEquivalent: "")
+        optionsItem.target = self
+        configMenu.addItem(optionsItem)
+        configMenuItem.submenu = configMenu
+
+        // Window Menu
+        let windowMenuItem = NSMenuItem()
+        mainMenu.addItem(windowMenuItem)
+
+        let windowMenu = NSMenu(title: "Window")
+        let openWindowItem = NSMenuItem(title: "Open Window", action: #selector(openWindowFromMenu), keyEquivalent: "o")
+        openWindowItem.target = self
+        windowMenu.addItem(openWindowItem)
+        windowMenu.addItem(NSMenuItem.separator())
+
+        let closeItem = NSMenuItem(title: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowMenu.addItem(closeItem)
+        let minimizeItem = NSMenuItem(title: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(minimizeItem)
+        windowMenuItem.submenu = windowMenu
+
+        NSApp.mainMenu = mainMenu
+        NSApp.windowsMenu = windowMenu
+    }
+
+    @objc private func quitPressed() {
+        if quitGate.press() {
+            NSApp.terminate(nil)
+        } else if let commander = commanderView, window.isVisible {
+            commander.showHint("Press ⌘Q again to quit")
+        } else {
+            NSSound.beep()
+        }
+    }
+
+    @objc private func netCommand(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let action = CommandAction(rawValue: raw) else { return }
+        showWindow()
+        commanderView?.perform(action)
+    }
+
+    @objc private func findFilesFromMenu() {
+        showWindow()
+        commanderView?.perform(.findFiles)
+    }
+
+    @objc private func synchronizeFromMenu() {
+        showWindow()
+        commanderView?.perform(.synchronizeDirs)
+    }
+
+    @objc private func showOptions() {
+        optionsController.present()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func settingsDidChange() {
+        applySettings()
+    }
+
+    /// Shows or removes the floppy icon in the menu bar (Options → Display).
+    private func updateStatusBarIcon() {
+        if settings.display.showStatusBarIcon {
+            guard statusBarController == nil else { return }
+            let controller = StatusBarController()
+            controller.onOpenWindow = { [weak self] in self?.showWindow() }
+            controller.refreshMenu()
+            statusBarController = controller
+        } else {
+            statusBarController?.cleanup()
+            statusBarController = nil
+        }
+    }
+
+    private func applySettings() {
+        updateStatusBarIcon()
+        commanderView?.settings = settings.settings
+        window.backgroundColor = settings.theme.chrome.nsColor
+    }
+
+    @objc private func openWindowFromMenu() {
+        showWindow()
+    }
+
+    private func createWindow() -> NSWindow {
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1100, height: 680),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        win.title = AppConfig.appName
+        win.minSize = NSSize(width: 640, height: 320)
+        win.backgroundColor = settings.theme.chrome.nsColor
+        win.center()
+        win.setFrameAutosaveName("MainWindow")
+
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let model = CommanderModel(
+            left: PanelModel(directory: home),
+            right: PanelModel(directory: URL(fileURLWithPath: "/"))
+        )
+        let commander = CommanderView(model: model)
+        commander.settings = settings.settings
+        NotificationCenter.default.addObserver(self, selector: #selector(settingsDidChange),
+                                               name: SettingsStore.didChange, object: settings)
+        commander.onOpenFile = { url in
+            NSWorkspace.shared.open(url)
+        }
+        self.commanderView = commander
+
+        win.contentView = commander
+        win.initialFirstResponder = commander
+        win.makeFirstResponder(commander)
+        win.delegate = self
+        return win
+    }
+
+    public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showWindow()
+        return true
+    }
+
+    public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        return false
+    }
+}
+
+extension AppDelegate: NSWindowDelegate {
+    /// Panels are not watched for changes yet; re-read them whenever the window comes back to the front.
+    public func windowDidBecomeKey(_ notification: Notification) {
+        commanderView?.reloadPanels()
+    }
+}
