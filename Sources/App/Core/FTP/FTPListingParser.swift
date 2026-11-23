@@ -1,6 +1,14 @@
 import Foundation
 
 /// One entry of a remote directory listing.
+extension Int64 {
+    /// Addition that stops at Int64.max instead of crashing (totals of server-reported sizes).
+    public func addingSaturated(_ other: Int64) -> Int64 {
+        let (sum, overflow) = addingReportingOverflow(other)
+        return overflow ? (other > 0 ? .max : .min) : sum
+    }
+}
+
 public struct RemoteEntry: Equatable {
     public let name: String
     public let isDirectory: Bool
@@ -27,6 +35,15 @@ public enum FTPListingParser {
             }
         }
         .filter { isSafeName($0.name) }
+    }
+
+    /// Sizes come from the server: negative ones become 0, absurd ones are capped (1 PiB),
+    /// so totals over many entries cannot overflow.
+    public static let maxSize: Int64 = 1 << 50
+
+    static func size(_ text: Substring?) -> Int64? {
+        guard let text = text, let v = Int64(text) else { return nil }
+        return Swift.min(Swift.max(v, 0), maxSize)
     }
 
     public static func isSafeName(_ name: String) -> Bool {
@@ -57,7 +74,7 @@ public enum FTPListingParser {
         }
         let perms = facts["unix.mode"].flatMap { Int($0, radix: 8) }
         return RemoteEntry(name: name, isDirectory: isDir, isLink: isLink,
-                           size: isDir ? 0 : Int64(facts["size"] ?? "") ?? 0, modified: modified, permissions: perms)
+                           size: isDir ? 0 : size(facts["size"].map { Substring($0) }) ?? 0, modified: modified, permissions: perms)
     }
 
     // "-rw-r--r--   1 owner group     8192 Nov 21 12:00 index.html"
@@ -73,7 +90,7 @@ public enum FTPListingParser {
         guard let mi = fields.indices.dropFirst(2).first(where: { months.contains(fields[$0].lowercased()) && $0 + 2 < fields.count }),
               let month = months.firstIndex(of: fields[mi].lowercased()),
               let day = Int(fields[mi + 1]),
-              let size = Int64(fields[mi - 1]) else { return nil }
+              let size = size(fields[mi - 1]) else { return nil }
         let yearOrTime = fields[mi + 2]
         var comps = DateComponents()
         comps.month = month + 1
@@ -118,9 +135,9 @@ public enum FTPListingParser {
         if year < 100 { year += year < 70 ? 2000 : 1900 }
         let comps = DateComponents(year: year, month: dateParts[0], day: dateParts[1], hour: hour, minute: hm[1])
         let isDir = fields[2].uppercased() == "<DIR>"
-        guard isDir || Int64(fields[2]) != nil, let nameStart = rangeAfterField(line, fieldIndex: 2) else { return nil }
+        guard isDir || size(fields[2]) != nil, let nameStart = rangeAfterField(line, fieldIndex: 2) else { return nil }
         return RemoteEntry(name: String(line[nameStart...]), isDirectory: isDir, isLink: false,
-                           size: isDir ? 0 : Int64(fields[2]) ?? 0,
+                           size: isDir ? 0 : size(fields[2]) ?? 0,
                            modified: Calendar(identifier: .gregorian).date(from: comps), permissions: nil,
                            datePrecision: 60)
     }

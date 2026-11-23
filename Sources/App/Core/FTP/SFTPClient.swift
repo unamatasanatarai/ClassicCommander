@@ -30,8 +30,20 @@ public final class SFTPClient: RemoteClient {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("cc-ssh")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+        // Secrets left behind by a session that crashed are removed.
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [] where name.hasSuffix(".pw") {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(name))
+        }
         return dir
     }()
+
+    /// Writes a file only this user can read: created 0600 from the start (no moment with wider rights).
+    static func writePrivateFile(_ url: URL, _ data: Data) -> Bool {
+        let fd = Darwin.open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { return false }
+        defer { Darwin.close(fd) }
+        return data.withUnsafeBytes { buffer in Darwin.write(fd, buffer.baseAddress, buffer.count) == buffer.count }
+    }
 
     /// The socket of this session's shared SSH connection (exists while it is open).
     var controlPath: String { Self.workDirectory.appendingPathComponent(token).path }
@@ -147,7 +159,7 @@ public final class SFTPClient: RemoteClient {
         var secretFile: URL?
         if let secret = secret {
             let file = Self.workDirectory.appendingPathComponent("\(token)-\(UUID().uuidString.prefix(8)).pw")
-            guard FileManager.default.createFile(atPath: file.path, contents: Data(secret.utf8), attributes: [.posixPermissions: 0o600]) else {
+            guard Self.writePrivateFile(file, Data(secret.utf8)) else {
                 throw FTPError.invalid("Could not prepare the login (temporary folder not writable).")
             }
             secretFile = file
@@ -177,10 +189,13 @@ public final class SFTPClient: RemoteClient {
             output.fileHandleForReading.readabilityHandler = nil
             errors.fileHandleForReading.readabilityHandler = nil
         }
+        // Exit is signalled, not polled: the loop below only wakes to check Cancel and report progress.
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
         try process.run()
         input.fileHandleForWriting.write(Data((commands.joined(separator: "\n") + "\n").utf8))
         try? input.fileHandleForWriting.close()
-        while process.isRunning {
+        while exited.wait(timeout: .now() + 0.25) == .timedOut {
             if cancel?.isCancelled == true {
                 process.terminate()
                 process.waitUntilExit()
@@ -188,7 +203,6 @@ public final class SFTPClient: RemoteClient {
                 throw FTPError.cancelled
             }
             poll?()
-            Thread.sleep(forTimeInterval: 0.05)
         }
         process.waitUntilExit()
         stopReading()
@@ -311,6 +325,7 @@ public final class SFTPClient: RemoteClient {
         }
         if fm.fileExists(atPath: local.path) { try fm.removeItem(at: local) }
         try fm.moveItem(at: part, to: local)
+        Quarantine.mark(local, origin: "sftp://\(profile.host.contains(":") ? "[\(profile.host)]" : profile.host):\(profile.port)")
         progress?(got)
     }
 

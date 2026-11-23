@@ -154,8 +154,11 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
             viewButton.title = "\(key.displayName) View"
         }
         if !isSearching, let panel = commander?.activeView {
-            // Find Files searches this Mac; a panel showing an FTP server starts from the home folder.
-            config.general.searchPaths = [panel.model.isRemote ? FileManager.default.homeDirectoryForCurrentUser.path : panel.model.directory.path]
+            // A panel connected to a server searches that server (shown as its address).
+            let path = panel.model.isRemote
+                ? commander?.ftp.displayAddress(of: panel.model.directory) ?? FileManager.default.homeDirectoryForCurrentUser.path
+                : panel.model.directory.path
+            config.general.searchPaths = [path]
         }
         writeUI()
         updateEnabled()
@@ -646,7 +649,9 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
                         self.setSummary("Searching…  \(count) items checked")
                         self.statusLabel.stringValue = folder
                     }
-                })
+                },
+                sessions: commander?.ftp.sessionLookup ?? { _ in nil },
+                remoteAddress: { [weak self] text in self?.commander?.ftp.location(fromAddress: text) })
         } catch let error as SearchValidationError {
             return show(error)
         } catch {
@@ -777,6 +782,9 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
     /// Puts all results into the active panel as a listing (marks, copy, delete work there).
     func feedToListbox() {
         guard !rows.isEmpty, let panel = commander?.activeView else { return NSSound.beep() }
+        if rows.contains(where: { $0.item.url.isRemoteLocation }) {
+            return show(SearchValidationError(message: "Feed to listbox works for files on this Mac. Use Go to file for results on a server."))
+        }
         panel.model.showSearchResults(rows.map(\.item.url), title: "Search results: \(config.general.filenamePattern)",
                                       visibleRows: panel.visibleRows)
         panel.needsDisplay = true
@@ -790,7 +798,11 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
     @discardableResult
     func viewFile() -> ListerWindowController? {
         guard let row = chosenRow, !row.item.isDirectory, let commander = commander else { NSSound.beep(); return nil }
-        let files = rows.filter { !$0.item.isDirectory }.map(\.item.url)
+        if row.item.url.isRemoteLocation {
+            commander.ftp.viewRemote(row.item.url, size: row.item.size)
+            return nil
+        }
+        let files = rows.filter { !$0.item.isDirectory && !$0.item.url.isRemoteLocation }.map(\.item.url)
         let index = files.firstIndex(of: row.item.url) ?? 0
         return commander.openLister(files: files, index: index)
     }
@@ -977,7 +989,9 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
             label = NSTextField(labelWithString: String(repeating: "–", count: 60))
             label.textColor = .tertiaryLabelColor
         case .item(let i):
-            label = NSTextField(labelWithString: rows[i].item.url.path + (rows[i].item.isDirectory ? "/" : ""))
+            let url = rows[i].item.url
+            let shown = url.isRemoteLocation ? commander?.ftp.displayAddress(of: url) ?? url.path : url.path
+            label = NSTextField(labelWithString: EntryFormatter.visible(shown) + (rows[i].item.isDirectory ? "/" : ""))
             label.lineBreakMode = .byTruncatingMiddle
         }
         return label

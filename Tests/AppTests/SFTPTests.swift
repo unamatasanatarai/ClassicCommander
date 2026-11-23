@@ -327,6 +327,20 @@ public enum SFTPTests {
             try expect(RemoteSession.path(of: right.model.directory) == www, "a file link is not entered")
         }
 
+        testRunner("SFTP Find Files: names and text on the server") {
+            let session = RemoteSession(client: SFTPClient(profile: server.profile(), secret: nil))
+            defer { session.client.close() }
+            _ = try session.client.connect(cancel: nil)
+            var c = FileSearchConfiguration()
+            c.general.searchPaths = [session.url(for: www).absoluteString]
+            c.general.filenamePattern = "*"
+            c.general.content.enabled = true
+            c.general.content.expression = "hello"
+            let r = try FileSearch(config: c, base: URL(fileURLWithPath: "/"),
+                                   sessions: { RemoteSession.sessionID(of: $0) == session.id ? session : nil }).run()
+            try expect(r.found.map { RemoteSession.path(of: $0.url) } == [www + "/index.html"], "found: \(r.found.map(\.url)) \(r.errors)")
+        }
+
         testRunner("SFTP Synchronize: local folder against a server folder, dates kept, deletions on the server") {
             let session = RemoteSession(client: SFTPClient(profile: server.profile(), secret: nil))
             defer { session.client.close() }

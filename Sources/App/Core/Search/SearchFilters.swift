@@ -25,6 +25,24 @@ public struct SearchItem: Equatable {
     }
 
     /// Reads an item from disk without following a final symlink. nil if it vanished.
+    /// Reads `statPath`, then names it `relative` under `root` — the URL is built knowing whether it is a
+    /// folder, which saves a second stat per entry (URL.appendingPathComponent(_:) stats to decide).
+    public static func read(relative: String, under root: URL, statPath: String) -> SearchItem? {
+        var st = stat()
+        guard lstat(statPath, &st) == 0 else { return nil }
+        let isDir = (st.st_mode & S_IFMT) == S_IFDIR
+        return read(root.appendingPathComponent(relative, isDirectory: isDir), stat: st)
+    }
+
+    static func read(_ url: URL, stat st: stat) -> SearchItem {
+        let isDir = (st.st_mode & S_IFMT) == S_IFDIR
+        let mtime = Date(timeIntervalSince1970: TimeInterval(st.st_mtimespec.tv_sec)
+            + TimeInterval(st.st_mtimespec.tv_nsec) / 1_000_000_000)
+        return SearchItem(url: url, name: url.lastPathComponent, isDirectory: isDir,
+                          size: isDir ? 0 : Int64(st.st_size), modified: mtime,
+                          mode: UInt16(st.st_mode), flags: st.st_flags, ownerID: st.st_uid)
+    }
+
     public static func read(_ url: URL, statPath: String? = nil) -> SearchItem? {
         var st = stat()
         guard lstat(statPath ?? url.path, &st) == 0 else { return nil }
@@ -74,6 +92,8 @@ public struct SearchPredicate {
 public struct NameMatcher {
     private let include: [NSRegularExpression]
     private let exclude: [NSRegularExpression]
+    /// "*" / "*.*" with nothing excluded: every name matches, no regular expression needed.
+    private var matchesEverything = false
 
     public init(pattern: String, regex: Bool) throws {
         if regex {
@@ -108,12 +128,15 @@ public struct NameMatcher {
         let inc = masks(halves[0])
         include = inc.isEmpty ? masks("*") : inc
         exclude = halves.count > 1 ? masks(halves[1]) : []
+        let includeTexts = halves[0].split(whereSeparator: { $0 == ";" || $0 == " " }).map(String.init)
+        matchesEverything = exclude.isEmpty && (includeTexts.isEmpty || includeTexts.contains { $0 == "*" || $0 == "*.*" })
     }
 
     /// File names come from disk in either Unicode form (e.g. "ó" as one or two code points).
     static func normalize(_ s: String) -> String { s.precomposedStringWithCanonicalMapping }
 
     public func matches(_ name: String) -> Bool {
+        if matchesEverything { return true }
         let n = Self.normalize(name)
         let range = NSRange(n.startIndex..., in: n)
         func hit(_ r: NSRegularExpression) -> Bool { r.firstMatch(in: n, range: range) != nil }

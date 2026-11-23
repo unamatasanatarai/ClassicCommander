@@ -188,7 +188,8 @@ public struct Theme: Equatable {
         .cursorBackground: "#00A8A8", .cursorText: "#000000",
         .activePathBackground: "#00A8A8", .activePathText: "#000000",
         .inactivePathBackground: "#0000A8", .inactivePathText: "#FFFFFF",
-        .headerBackground: "#0000A8", .headerText: "#FFFF55",
+        // Total Commander keeps the Windows header control: light grey, black text, whatever the panel colours.
+        .headerBackground: "#F4F4F4", .headerText: "#000000",
         .chrome: "#D4D0C8", .chromeText: "#000000", .lines: "#55FFFF",
         .markText: "#FFFF55",
     ])

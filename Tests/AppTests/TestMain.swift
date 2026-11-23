@@ -45,6 +45,9 @@ struct TestMain {
         print("\n--- SFTP Suite ---")
         SFTPTests.run(testRunner: runTest)
 
+        print("\n--- Security Regression Suite ---")
+        SecurityTests.run(testRunner: runTest)
+
         let totalElapsedMs = (CFAbsoluteTimeGetCurrent() - totalStart) * 1000.0
 
         print("\n--------------------------------------------------")

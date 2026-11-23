@@ -156,18 +156,24 @@ public enum SyncEngine {
             return result
         }
         let prefix = real.path.hasSuffix("/") ? real.path : real.path + "/"
+        // When the folder path has no symlinks, the walker's own URLs are already the ones to show.
+        let sameRoot = real.standardizedFileURL.path == root.standardizedFileURL.path
         for case let url as URL in walker {
             if isCancelled() { break }
-            guard url.path.hasPrefix(prefix) else { continue }
-            let relative = String(url.path.dropFirst(prefix.count))
-            guard let item = SearchItem.read(root.appendingPathComponent(relative), statPath: url.path) else { continue }
+            let path = url.path
+            guard path.hasPrefix(prefix) else { continue }
+            let relative = String(path.dropFirst(prefix.count))
+            var st = stat()
+            guard lstat(path, &st) == 0 else { continue }
+            let item = sameRoot ? SearchItem.read(url, stat: st)
+                : SearchItem.read(root.appendingPathComponent(relative, isDirectory: (st.st_mode & S_IFMT) == S_IFDIR), stat: st)
             let top = String(relative.split(separator: "/").first ?? "")
             if let only = config.onlyNames, !only.contains(top) {
                 // Only call skipDescendants on folders: on a file it would skip the last folder seen instead.
                 if item.isDirectory { walker.skipDescendants() }
                 continue
             }
-            let info = SyncFileInfo(url: root.appendingPathComponent(relative), size: item.size,
+            let info = SyncFileInfo(url: item.url, size: item.size,
                                     modified: item.modified, isDirectory: item.isDirectory)
             if item.isDirectory {
                 if !config.subdirectories { walker.skipDescendants() }
@@ -191,15 +197,23 @@ public enum SyncEngine {
         var result = Scanned()
         let base = RemoteSession.path(of: root)
         var queue = [""]
-        while !queue.isEmpty {
-            let relativeDir = queue.removeFirst()
+        var next = 0
+        var count = 0
+        while next < queue.count {
+            let relativeDir = queue[next]
+            next += 1
             if isCancelled() { break }
+            if relativeDir.split(separator: "/").count > RemoteSession.maxDepth || count > RemoteSession.maxEntries {
+                errors.append("\(session.addressLabel)\(base): \(RemoteSession.tooLarge.message) Stopped reading there.")
+                break
+            }
             let dir = relativeDir.isEmpty ? base : (base == "/" ? "/" : base + "/") + relativeDir
             let listing: [RemoteEntry]
-            do { listing = try session.fetch(dir, useCache: false) } catch {
+            do { listing = try session.fetch(dir, useCache: false, store: false) } catch {
                 errors.append("\(session.addressLabel)\(dir): \((error as? FTPError)?.message ?? error.localizedDescription)")
                 continue
             }
+            count += listing.count
             for entry in listing {
                 let relative = relativeDir.isEmpty ? entry.name : relativeDir + "/" + entry.name
                 let top = String(relative.split(separator: "/").first ?? "")
@@ -431,7 +445,7 @@ public struct SyncPlan: Equatable {
     public var all: [SyncOperation] { toRight + toLeft + deletions }
     public var isEmpty: Bool { all.isEmpty }
 
-    public static func bytes(_ ops: [SyncOperation]) -> Int64 { ops.reduce(0) { $0 + $1.bytes } }
+    public static func bytes(_ ops: [SyncOperation]) -> Int64 { ops.reduce(0) { $0.addingSaturated($1.bytes) } }
 }
 
 /// What the user allowed in the Synchronize dialog.

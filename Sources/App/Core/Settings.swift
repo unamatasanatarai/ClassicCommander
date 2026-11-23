@@ -188,12 +188,23 @@ public final class SettingsStore {
         static let operation = "operationOptions"
         static let keys = "keyBindings"
         static let quickSearch = "quickSearchOptions"
+        static let headerMigration = "migrations.totalCommanderHeader"
     }
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        var theme = Self.load(Theme.self, Key.theme, defaults) ?? .standard
+        // One-time: themes saved with the old blue column header get Total Commander's grey header.
+        if !defaults.bool(forKey: Key.headerMigration) {
+            defaults.set(true, forKey: Key.headerMigration)
+            if theme.headerBackground == RGBColor(hex: "#0000A8") {
+                theme.headerBackground = Theme.classicBlue.headerBackground
+                theme.headerText = Theme.classicBlue.headerText
+                if let data = try? JSONEncoder().encode(theme) { defaults.set(data, forKey: Key.theme) }
+            }
+        }
         settings = Settings(
-            theme: Self.load(Theme.self, Key.theme, defaults) ?? .standard,
+            theme: theme,
             display: Self.load(DisplayOptions.self, Key.display, defaults) ?? .standard,
             operation: Self.load(OperationOptions.self, Key.operation, defaults) ?? .standard,
             keys: Self.load(KeyBindings.self, Key.keys, defaults) ?? .standard,

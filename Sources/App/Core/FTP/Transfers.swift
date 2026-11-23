@@ -19,9 +19,10 @@ public enum TransferLocation {
         }
     }
 
-    func appending(_ relative: String) -> TransferLocation {
+    func appending(_ relative: String, isDirectory: Bool = false) -> TransferLocation {
         switch self {
-        case .local(let url): return .local(url.appendingPathComponent(relative))
+        // isDirectory given: URL.appendingPathComponent(_:) would otherwise stat the disk to find out.
+        case .local(let url): return .local(url.appendingPathComponent(relative, isDirectory: isDirectory))
         case let .remote(session, path): return .remote(session, RemoteSession.normalize(path + "/" + relative))
         }
     }
@@ -58,7 +59,7 @@ public final class TransferJob {
     /// Bytes of finished files, and of the files in progress.
     var completedBytes: Int64 = 0
     var partial: [Int: Int64] = [:]
-    public var bytesDone: Int64 { completedBytes + partial.values.reduce(0, +) }
+    public var bytesDone: Int64 { partial.values.reduce(completedBytes) { $0.addingSaturated($1) } }
     public internal(set) var started: Date?
     public internal(set) var finished: Date?
     let cancelFlag = CancelFlag()
@@ -72,7 +73,7 @@ public final class TransferJob {
         results = Array(repeating: .pending, count: items.count)
     }
 
-    public var bytesTotal: Int64 { items.reduce(0) { $0 + $1.size } }
+    public var bytesTotal: Int64 { items.reduce(0) { $0.addingSaturated($1.size) } }
     public var failedCount: Int { results.filter { if case .failed = $0 { return true } else { return false } }.count }
     public var doneCount: Int { results.filter { $0 == .done }.count }
     public var fileCount: Int { items.filter { !$0.isFolder }.count }
@@ -275,7 +276,7 @@ public final class TransferManager {
         lock.lock()
         job.partial[index] = nil
         job.results[index] = result
-        if result == .done { job.completedBytes += item.size }
+        if result == .done { job.completedBytes = job.completedBytes.addingSaturated(item.size) }
         job.running -= 1
         running.total -= 1
         if kind.isUpload { running.up -= 1 }
@@ -322,7 +323,7 @@ public final class TransferManager {
             do {
                 try perform(item, job: job) { partial in job.partial[i] = partial }
                 job.results[i] = .done
-                job.completedBytes += item.size
+                job.completedBytes = job.completedBytes.addingSaturated(item.size)
             } catch FTPError.cancelled {
                 break
             } catch {
@@ -424,7 +425,7 @@ public enum TransferPlanner {
     public static func plan(_ sources: [Source], into destination: TransferLocation, cancel: CancelFlag? = nil) throws -> Plan {
         var plan = Plan()
         for source in sources {
-            let target = destination.appending(source.location.name)
+            let target = destination.appending(source.location.name, isDirectory: source.isFolder)
             if !source.isFolder {
                 plan.items.append(TransferItem(source: source.location, destination: target, size: source.size, isFolder: false))
                 continue
@@ -441,10 +442,10 @@ public enum TransferPlanner {
                     if cancel?.isCancelled == true { throw FTPError.cancelled }
                     guard found.path.hasPrefix(prefix) else { continue }
                     let rel = String(found.path.dropFirst(prefix.count))
-                    let url = root.appendingPathComponent(rel)
                     let v = try? found.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
                     let isDir = v?.isDirectory ?? false
-                    plan.items.append(TransferItem(source: .local(url), destination: target.appending(rel),
+                    let url = root.appendingPathComponent(rel, isDirectory: isDir)
+                    plan.items.append(TransferItem(source: .local(url), destination: target.appending(rel, isDirectory: isDir),
                                                    size: isDir ? 0 : Int64(v?.fileSize ?? 0), isFolder: isDir))
                     if isDir { removeLater.append(.local(url)) }
                 }
@@ -452,7 +453,7 @@ public enum TransferPlanner {
                 let tree = try session.walk(root, cancel: cancel)
                 for folder in tree.folders {
                     let rel = String(folder.dropFirst(root.count + 1))
-                    plan.items.append(TransferItem(source: .remote(session, folder), destination: target.appending(rel), size: 0, isFolder: true))
+                    plan.items.append(TransferItem(source: .remote(session, folder), destination: target.appending(rel, isDirectory: true), size: 0, isFolder: true))
                     removeLater.append(.remote(session, folder))
                 }
                 for file in tree.files {
@@ -471,10 +472,15 @@ public enum TransferPlanner {
     static func findConflicts(_ items: [TransferItem]) throws -> [Int] {
         var listings: [String: Set<String>] = [:]
         var result: [Int] = []
+        // Servers are usually case-sensitive, Macs usually not: "A.txt" and "a.txt" would land on the
+        // same local file, so the second one counts as a conflict too.
+        var localTargets: Set<String> = []
         for (i, item) in items.enumerated() where !item.isFolder {
             switch item.destination {
             case .local(let url):
-                if FileManager.default.fileExists(atPath: url.path) { result.append(i) }
+                let key = url.path.lowercased()
+                if FileManager.default.fileExists(atPath: url.path) || localTargets.contains(key) { result.append(i) }
+                localTargets.insert(key)
             case let .remote(session, path):
                 let dir = (path as NSString).deletingLastPathComponent
                 let key = session.id.uuidString + dir

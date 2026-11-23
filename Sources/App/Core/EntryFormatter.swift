@@ -37,8 +37,27 @@ public struct EntryFormatter {
     /// Files show the name without extension (it has its own column); folders show the full name,
     /// optionally in square brackets ("[media]", "[..]").
     public func name(_ entry: FileEntry, folderBrackets: Bool = false) -> String {
-        if entry.kind == .file { return entry.baseName }
-        return folderBrackets ? "[\(entry.name)]" : entry.name
+        if entry.kind == .file { return Self.visible(entry.baseName) }
+        return folderBrackets ? "[\(Self.visible(entry.name))]" : Self.visible(entry.name)
+    }
+
+    /// A name as shown on screen: characters that reorder text (right-to-left overrides, which can
+    /// disguise an extension: "invoice\u{202E}fdp.app") or are invisible/control characters become
+    /// "�", so what is shown is what is there.
+    public static func visible(_ name: String) -> String {
+        guard name.unicodeScalars.contains(where: isDeceptive) else { return name }
+        var out = String.UnicodeScalarView()
+        for s in name.unicodeScalars { out.append(isDeceptive(s) ? "\u{FFFD}" : s) }
+        return String(out)
+    }
+
+    static func isDeceptive(_ s: Unicode.Scalar) -> Bool {
+        switch s.value {
+        case 0x00...0x1F, 0x7F...0x9F: return true                 // control characters
+        case 0x200B...0x200F, 0x202A...0x202E, 0x2066...0x2069: return true  // zero-width and direction marks
+        case 0x061C, 0xFEFF: return true
+        default: return false
+        }
     }
 
     /// Bytes for files; "<DIR>" for folders unless their total size has been calculated.
@@ -88,7 +107,7 @@ public struct EntryFormatter {
         var bytes: Int64 = 0
         for e in entries {
             switch e.kind {
-            case .file: files += 1; bytes += e.size ?? 0
+            case .file: files += 1; bytes = bytes.addingSaturated(e.size ?? 0)
             case .directory: dirs += 1
             case .parent: break
             }

@@ -463,6 +463,67 @@ public enum FTPTests {
             try expect(FileManager.default.contents(atPath: downTarget.appendingPathComponent("\(local.lastPathComponent)/f7.bin").path)?.count == 300_000, "files arrived")
         }
 
+        testRunner("Find Files on a server: names, depth, size, text (downloaded and removed), errors, the dialog") {
+            let server = try TestServer()
+            defer { server.stop() }
+            let session = RemoteSession(client: FTPClient(profile: server.profile(), password: "s3cret pass"))
+            _ = try session.client.connect(cancel: nil)
+            let lookup: SyncSessionLookup = { RemoteSession.sessionID(of: $0) == session.id ? session : nil }
+            func search(_ edit: (inout FileSearchConfiguration) -> Void, root: String = "/www", selected: [URL] = []) throws -> FileSearch.Report {
+                var c = FileSearchConfiguration()
+                c.general.searchPaths = [session.url(for: root).absoluteString]
+                edit(&c)
+                return try FileSearch(config: c, selectedItems: selected, base: URL(fileURLWithPath: "/"), sessions: lookup).run()
+            }
+            func names(_ r: FileSearch.Report) -> [String] { r.found.map { RemoteSession.path(of: $0.url) }.sorted() }
+            var r = try search { $0.general.filenamePattern = "*.css;*.bin" }
+            try expect(names(r) == ["/www/assets/app.css", "/www/assets/big.bin"] && r.errors.isEmpty, "masks, recursive: \(names(r)) \(r.errors)")
+            try expect(r.found.allSatisfy { $0.url.isRemoteLocation }, "results stay on the server")
+            r = try search { $0.general.filenamePattern = "*.css"; $0.general.depth = .currentOnly }
+            try expect(r.found.isEmpty, "current folder only: \(names(r))")
+            r = try search { $0.general.filenamePattern = "*"; $0.advanced.fileSize.enabled = true; $0.advanced.fileSize.comparison = .greater; $0.advanced.fileSize.value = 50_000; $0.advanced.fileSize.unit = .bytes }
+            try expect(names(r) == ["/www/assets/big.bin"], "size filter: \(names(r))")
+            r = try search { $0.general.filenamePattern = "*"; $0.general.content.enabled = true; $0.general.content.expression = "hello" }
+            try expect(names(r) == ["/www/index.html"], "text found in a downloaded copy: \(names(r)) \(r.errors)")
+            let leftovers = try FileManager.default.contentsOfDirectory(atPath: FileManager.default.temporaryDirectory.path).filter { $0.hasPrefix("cc-find-") }
+            try expect(leftovers.isEmpty, "temporary copies removed: \(leftovers)")
+            r = try search({ $0.general.filenamePattern = "*"; $0.general.selectedItemsOnly = true }, selected: [session.url(for: "/www/index.html")])
+            try expect(names(r) == ["/www/index.html"], "a selected server file: \(names(r))")
+            do {
+                _ = try search { $0.advanced.duplicates = DuplicateSearchConfiguration(enabled: true, sameContents: true) }
+                throw Fail(description: "duplicates by content allowed")
+            } catch is SearchValidationError {}
+            var closed = FileSearchConfiguration()
+            closed.general.searchPaths = [session.url(for: "/www").absoluteString]
+            let gone = try FileSearch(config: closed, base: URL(fileURLWithPath: "/")).run()
+            try expect(gone.errors.contains { $0.contains("closed") }, "closed connection reported")
+
+            // The dialog: a connected panel searches its server.
+            let local = FileManager.default.temporaryDirectory
+            let view = CommanderView(model: CommanderModel(left: PanelModel(directory: local), right: PanelModel(directory: local)))
+            view.frame = NSRect(x: 0, y: 0, width: 1000, height: 600)
+            view.layout()
+            let suite = "FTPFind-\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            view.ftp.repository = FTPProfileRepository(defaults: defaults, credentials: MemoryCredentialStore())
+            view.ftp.runSynchronously = true
+            var outcome: Result<Void, FTPError>?
+            view.ftp.connect(server.profile(), password: "s3cret pass", side: .right) { outcome = $0 }
+            guard case .success = outcome else { throw Fail(description: "connect") }
+            let dialog = FindFilesWindowController(commander: view, defaults: defaults)
+            dialog.runSynchronously = true
+            dialog.present()
+            try expect(dialog.searchIn.stringValue.hasPrefix("ftp://tester@127.0.0.1"), "searches the server: \(dialog.searchIn.stringValue)")
+            dialog.searchFor.stringValue = "*.html"
+            dialog.startSearch()
+            try expect(dialog.rows.map { RemoteSession.path(of: $0.item.url) } == ["/www/index.html"], "dialog results: \(dialog.rows.map(\.item.url))")
+            dialog.feedToListbox()
+            try expect(dialog.statusLabel.stringValue.contains("Feed to listbox works for files on this Mac"), "feed refused: \(dialog.statusLabel.stringValue)")
+            dialog.window?.close()
+            view.ftp.disconnect(.right)
+        }
+
         testRunner("FTP connection manager: failed connect keeps the dialog and the profile selected; success closes it") {
             let server = try TestServer()
             defer { server.stop() }

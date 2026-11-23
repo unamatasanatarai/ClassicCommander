@@ -204,7 +204,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
 
     /// Key presses never consult these menus (and never trigger menuNeedsUpdate).
     public func menuHasKeyEquivalent(_ menu: NSMenu, for event: NSEvent, target: AutoreleasingUnsafeMutablePointer<AnyObject?>,
-                                     action: AutoreleasingUnsafeMutablePointer<Selector?>) -> Bool {
+                                     action: UnsafeMutablePointer<Selector?>) -> Bool {
         false
     }
 

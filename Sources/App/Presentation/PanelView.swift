@@ -231,13 +231,18 @@ public final class PanelView: NSView {
         palette.background.setFill()
         l.listFrame.insetBy(dx: 1, dy: 1).fill()
 
-        // Column headers: gradient buttons with separators; the sort column carries an arrow.
+        // Column headers like Total Commander's (the Windows header control): a light gradient, grey
+        // separators with a highlight next to them and a grey bottom edge — bevel shades of the window
+        // colour, never the panel line colour. The sort column carries an arrow.
         palette.headerGradient.draw(in: l.header, angle: 90)
-        palette.lines.setFill()
+        palette.chromeShadow.setFill()
         NSRect(x: l.header.minX, y: l.header.maxY - 1, width: l.header.width, height: 1).fill()
         for (i, col) in l.columns.enumerated() {
             if i < l.columns.count - 1 {
-                NSRect(x: col.x + col.width - 1, y: l.header.minY + 3, width: 1, height: headerHeight - 6).fill()
+                palette.chromeShadow.setFill()
+                NSRect(x: col.x + col.width - 1, y: l.header.minY + 2, width: 1, height: headerHeight - 4).fill()
+                palette.chromeLight.setFill()
+                NSRect(x: col.x + col.width, y: l.header.minY + 2, width: 1, height: headerHeight - 4).fill()
             }
             var title = col.title
             if let field = col.field, field == model.sortOrder.column {
@@ -291,7 +296,7 @@ public final class PanelView: NSView {
                     drawText(formatter.name(entry, folderBrackets: display.showFolderBrackets), in: NSRect(x: textX, y: y, width: col.x + col.width - textX - 4, height: rowHeight),
                              color: color, font: markedOnBar ? PanelFont.bold : PanelFont.regular)
                 case .ext?:
-                    drawCell(entry.displayExtension, col, y, color, textFont)
+                    drawCell(EntryFormatter.visible(entry.displayExtension), col, y, color, textFont)
                 case .size?:
                     var sizeText = pendingSizes.contains(entry.name) && entry.kind == .directory
                         ? "…" : formatter.size(entry, folderSize: model.folderSize(for: entry))
@@ -330,9 +335,21 @@ public final class PanelView: NSView {
 
     private func drawStatus(_ l: Layout) {
         guard !isStatusCovered else { return }
-        var text = busyText ?? model.errorMessage ?? formatter.summary(model.realEntries, selected: model.selectionTotals)
+        var text = busyText ?? model.errorMessage ?? cachedSummary()
         if busyText == nil, model.errorMessage == nil, let filter = model.showFilter.label { text = "[Show: \(filter)]  " + text }
         drawText(text, in: l.status.insetBy(dx: 4, dy: 0), color: palette.chromeText, font: PanelFont.regular)
+    }
+
+    /// The totals line is O(n) over all entries: it is rebuilt only when the panel's revision changes,
+    /// not on every redraw (cursor moves redraw constantly).
+    private var summaryCache: (model: ObjectIdentifier, revision: Int, text: String)?
+
+    private func cachedSummary() -> String {
+        let id = ObjectIdentifier(model)
+        if let c = summaryCache, c.model == id, c.revision == model.revision { return c.text }
+        let text = formatter.summary(model.realEntries, selected: model.selectionTotals)
+        summaryCache = (id, model.revision, text)
+        return text
     }
 
     private func drawText(_ text: String, in rect: NSRect, color: NSColor, font: NSFont,

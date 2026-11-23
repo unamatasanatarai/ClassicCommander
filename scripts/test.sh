@@ -41,6 +41,7 @@ tests=(
     "Tests/AppTests/SyncTests.swift"
     "Tests/AppTests/FTPTests.swift"
     "Tests/AppTests/SFTPTests.swift"
+    "Tests/AppTests/SecurityTests.swift"
     "Tests/AppTests/TestMain.swift"
 )
 

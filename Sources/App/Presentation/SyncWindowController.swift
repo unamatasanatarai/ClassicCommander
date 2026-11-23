@@ -690,13 +690,13 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         let text: String
         var alignment: NSTextAlignment = .left
         switch id {
-        case .leftName: text = r.left == nil ? "" : r.path
+        case .leftName: text = r.left == nil ? "" : EntryFormatter.visible(r.path)
         case .leftSize: text = size(r.left); alignment = .right
         case .leftDate: text = date(r.left)
         case .action: text = r.symbol; alignment = .center
         case .rightDate: text = date(r.right)
         case .rightSize: text = size(r.right); alignment = .right
-        case .rightName: text = r.right == nil ? "" : r.path
+        case .rightName: text = r.right == nil ? "" : EntryFormatter.visible(r.path)
         }
         let label = NSTextField(labelWithString: text)
         label.alignment = alignment

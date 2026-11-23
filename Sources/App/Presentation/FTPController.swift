@@ -47,6 +47,7 @@ public final class FTPController {
     init(commander: CommanderView, repository: FTPProfileRepository = FTPProfileRepository()) {
         self.commander = commander
         self.repository = repository
+        Self.removeOldTemporaryCopies()
         transfers.onChange = { [weak self] job in
             self?.transfersWindow.refresh()
             if job.state == .finished || job.state == .cancelled { self?.commander?.reloadPanels() }
@@ -300,8 +301,24 @@ public final class FTPController {
     // MARK: View / open
 
     /// Downloads a remote file to a private temporary folder (for viewing or opening).
+    /// Where View (3) / Enter put copies of server files (one folder per file, so names never clash).
+    static let temporaryRoot = FileManager.default.temporaryDirectory.appendingPathComponent("ClassicCommander-Remote")
+    private static var cleanedTemporaryCopies = false
+
+    /// Copies left by earlier sessions are removed once per launch (current ones may still be open in other apps).
+    static func removeOldTemporaryCopies() {
+        guard !cleanedTemporaryCopies else { return }
+        cleanedTemporaryCopies = true
+        let fm = FileManager.default
+        try? fm.removeItem(at: temporaryRoot)
+        // Older versions used one folder per copy directly in the temporary folder.
+        for name in (try? fm.contentsOfDirectory(atPath: fm.temporaryDirectory.path)) ?? [] where name.hasPrefix("ClassicCommander-FTP-") {
+            try? fm.removeItem(at: fm.temporaryDirectory.appendingPathComponent(name))
+        }
+    }
+
     private func downloadTemporary(_ entry: FileEntry, session: RemoteSession, then: @escaping (URL) -> Void) {
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("ClassicCommander-FTP-\(UUID().uuidString)")
+        let folder = Self.temporaryRoot.appendingPathComponent(UUID().uuidString)
         let local = folder.appendingPathComponent(entry.name)
         commander?.showHint("Downloading \(entry.name)…", duration: 30)
         background({
@@ -322,6 +339,16 @@ public final class FTPController {
         guard let entry = panel.model.currentEntry, entry.kind == .file else { NSSound.beep(); return true }
         downloadTemporary(entry, session: session) { [weak self] url in self?.commander?.openLister(files: [url], index: 0) }
         return true
+    }
+
+    /// Lister on a server file found elsewhere (Find Files): downloaded to a temporary copy first.
+    func viewRemote(_ url: URL, size: Int64?) {
+        guard let id = RemoteSession.sessionID(of: url), let session = sessions[id] else {
+            showMessage("View", "The server connection is closed.")
+            return
+        }
+        let entry = FileEntry(name: url.lastPathComponent, url: url, kind: .file, size: size, modified: nil)
+        downloadTemporary(entry, session: session) { [weak self] local in self?.commander?.openLister(files: [local], index: 0) }
     }
 
     private func openRemoteFile(_ entry: FileEntry, session: RemoteSession) {

@@ -14,13 +14,14 @@ public enum FolderSizer {
             errorHandler: { _, _ in true }
         ) else { return 0 }
 
+        let keySet = Set(keys)   // built once, not per file
         var total: Int64 = 0
         var count = 0
         for case let url as URL in walker {
             count += 1
             if count % 512 == 0 && isCancelled() { break }
-            guard let v = try? url.resourceValues(forKeys: Set(keys)), v.isRegularFile == true else { continue }
-            total += Int64(v.fileSize ?? 0)
+            guard let v = try? url.resourceValues(forKeys: keySet), v.isRegularFile == true else { continue }
+            total = total.addingSaturated(Int64(v.fileSize ?? 0))
         }
         return total
     }

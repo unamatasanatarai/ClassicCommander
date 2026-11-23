@@ -12,7 +12,9 @@ public final class PanelModel {
 
     public private(set) var directory: URL
     /// The rows on screen: every entry, or only those passing the quick filter.
-    public private(set) var entries: [FileEntry] = []
+    public private(set) var entries: [FileEntry] = [] { didSet { revision &+= 1 } }
+    /// Changes whenever entries, marks or folder sizes change (views cache derived text by it).
+    public private(set) var revision = 0
     /// Every entry of the directory, sorted, before the quick filter.
     private var allEntries: [FileEntry] = []
     /// Set while the panel shows Find Files results ("Feed to listbox") instead of a folder.
@@ -29,9 +31,9 @@ public final class PanelModel {
     public private(set) var errorMessage: String?
     public private(set) var sortOrder = SortOrder()
     /// Names of marked (selected) entries in the current directory. ".." is never marked.
-    public private(set) var marked: Set<String> = []
+    public private(set) var marked: Set<String> = [] { didSet { revision &+= 1 } }
     /// Total sizes of folders worked out with Space, by name, for the current directory.
-    public private(set) var folderSizes: [String: Int64] = [:]
+    public private(set) var folderSizes: [String: Int64] = [:] { didSet { revision &+= 1 } }
     /// Called after the panel moves to another directory (used to stop folder-size work).
     public var onDirectoryChange: (() -> Void)?
 
@@ -187,10 +189,10 @@ public final class PanelModel {
         for e in realEntries where marked.contains(e.name) {
             if e.kind == .file {
                 files += 1
-                bytes += e.size ?? 0
+                bytes = bytes.addingSaturated(e.size ?? 0)
             } else {
                 dirs += 1
-                bytes += folderSizes[e.name] ?? 0
+                bytes = bytes.addingSaturated(folderSizes[e.name] ?? 0)
             }
         }
         return (files, dirs, bytes)

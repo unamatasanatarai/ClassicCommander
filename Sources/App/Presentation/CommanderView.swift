@@ -121,6 +121,11 @@ public final class CommanderView: NSView {
 
     /// "Go to file": shows `url` in the active panel, cursor on it.
     public func reveal(_ url: URL) {
+        if url.isRemoteLocation, RemoteSession.sessionID(of: activeView.model.directory) != RemoteSession.sessionID(of: url),
+           RemoteSession.sessionID(of: view(for: model.activeSide.other).model.directory) == RemoteSession.sessionID(of: url) {
+            // The other panel shows that server: go there.
+            activate(model.activeSide.other)
+        }
         let panel = activeView
         if url.isRemoteLocation {
             // A file on a server: shown when this panel is connected to that server.

@@ -4,7 +4,11 @@ import AppKit
 /// Duplicate…, New folder…, Edit…, Delete, Encrypt…, Help and Cancel.
 /// Double-click (or Return) connects. A failed connection leaves the dialog open with the profile selected.
 public final class FTPConnectionManagerController: NSWindowController, NSOutlineViewDataSource, NSOutlineViewDelegate {
-    private unowned let ftp: FTPController
+    /// Weak: AppKit may still ask this window's outline for data after the controller is gone.
+    private weak var ftp: FTPController?
+    /// Used when the controller is gone (nothing is shown or saved through it then).
+    private lazy var detachedRepository = FTPProfileRepository(defaults: UserDefaults(suiteName: "ClassicCommander.detached") ?? .standard,
+                                                              credentials: MemoryCredentialStore())
     let outline = NSOutlineView()
     private let status = NSTextField(wrappingLabelWithString: "Double-click a saved profile to connect.")
     private var editor: FTPProfileEditorController?
@@ -40,7 +44,7 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
         if newConnection { newProfile() }
     }
 
-    private var repository: FTPProfileRepository { ftp.repository }
+    private var repository: FTPProfileRepository { ftp?.repository ?? detachedRepository }
 
     // MARK: Building
 
@@ -203,7 +207,7 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
 
     func connect(_ profile: FTPProfile, password: String?) {
         status.stringValue = "Connecting to \(profile.hostAndPort)…"
-        guard let commander = ftp.commander else { return }
+        guard let ftp = ftp, let commander = ftp.commander else { return }
         ftp.connect(profile, password: password, side: commander.model.activeSide) { [weak self] result in
             guard let self = self else { return }
             switch result {
@@ -214,7 +218,7 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
                 // Stay open with the profile still selected, and say what to do.
                 self.status.stringValue = "Could not connect to \(profile.hostAndPort): \(e.message)"
                 self.reload(select: profile.id)
-                if !self.ftp.runSynchronously { NSSound.beep() }
+                if self.ftp?.runSynchronously != true { NSSound.beep() }
             }
         }
     }
@@ -290,7 +294,7 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
         }
         editor.onCancel = { [weak self] in self?.editor = nil }
         self.editor = editor
-        if let window = window, !ftp.runSynchronously { window.beginSheet(editor.window!) }
+        if let window = window, ftp?.runSynchronously != true { window.beginSheet(editor.window!) }
     }
 
     @objc private func deleteSelected() {

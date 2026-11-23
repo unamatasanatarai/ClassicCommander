@@ -501,8 +501,30 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
 
     func importSettings(from url: URL) throws {
         let data = try Data(contentsOf: url)
-        working = try SettingsFile.importing(data, onto: working)
+        var imported = try SettingsFile.importing(data, onto: working)
+        // The terminal command starts a program: a settings file from elsewhere may only change it
+        // after the user has seen exactly what would run.
+        let ops = imported.operation, current = working.operation
+        if ops.terminalApp != current.terminalApp || ops.terminalArguments != current.terminalArguments {
+            let command = ops.terminalApp + (ops.terminalArguments.isEmpty ? "" : "  " + ops.terminalArguments)
+            if !confirmTerminalChange(command) {
+                imported.operation.terminalApp = current.terminalApp
+                imported.operation.terminalArguments = current.terminalArguments
+            }
+        }
+        working = imported
         sync()
+    }
+
+    /// Asks before an imported file changes "Open terminal here". Replaceable in tests.
+    var confirmTerminalChange: (String) -> Bool = { command in
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Use the terminal from the imported settings?"
+        alert.informativeText = "Open Terminal Here (⌃⇧T) would start:\n\n\(command)\n\nOnly accept this if you trust where the settings file came from."
+        alert.addButton(withTitle: "Keep My Terminal")
+        alert.addButton(withTitle: "Use Imported Terminal")
+        return alert.runModal() == .alertSecondButtonReturn
     }
 
     private func report(_ message: String) {

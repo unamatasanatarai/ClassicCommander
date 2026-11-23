@@ -98,7 +98,8 @@ public final class FTPClient: RemoteClient {
             // The user trusted this exact key: skip CA validation but insist on the pinned key.
             args += ["--insecure", "--pinnedpubkey", pin]
         }
-        args += profile.passive ? ["--ftp-pasv"] : ["--ftp-port", "-"]
+        // Passive mode connects to the control connection's host, never to an address the server names.
+        args += profile.passive ? ["--ftp-pasv", "--ftp-skip-pasv-ip"] : ["--ftp-port", "-"]
         if textMode { args.append("--use-ascii") }
         for command in profile.commandsAfterLogin where !command.trimmingCharacters(in: .whitespaces).isEmpty {
             args += ["-Q", command]
@@ -115,8 +116,27 @@ public final class FTPClient: RemoteClient {
         return (args, config)
     }
 
+    /// A value inside a quoted curl config string. Line breaks would end the line and start a new
+    /// curl option, so control characters are refused before curl runs (see `checkCredentials`);
+    /// they are escaped here as well, as a second line of defence.
     static func escape(_ s: String) -> String {
         s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n").replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\t", with: "\\t")
+    }
+
+    /// True for text with a control character (line breaks, NUL, …).
+    static func hasControlCharacters(_ s: String) -> Bool {
+        s.unicodeScalars.contains { $0.value < 0x20 || $0.value == 0x7F }
+    }
+
+    /// User name, password and proxy user go into curl's config and the FTP USER/PASS commands:
+    /// control characters there could inject curl options or FTP commands, so they are refused.
+    func checkCredentials() throws {
+        for (what, value) in [("user name", profile.loginName), ("password", password ?? ""), ("proxy user", profile.proxyUsername)]
+        where Self.hasControlCharacters(value) {
+            throw FTPError.invalid("The \(what) contains invalid characters (line breaks or other control characters).")
+        }
     }
 
     // MARK: Running curl
@@ -130,6 +150,7 @@ public final class FTPClient: RemoteClient {
     /// Runs curl; `progress` gets the percentage curl reports (uploads), `poll` runs every 0.2 s.
     func run(_ extra: [String], textMode: Bool = false, cancel: CancelFlag? = nil,
              poll: (() -> Void)? = nil, progress: ((Double) -> Void)? = nil) throws -> Result {
+        try checkCredentials()
         let (base, config) = baseArguments(textMode: textMode)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: curlPath)
@@ -153,11 +174,14 @@ public final class FTPClient: RemoteClient {
             lock.lock(); errText += chunk; lock.unlock()
             if let progress = progress, let pct = Self.lastPercentage(chunk) { progress(pct) }
         }
+        // Exit is signalled, not polled: the loop below only wakes to check Cancel and report progress.
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
         try process.run()
         input.fileHandleForWriting.write(Data(config.utf8))
         try? input.fileHandleForWriting.close()
 
-        while process.isRunning {
+        while exited.wait(timeout: .now() + 0.25) == .timedOut {
             if cancel?.isCancelled == true {
                 process.terminate()
                 process.waitUntilExit()
@@ -166,7 +190,6 @@ public final class FTPClient: RemoteClient {
                 throw FTPError.cancelled
             }
             poll?()
-            Thread.sleep(forTimeInterval: 0.05)
         }
         process.waitUntilExit()
         output.fileHandleForReading.readabilityHandler = nil
@@ -310,6 +333,7 @@ public final class FTPClient: RemoteClient {
         }
         if fm.fileExists(atPath: local.path) { try fm.removeItem(at: local) }
         try fm.moveItem(at: part, to: local)
+        Quarantine.mark(local, origin: url(for: path, directory: false))
         progress?(got)
     }
 

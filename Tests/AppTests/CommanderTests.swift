@@ -65,6 +65,25 @@ public enum CommanderTests {
     }
 
     public static func run(testRunner: (String, () throws -> Void) -> Void) {
+        testRunner("Saved themes with the old blue column header get Total Commander's grey header, once") {
+            let suite = "HeaderMigration-\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            var old = Theme.classicBlue
+            old.headerBackground = RGBColor(hex: "#0000A8")!
+            old.headerText = RGBColor(hex: "#FFFFFF")!
+            old.cursorBackground = RGBColor(hex: "#FFFFFF")!          // a user's own change stays
+            defaults.set(try JSONEncoder().encode(old), forKey: "colorTheme")
+            let store = SettingsStore(defaults: defaults)
+            try expect(store.theme.headerBackground == Theme.classicBlue.headerBackground && store.theme.headerText == RGBColor(hex: "#000000"),
+                       "header migrated")
+            try expect(store.theme.cursorBackground == RGBColor(hex: "#FFFFFF"), "other colours kept")
+            var blueAgain = store.settings
+            blueAgain.theme.headerBackground = RGBColor(hex: "#0000A8")!
+            store.save(blueAgain)
+            try expect(SettingsStore(defaults: defaults).theme.headerBackground == RGBColor(hex: "#0000A8"), "a header chosen later is respected")
+        }
+
         testRunner("Menus show real, aligned shortcuts but never take the keys (they keep reaching the panels)") {
             let delegate = AppDelegate()
             let ctrl3 = AppDelegate.keyEquivalent(for: KeyCombo(20, .control))

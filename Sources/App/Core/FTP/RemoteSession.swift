@@ -5,6 +5,10 @@ import Foundation
 /// in the background and handed to the panel through `RemoteLister`.
 public final class RemoteSession {
     public static let scheme = "ccftp"
+    /// Limits for walking a server folder tree (copy, delete, synchronize).
+    public static let maxDepth = 128
+    public static let maxEntries = 2_000_000
+    static let tooLarge = FTPError.invalid("The folder tree on the server is too deep or too large (over \(maxDepth) levels or \(maxEntries) entries).")
 
     public let id = UUID()
     public let client: RemoteClient
@@ -68,11 +72,16 @@ public final class RemoteSession {
 
     /// Fetches a listing from the server (or the cache when allowed) and keeps it for the panel.
     @discardableResult
-    public func fetch(_ path: String, useCache: Bool = true, cancel: CancelFlag? = nil) throws -> [RemoteEntry] {
+    /// `store: false` (tree walks for copy/delete/sync) reads without keeping the listing, so a large
+    /// tree does not stay in memory for the rest of the session.
+    public func fetch(_ path: String, useCache: Bool = true, store: Bool = true, cancel: CancelFlag? = nil) throws -> [RemoteEntry] {
         let p = Self.normalize(path)
         if useCache, profile.cacheListings, let hit = cached(p) { return hit }
         let entries = try client.list(p, cancel: cancel)
-        lock.lock(); cache[p] = entries; lock.unlock()
+        lock.lock()
+        // Folders already shown stay fresh; others are only kept when asked.
+        if store || cache[p] != nil { cache[p] = entries }
+        lock.unlock()
         return entries
     }
 
@@ -101,13 +110,25 @@ public final class RemoteSession {
     public func walk(_ path: String, cancel: CancelFlag? = nil) throws -> (files: [(path: String, size: Int64)], folders: [String]) {
         var files: [(String, Int64)] = []
         var folders: [String] = []
-        var queue = [Self.normalize(path)]
-        while let dir = queue.first {
-            queue.removeFirst()
+        let root = Self.normalize(path)
+        let rootDepth = root.split(separator: "/").count
+        var queue = [root]
+        var next = 0
+        while next < queue.count {
+            let dir = queue[next]
+            next += 1
             if cancel?.isCancelled == true { throw FTPError.cancelled }
-            for e in try fetch(dir, useCache: false, cancel: cancel) {
+            for e in try fetch(dir, useCache: false, store: false, cancel: cancel) {
                 let child = dir == "/" ? "/" + e.name : dir + "/" + e.name
-                if e.isDirectory { folders.append(child); queue.append(child) } else { files.append((child, e.size)) }
+                if e.isDirectory {
+                    // A hostile or broken server could present endless folders: stop at sane limits.
+                    guard child.split(separator: "/").count - rootDepth <= Self.maxDepth else { throw Self.tooLarge }
+                    folders.append(child)
+                    queue.append(child)
+                } else {
+                    files.append((child, e.size))
+                }
+                if files.count + folders.count > Self.maxEntries { throw Self.tooLarge }
             }
         }
         return (files, folders)

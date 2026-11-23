@@ -265,6 +265,9 @@ public struct FTPProfile: Codable, Equatable {
         } else if !anonymous && username.isEmpty { list.append("Enter a user name, or tick Anonymous login.") }
         if !remoteDirectory.isEmpty && !remoteDirectory.hasPrefix("/") { list.append("The remote directory must start with /.") }
         if remoteDirectory.contains("\0") || remoteDirectory.contains("\n") { list.append("The remote directory contains invalid characters.") }
+        if FTPClient.hasControlCharacters(username) || FTPClient.hasControlCharacters(proxyUsername) {
+            list.append("User names must not contain line breaks or other control characters.")
+        }
         if proxyKind != .none && FTPProfile.parseHostPort(proxyHost, defaultPort: proxyKind == .http ? 8080 : 1080) == nil {
             list.append("Enter the proxy as host:port.")
         }
@@ -285,6 +288,8 @@ public struct FTPProfile: Codable, Equatable {
         guard let comps = URLComponents(string: text.trimmingCharacters(in: .whitespaces)),
               let scheme = comps.scheme?.lowercased(), ["ftp", "ftps", "sftp"].contains(scheme),
               let host = comps.host, isValidHost(host) else { return nil }
+        // Line breaks hidden in a link (%0A) would reach the login commands: such links are refused.
+        for part in [comps.user, comps.password, comps.path] where FTPClient.hasControlCharacters(part ?? "") { return nil }
         var p = FTPProfile()
         p.security = scheme == "ftps" ? .implicitTLS : .explicitTLS
         p.connectionProtocol = scheme == "sftp" ? .sftp : .ftp

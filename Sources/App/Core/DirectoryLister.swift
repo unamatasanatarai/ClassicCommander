@@ -13,44 +13,44 @@ public struct FileSystemLister: DirectoryListing {
         self.showHidden = showHidden
     }
 
-    private static let keys: [URLResourceKey] = [
-        .isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey,
-    ]
-
     public func entries(in directory: URL) throws -> [FileEntry] {
-        let fm = FileManager.default
         // Not `.skipsHiddenFiles`: that also hides flagged system folders like /usr and /bin,
         // which a file commander must show. Only dotfiles are hidden.
         // A path ending in a symlink to a folder (e.g. ~/bin -> …/configs/bin) is listed through
-        // its real path: contentsOfDirectory(at:) refuses such a link with "Not a directory".
+        // its real path: listing such a link fails with "Not a directory".
         // Entries keep the panel's own path, so ".." leads back where the user came from.
+        //
+        // One lstat per entry gives type, size, date and permissions (stat only for symlinks); URLs
+        // are built with an explicit isDirectory, which avoids another stat per name.
         let real = Self.realPath(of: directory)
-        let urls = try fm.contentsOfDirectory(at: real, includingPropertiesForKeys: Self.keys)
-        return urls.compactMap { realURL -> FileEntry? in
-            let name = realURL.lastPathComponent
-            let url = directory.appendingPathComponent(name)
-            if !showHidden && name.hasPrefix(".") { return nil }
-            let values = try? realURL.resourceValues(forKeys: Set(Self.keys))
-            let isSymlink = values?.isSymbolicLink ?? false
-            var isDirectory = values?.isDirectory ?? false
+        let names = try FileManager.default.contentsOfDirectory(atPath: real.path)
+        let base = real.path.hasSuffix("/") ? real.path : real.path + "/"
+        var result: [FileEntry] = []
+        result.reserveCapacity(names.count)
+        var st = stat()
+        for name in names {
+            if !showHidden && name.hasPrefix(".") { continue }
+            let full = base + name
+            guard lstat(full, &st) == 0 else { continue }
+            let isSymlink = (st.st_mode & S_IFMT) == S_IFLNK
+            var isDirectory = (st.st_mode & S_IFMT) == S_IFDIR
             if isSymlink {
-                // A link to a directory (e.g. /tmp, /etc) must be enterable like one. stat() follows
-                // the link; URL.resolvingSymlinksInPath() would strip "/private" and land on the link again.
+                // A link to a directory (e.g. /tmp, /etc) must be enterable like one: stat() follows the link.
                 var target = stat()
-                isDirectory = stat(realURL.path, &target) == 0 && (target.st_mode & S_IFMT) == S_IFDIR
+                isDirectory = stat(full, &target) == 0 && (target.st_mode & S_IFMT) == S_IFDIR
             }
-            var st = stat()
-            let perms: Int? = lstat(realURL.path, &st) == 0 ? Int(st.st_mode & 0o777) : nil
-            return FileEntry(
+            let mtime = st.st_mtimespec
+            result.append(FileEntry(
                 name: name,
-                url: url,
+                url: directory.appendingPathComponent(name, isDirectory: isDirectory),
                 kind: isDirectory ? .directory : .file,
-                size: isDirectory ? nil : values?.fileSize.map(Int64.init),
-                modified: values?.contentModificationDate,
+                size: isDirectory ? nil : Int64(st.st_size),
+                modified: Date(timeIntervalSince1970: TimeInterval(mtime.tv_sec) + TimeInterval(mtime.tv_nsec) / 1e9),
                 isSymlink: isSymlink,
-                permissions: perms
-            )
+                permissions: Int(st.st_mode & 0o777)
+            ))
         }
+        return result
     }
 }
 
@@ -93,28 +93,30 @@ public enum EntrySorting {
             }
             return indexed.map(\.element)
         }
-        return entries.sorted { a, b in
-            let ra = rank(a.kind), rb = rank(b.kind)
-            if ra != rb { return ra < rb }
-            let result = compare(a, b, column: a.kind == .file ? order.column : .name)
+        // Sort indices over precomputed keys: names bridged to NSString once (not on every comparison),
+        // extensions computed once, and the entries themselves moved only once at the end.
+        let names = entries.map { $0.name as NSString }
+        let exts: [NSString] = order.column == .ext ? entries.map { $0.displayExtension as NSString } : []
+        let ranks = entries.map { rank($0.kind) }
+        let isFile = entries.map { $0.kind == .file }
+        let sizes: [Int64] = order.column == .size ? entries.map { $0.size ?? 0 } : []
+        let dates: [Date] = order.column == .date ? entries.map { $0.modified ?? .distantPast } : []
+        func byName(_ i: Int, _ j: Int) -> ComparisonResult { names[i].localizedStandardCompare(names[j] as String) }
+        let sortedIndices = entries.indices.sorted { i, j in
+            if ranks[i] != ranks[j] { return ranks[i] < ranks[j] }
+            let column = isFile[i] ? order.column : .name
+            var result: ComparisonResult
+            switch column {
+            case .name, .unsorted: result = byName(i, j)
+            case .ext: result = exts[i].localizedStandardCompare(exts[j] as String)
+            case .size: result = compareValues(sizes[i], sizes[j])
+            case .date: result = compareValues(dates[i], dates[j])
+            }
+            // The (costly) localized name comparison only breaks ties.
+            if result == .orderedSame && column != .name && column != .unsorted { result = byName(i, j) }
             return order.ascending ? result == .orderedAscending : result == .orderedDescending
         }
-    }
-
-    private static func compare(_ a: FileEntry, _ b: FileEntry, column: SortColumn) -> ComparisonResult {
-        let byName = a.name.localizedStandardCompare(b.name)
-        let primary: ComparisonResult
-        switch column {
-        case .name, .unsorted:
-            return byName
-        case .ext:
-            primary = a.displayExtension.localizedStandardCompare(b.displayExtension)
-        case .size:
-            primary = compareValues(a.size ?? 0, b.size ?? 0)
-        case .date:
-            primary = compareValues(a.modified ?? .distantPast, b.modified ?? .distantPast)
-        }
-        return primary == .orderedSame ? byName : primary
+        return sortedIndices.map { entries[$0] }
     }
 
     private static func compareValues<T: Comparable>(_ a: T, _ b: T) -> ComparisonResult {
