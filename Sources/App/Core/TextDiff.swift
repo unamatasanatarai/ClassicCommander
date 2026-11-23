@@ -195,18 +195,6 @@ public enum FileComparison {
         }
     }
 
-    /// The offset of the first byte that differs in memory (the shorter length if one is a prefix of the other).
-    static func firstDifference(_ a: Data, _ b: Data) -> Int {
-        let common = min(a.count, b.count)
-        return a.withUnsafeBytes { pa in
-            b.withUnsafeBytes { pb in
-                let x = pa.bindMemory(to: UInt8.self), y = pb.bindMemory(to: UInt8.self)
-                for i in 0..<common where x[i] != y[i] { return i }
-                return common
-            }
-        }
-    }
-
     /// Text lines (UTF-8, else Latin-1), or nil for binary data (NUL bytes).
     static func lines(_ data: Data) -> [String]? {
         if data.prefix(8192).contains(0) { return nil }

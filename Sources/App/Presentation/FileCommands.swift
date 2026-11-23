@@ -155,7 +155,7 @@ final class AlertPrompts: FileCommandPrompts {
         field.frame = NSRect(x: 0, y: 0, width: 420, height: 24)
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        guard Modal.run(alert) == .alertFirstButtonReturn else { return nil }
         let text = field.stringValue.trimmingCharacters(in: .whitespaces)
         return text.isEmpty ? nil : text
     }
@@ -166,7 +166,7 @@ final class AlertPrompts: FileCommandPrompts {
         alert.informativeText = message
         alert.addButton(withTitle: okTitle)
         alert.addButton(withTitle: "Cancel")
-        return alert.runModal() == .alertFirstButtonReturn
+        return Modal.run(alert) == .alertFirstButtonReturn
     }
 
     func resolveConflict(source: URL, existing: URL) -> (ConflictChoice, applyToAll: Bool) {
@@ -187,7 +187,7 @@ final class AlertPrompts: FileCommandPrompts {
         alert.addButton(withTitle: "Cancel")
         alert.showsSuppressionButton = true
         alert.suppressionButton?.title = "Do this for all remaining conflicts"
-        let response = alert.runModal()
+        let response = Modal.run(alert)
         let all = alert.suppressionButton?.state == .on
         switch response {
         case .alertFirstButtonReturn: return (.overwrite, all)
@@ -203,6 +203,6 @@ final class AlertPrompts: FileCommandPrompts {
         let shown = report.errors.prefix(12).joined(separator: "\n")
         let more = report.errors.count > 12 ? "\n…and \(report.errors.count - 12) more" : ""
         alert.informativeText = shown + more
-        alert.runModal()
+        Modal.run(alert)
     }
 }

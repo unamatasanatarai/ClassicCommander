@@ -33,17 +33,11 @@ while IFS= read -r file; do
     fi
 done < <(find Sources/App -type f -name "*.swift" | sort)
 
-# Collect test sources
-tests=(
-    "Tests/AppTests/AppTests.swift"
-    "Tests/AppTests/CommanderTests.swift"
-    "Tests/AppTests/SearchTests.swift"
-    "Tests/AppTests/SyncTests.swift"
-    "Tests/AppTests/FTPTests.swift"
-    "Tests/AppTests/SFTPTests.swift"
-    "Tests/AppTests/SecurityTests.swift"
-    "Tests/AppTests/TestMain.swift"
-)
+# Collect test sources: every Swift file in Tests/AppTests (new test files are picked up automatically)
+tests=()
+while IFS= read -r file; do
+    tests+=("$file")
+done < <(find Tests/AppTests -type f -name "*.swift" | sort)
 
 if [[ ${#tests[@]} -eq 0 ]]; then
     printf '%s\n' "Error: No test files found under Tests" >&2

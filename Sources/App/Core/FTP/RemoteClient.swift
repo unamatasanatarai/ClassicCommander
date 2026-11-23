@@ -26,6 +26,11 @@ public protocol RemoteClient: AnyObject {
     func close()
 }
 
+/// How often a running curl/sftp is checked for Cancel and asked for progress.
+public enum RemoteTiming {
+    public static var pollInterval: TimeInterval = 0.25
+}
+
 public enum RemoteClients {
     /// The client for a profile's protocol. `secret` is the password, or the key passphrase for SFTP key logins.
     public static func make(_ profile: FTPProfile, secret: String?) -> RemoteClient {

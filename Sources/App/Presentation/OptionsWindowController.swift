@@ -37,7 +37,7 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
     private let transferSteppers = [NSStepper(), NSStepper(), NSStepper()]
     private let moveDownCheckbox = NSButton(checkboxWithTitle: "Space moves the cursor down after selecting",
                                             target: nil, action: nil)
-    private let shortcutsPage = ShortcutsPage()
+    let shortcutsPage = ShortcutsPage()
     private let quickSearchPopup = NSPopUpButton()
     private let pageList = OptionsPageList(pages: ["Display", "Operation", "Quick Search", "Color", "Shortcuts"])
     private var pages: [NSView] = []
@@ -429,11 +429,10 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         panel.allowedContentTypes = [.application]
         panel.directoryURL = URL(fileURLWithPath: "/Applications")
         panel.message = "Choose the terminal app to open folders with"
-        let done: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+        Modal.choose(panel, for: window) { [weak self] urls in
             guard let self = self else { return }
-            if response == .OK, let url = panel.url { self.useTerminal(url.path) } else { self.reloadTerminalPopup() }
+            if let url = urls.first { self.useTerminal(url.path) } else { self.reloadTerminalPopup() }
         }
-        if let window = window { panel.beginSheetModal(for: window, completionHandler: done) } else { done(panel.runModal()) }
     }
 
     @objc func terminalArgumentsChanged() {
@@ -465,9 +464,8 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "ClassicCommander Settings.json"
         panel.allowedContentTypes = [.json]
-        guard let window = window else { return }
-        panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, let url = panel.url, let self = self else { return }
+        Modal.choose(panel, for: window) { [weak self] urls in
+            guard let url = urls.first, let self = self else { return }
             do {
                 try self.exportSettings(to: url)
             } catch {
@@ -482,9 +480,8 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.json]
         panel.allowsMultipleSelection = false
-        guard let window = window else { return }
-        panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, let url = panel.url, let self = self else { return }
+        Modal.choose(panel, for: window) { [weak self] urls in
+            guard let url = urls.first, let self = self else { return }
             do {
                 try self.importSettings(from: url)
             } catch let e as SearchValidationError {
@@ -524,14 +521,14 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         alert.informativeText = "Open Terminal Here (⌃⇧T) would start:\n\n\(command)\n\nOnly accept this if you trust where the settings file came from."
         alert.addButton(withTitle: "Keep My Terminal")
         alert.addButton(withTitle: "Use Imported Terminal")
-        return alert.runModal() == .alertSecondButtonReturn
+        return Modal.run(alert) == .alertSecondButtonReturn
     }
 
     private func report(_ message: String) {
         let alert = NSAlert()
         alert.messageText = "Settings"
         alert.informativeText = message
-        if let window = window { alert.beginSheetModal(for: window) } else { alert.runModal() }
+        Modal.sheet(alert, for: window)
     }
 
     @objc private func okPressed() {

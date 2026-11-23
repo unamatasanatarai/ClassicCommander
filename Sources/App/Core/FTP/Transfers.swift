@@ -358,6 +358,7 @@ public final class TransferManager {
                 }
                 session.invalidate((path as NSString).deletingLastPathComponent)
             }
+            progress(0)   // folders carry no bytes
             return
         }
         switch (item.source, item.destination) {

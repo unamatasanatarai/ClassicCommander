@@ -19,7 +19,7 @@ public final class FTPController {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = text
-        alert.runModal()
+        Modal.run(alert)
     }
     /// Asks whether to trust an unverified certificate (summary). Replaceable in tests.
     public var askTrust: (String) -> Bool = { summary in
@@ -29,7 +29,7 @@ public final class FTPController {
         alert.informativeText = summary + "\n\nOnly trust it if you know this is the right server. ClassicCommander will remember exactly this key and refuse a different one later."
         alert.addButton(withTitle: "Cancel")
         alert.addButton(withTitle: "Trust This Certificate")
-        return alert.runModal() == .alertSecondButtonReturn
+        return Modal.run(alert) == .alertSecondButtonReturn
     }
     /// Asks whether to trust an SSH server's host key (fingerprints). Replaceable in tests.
     public var askHostKeyTrust: (String) -> Bool = { text in
@@ -39,7 +39,7 @@ public final class FTPController {
         alert.informativeText = text + "\n\nOnly trust it if the fingerprint is right. ClassicCommander will remember these keys and refuse different ones later."
         alert.addButton(withTitle: "Cancel")
         alert.addButton(withTitle: "Trust This Host Key")
-        return alert.runModal() == .alertSecondButtonReturn
+        return Modal.run(alert) == .alertSecondButtonReturn
     }
     public private(set) lazy var managerWindow = FTPConnectionManagerController(ftp: self)
     public private(set) lazy var transfersWindow = TransfersWindowController(manager: transfers)
@@ -352,7 +352,7 @@ public final class FTPController {
     }
 
     private func openRemoteFile(_ entry: FileEntry, session: RemoteSession) {
-        downloadTemporary(entry, session: session) { url in NSWorkspace.shared.open(url) }
+        downloadTemporary(entry, session: session) { url in Modal.open(url) }
     }
 
     // MARK: File commands

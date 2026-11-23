@@ -51,12 +51,16 @@ public struct LocationMenu: Equatable {
         ]
         let urls = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: keys,
                                                          options: [.skipHiddenVolumes]) ?? []
-        return urls.map { url in
+        return ordered(urls.map { url in
             let v = try? url.resourceValues(forKeys: Set(keys))
             let available = v?.volumeAvailableCapacityForImportantUsage ?? v?.volumeAvailableCapacity.map(Int64.init)
             return .drive(name: v?.volumeLocalizedName ?? url.lastPathComponent, url: url,
                           available: available, total: v?.volumeTotalCapacity.map(Int64.init))
-        }
-        .sorted { a, b in a.url.path == "/" || (b.url.path != "/" && a.url.path < b.url.path) }
+        })
+    }
+
+    /// The startup volume first, then the others by path.
+    static func ordered(_ drives: [Item]) -> [Item] {
+        drives.sorted { a, b in a.url.path == "/" || (b.url.path != "/" && a.url.path < b.url.path) }
     }
 }

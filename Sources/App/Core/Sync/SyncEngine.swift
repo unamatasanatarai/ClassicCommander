@@ -536,10 +536,6 @@ public enum SyncExecutor {
         return report
     }
 
-    /// True when a local side still matches what the comparison saw (or was absent and still is).
-    static func unchanged(_ info: SyncFileInfo?) -> Bool {
-        SyncFiles(sessions: { _ in nil }).unchanged(info)
-    }
 }
 
 /// File access for synchronizing, on this Mac or on a connected server.

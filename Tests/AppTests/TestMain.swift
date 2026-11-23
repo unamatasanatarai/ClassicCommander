@@ -5,6 +5,16 @@ struct TestMain {
     static func main() {
         // Initialize NSApplication for AppKit UI components
         _ = NSApplication.shared
+        // No dialog may block and nothing may be launched while testing: every dialog answers
+        // "Cancel", panels choose nothing; tests that need an answer set these themselves.
+        Modal.answerAlert = { _ in .cancel }
+        Modal.answerPanel = { _ in [] }
+        Modal.opened = { _ in }
+        Modal.launched = { _ in }
+        Modal.terminated = {}
+        Modal.poppedUp = { _ in }
+        // Running curl/sftp are polled often, so progress reporting runs even for quick transfers.
+        RemoteTiming.pollInterval = 0.01
 
         print("==================================================")
         print("         Running Swift Native Test Suite          ")
@@ -47,6 +57,9 @@ struct TestMain {
 
         print("\n--- Security Regression Suite ---")
         SecurityTests.run(testRunner: runTest)
+
+        print("\n--- Coverage Suite ---")
+        CoverageTests.run(testRunner: runTest)
 
         let totalElapsedMs = (CFAbsoluteTimeGetCurrent() - totalStart) * 1000.0
 

@@ -44,9 +44,9 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
     private(set) var comparison = SyncComparison()
     private(set) var visibleIndexes: [Int] = []
     private(set) var config: SyncConfiguration?
-    private var isComparing = false
+    private(set) var isComparing = false
     private var cancelFlag: CancelFlag?
-    private var confirmation: SyncConfirmationController?
+    private(set) var confirmation: SyncConfirmationController?
     /// Open diff windows (View / 3), kept until closed.
     private var diffWindows: [DiffWindowController] = []
     /// The result of the last synchronisation, shown in front of the re-comparison summary.
@@ -491,7 +491,7 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
             return (result, temps)
         }
         let done: ((Result<FileComparison, Error>, [URL])) -> Void = { [weak viewer] output in
-            guard let viewer = viewer else { output.1.forEach { try? FileManager.default.removeItem(at: $0) }; return }
+            guard let viewer = viewer else { return DiffWindowController.removeTemporaryFiles(output.1) }
             viewer.temporaryFiles = output.1
             switch output.0 {
             case .success(let c): viewer.show(c)
@@ -650,9 +650,8 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
-        guard let window = window else { return }
-        panel.beginSheetModal(for: window) { response in
-            if response == .OK, let url = panel.url { field.stringValue = url.path }
+        Modal.choose(panel, for: window) { urls in
+            if let url = urls.first { field.stringValue = url.path }
         }
     }
 
@@ -663,7 +662,7 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
             Which files are compared:  *.*  (all),  *.txt;*.doc  (several masks),  \
             * | *.tmp;*.bak  (all except the masks after |). Folders are always walked.
             """
-        if let window = window { alert.beginSheetModal(for: window) } else { alert.runModal() }
+        Modal.sheet(alert, for: window)
     }
 
     public func windowWillClose(_ notification: Notification) {
@@ -743,7 +742,7 @@ final class SyncConfirmationController: NSWindowController, NSTableViewDataSourc
     let deleteBox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     let overwriteBox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     let emptyDirsBox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
-    private let table = NSTableView()
+    let table = NSTableView()
     private let progress = NSProgressIndicator()
     private let progressLabel = NSTextField(labelWithString: "")
     let startButton = NSButton(title: "Start", target: nil, action: nil)

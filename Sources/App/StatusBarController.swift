@@ -144,8 +144,7 @@ public final class StatusBarController: NSObject {
             onQuit()
         } else {
             cleanup()
-            NSApp.terminate(nil)
-            exit(0)
+            Modal.terminate()   // NSApp.terminate ends the process
         }
     }
 }

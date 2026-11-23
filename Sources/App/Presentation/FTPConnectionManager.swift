@@ -10,8 +10,8 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
     private lazy var detachedRepository = FTPProfileRepository(defaults: UserDefaults(suiteName: "ClassicCommander.detached") ?? .standard,
                                                               credentials: MemoryCredentialStore())
     let outline = NSOutlineView()
-    private let status = NSTextField(wrappingLabelWithString: "Double-click a saved profile to connect.")
-    private var editor: FTPProfileEditorController?
+    let status = NSTextField(wrappingLabelWithString: "Double-click a saved profile to connect.")
+    private(set) var editor: FTPProfileEditorController?
 
     /// Folder rows are their names; profile rows are profile ids.
     private final class Node: NSObject {
@@ -237,7 +237,7 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
         alert.window.initialFirstResponder = field
         alert.addButton(withTitle: "Connect")
         alert.addButton(withTitle: "Cancel")
-        return alert.runModal() == .alertFirstButtonReturn ? field.stringValue : nil
+        return Modal.run(alert) == .alertFirstButtonReturn ? field.stringValue : nil
     }
 
     @objc func newProfile() {
@@ -254,7 +254,7 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
         alert.accessoryView = field
         alert.addButton(withTitle: "Continue")
         alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard Modal.run(alert) == .alertFirstButtonReturn else { return }
         guard let (profile, password) = FTPProfile.fromURL(field.stringValue) else {
             status.stringValue = "That is not an ftp://, ftps:// or sftp:// address."
             return NSSound.beep()
@@ -275,7 +275,7 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
         alert.accessoryView = field
         alert.addButton(withTitle: "Create")
         alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard Modal.run(alert) == .alertFirstButtonReturn else { return }
         repository.addFolder(field.stringValue)
         reload()
     }
@@ -309,7 +309,7 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
         }
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard Modal.run(alert) == .alertFirstButtonReturn else { return }
         if let folder = node.folder { repository.deleteFolder(folder) } else if let id = node.profileID { repository.delete(id) }
         reload()
     }
@@ -322,7 +322,7 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
             protected by your login. They are never written to settings files or exports. \
             Untick “Save password in Keychain” in a profile to be asked each time instead.
             """
-        alert.runModal()
+        Modal.run(alert)
     }
 
     @objc private func showHelp() {
@@ -337,6 +337,6 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
             are encrypted; an encrypted connection is never downgraded. SFTP (choose it under Protocol) runs over SSH and \
             logs in with a key file or a password; the server's host key is always checked.
             """
-        alert.runModal()
+        Modal.run(alert)
     }
 }

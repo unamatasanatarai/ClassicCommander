@@ -195,7 +195,7 @@ public final class SFTPClient: RemoteClient {
         try process.run()
         input.fileHandleForWriting.write(Data((commands.joined(separator: "\n") + "\n").utf8))
         try? input.fileHandleForWriting.close()
-        while exited.wait(timeout: .now() + 0.25) == .timedOut {
+        while exited.wait(timeout: .now() + RemoteTiming.pollInterval) == .timedOut {
             if cancel?.isCancelled == true {
                 process.terminate()
                 process.waitUntilExit()

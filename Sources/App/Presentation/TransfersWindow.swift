@@ -6,7 +6,7 @@ import AppKit
 public final class TransfersWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
     private let manager: TransferManager
     let table = NSTableView()
-    private let details = NSTextView()
+    let details = NSTextView()
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let retryButton = NSButton(title: "Retry failed", target: nil, action: nil)
     private let clearButton = NSButton(title: "Clear finished", target: nil, action: nil)

@@ -228,8 +228,13 @@ final class DiffWindowController: NSWindowController, NSWindowDelegate {
         return false
     }
 
+    /// Deletes downloaded copies (also used when the window closed before they arrived).
+    static func removeTemporaryFiles(_ files: [URL]) {
+        for f in files { try? FileManager.default.removeItem(at: f) }
+    }
+
     func windowWillClose(_ notification: Notification) {
-        for f in temporaryFiles { try? FileManager.default.removeItem(at: f) }
+        Self.removeTemporaryFiles(temporaryFiles)
         temporaryFiles = []
         NotificationCenter.default.removeObserver(self)
     }

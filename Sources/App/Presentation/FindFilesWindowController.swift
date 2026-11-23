@@ -58,7 +58,7 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
     let dateBetweenBox = NSButton(checkboxWithTitle: "Date between:", target: nil, action: nil)
     let dateFromPicker = NSDatePicker()
     let dateToPicker = NSDatePicker()
-    private let dateFromButton = NSButton(title: ">>", target: nil, action: nil)
+    let dateFromButton = NSButton(title: ">>", target: nil, action: nil)
     private let dateToButton = NSButton(title: ">>", target: nil, action: nil)
     let notOlderBox = NSButton(checkboxWithTitle: "Not older than:", target: nil, action: nil)
     let notOlderField = NSTextField()
@@ -827,10 +827,9 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = true
         panel.prompt = "Search Here"
-        guard let window = window else { return }
-        panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, let self = self else { return }
-            self.searchIn.stringValue = panel.urls.map(\.path).joined(separator: "; ")
+        Modal.choose(panel, for: window) { [weak self] urls in
+            guard !urls.isEmpty, let self = self else { return }
+            self.searchIn.stringValue = urls.map(\.path).joined(separator: "; ")
         }
     }
 
@@ -846,7 +845,7 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
             item.image = icon
             menu.addItem(item)
         }
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: drivesButton.bounds.height + 2), in: drivesButton)
+        Modal.popUp(menu, at: NSPoint(x: 0, y: drivesButton.bounds.height + 2), in: drivesButton)
     }
 
     @objc private func driveChosen(_ sender: NSMenuItem) {
@@ -886,7 +885,7 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
             Results: double-click or Go to file jumps there; Feed to listbox shows all results in the panel; \
             View opens Quick Look. Load/Save stores search setups by name.
             """
-        if let window = window { alert.beginSheetModal(for: window) } else { alert.runModal() }
+        Modal.sheet(alert, for: window)
     }
 
     private func show(_ error: SearchValidationError) {
@@ -897,7 +896,7 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
         let alert = NSAlert()
         alert.messageText = "Find Files"
         alert.informativeText = error.message
-        if let window = window { alert.beginSheetModal(for: window) } else { alert.runModal() }
+        Modal.sheet(alert, for: window)
     }
 
     /// Saves the settings and puts the current texts at the top of the histories.
@@ -946,7 +945,7 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
         guard let window = window else { return }
-        alert.beginSheetModal(for: window) { [weak self] response in
+        Modal.sheet(alert, for: window) { [weak self] response in
             let name = field.stringValue.trimmingCharacters(in: .whitespaces)
             guard response == .alertFirstButtonReturn, !name.isEmpty else { return }
             self?.storeTemplate(named: name)

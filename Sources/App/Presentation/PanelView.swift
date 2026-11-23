@@ -75,7 +75,7 @@ public final class PanelView: NSView {
 
     // MARK: Layout
 
-    private struct Column {
+    struct Column {
         let field: SortColumn?   // nil for Attr, which does not sort
         let title: String
         var x: CGFloat
@@ -83,7 +83,7 @@ public final class PanelView: NSView {
         let alignment: NSTextAlignment
     }
 
-    private struct Layout {
+    struct Layout {
         let driveBar: NSRect
         let homeButton: NSRect
         let rootButton: NSRect
@@ -96,7 +96,7 @@ public final class PanelView: NSView {
         let columns: [Column]
     }
 
-    private var layoutInfo: Layout {
+    var layoutInfo: Layout {
         let b = bounds
         let driveBar = NSRect(x: 0, y: 0, width: b.width, height: barHeight)
         let upButton = NSRect(x: b.width - 24, y: 2, width: 22, height: barHeight - 4)

@@ -39,7 +39,7 @@ final class FTPProfileEditorController: NSWindowController {
     let proxyUserField = NSTextField()
     private let pinLabel = NSTextField(wrappingLabelWithString: "")
     private let forgetPin = NSButton(title: "Forget trusted key", target: nil, action: nil)
-    private let testResult = NSTextField(wrappingLabelWithString: "")
+    let testResult = NSTextField(wrappingLabelWithString: "")
 
     init(profile: FTPProfile, password: String?, folders: [String], isNew: Bool) {
         self.profile = profile
@@ -278,11 +278,10 @@ final class FTPProfileEditorController: NSWindowController {
         panel.showsHiddenFiles = true
         panel.canChooseDirectories = false
         panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory() + "/.ssh")
-        let apply: (NSApplication.ModalResponse) -> Void = { [weak self] response in
-            guard response == .OK, let url = panel.url else { return }
+        Modal.choose(panel, for: window) { [weak self] urls in
+            guard let url = urls.first else { return }
             self?.keyFileField.stringValue = (url.path as NSString).abbreviatingWithTildeInPath
         }
-        if let window = window { panel.beginSheetModal(for: window, completionHandler: apply) } else { apply(panel.runModal()) }
     }
 
     /// The profile as currently entered (the password separately).

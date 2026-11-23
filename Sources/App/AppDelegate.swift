@@ -4,18 +4,28 @@ import os
 public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, NSMenuDelegate {
     private static let logger = Logger(subsystem: AppConfig.bundleIdentifier, category: "Application")
 
-    private var statusBarController: StatusBarController?
+    private(set) var statusBarController: StatusBarController?
 
     // Lazy window initialization: backing store and view hierarchy are allocated only on demand,
     // saving ~16MB of resident memory during routine background/status bar operation.
     private lazy var window: NSWindow = createWindow()
     var commanderView: CommanderView?
-    private let settings = SettingsStore()
+    private let settings: SettingsStore
+    /// Where the main window keeps its frame ("" = not saved; tests).
+    private let windowAutosaveName: String
+    /// Brings the app to the front when showing windows (tests turn it off).
+    var activatesApp = true
     private var quitGate = DoublePressGate(interval: 1.5)
     private lazy var optionsController = OptionsWindowController(store: settings)
 
+    public init(settings: SettingsStore = SettingsStore(), windowAutosaveName: String = "MainWindow") {
+        self.settings = settings
+        self.windowAutosaveName = windowAutosaveName
+        super.init()
+    }
+
     public func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
+        if activatesApp { NSApp.setActivationPolicy(.regular) }
         // No "Show Tab Bar / Show All Tabs" (macOS adds them to a menu named View).
         NSWindow.allowsAutomaticWindowTabbing = false
         setupMainMenu()
@@ -27,7 +37,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
 
     public func showWindow() {
         window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if activatesApp { NSApp.activate(ignoringOtherApps: true) }
     }
 
     private func setupMainMenu() {
@@ -158,7 +168,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
 
     @objc private func quitPressed() {
         if quitGate.press() {
-            NSApp.terminate(nil)
+            Modal.terminate()
         } else if let commander = commanderView, window.isVisible {
             commander.showHint("Press ⌘Q again to quit")
         } else {
@@ -265,7 +275,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
 
     @objc private func showOptions() {
         optionsController.present()
-        NSApp.activate(ignoringOtherApps: true)
+        if activatesApp { NSApp.activate(ignoringOtherApps: true) }
     }
 
     @objc private func settingsDidChange() {
@@ -307,7 +317,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         win.minSize = NSSize(width: 640, height: 320)
         win.backgroundColor = settings.theme.chrome.nsColor
         win.center()
-        win.setFrameAutosaveName("MainWindow")
+        if !windowAutosaveName.isEmpty { win.setFrameAutosaveName(windowAutosaveName) }
 
         let home = FileManager.default.homeDirectoryForCurrentUser
         let model = CommanderModel(
@@ -319,9 +329,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         commander.onSettingsChange = { [weak self] new in self?.settings.save(new) }
         NotificationCenter.default.addObserver(self, selector: #selector(settingsDidChange),
                                                name: SettingsStore.didChange, object: settings)
-        commander.onOpenFile = { url in
-            NSWorkspace.shared.open(url)
-        }
+        commander.onOpenFile = Modal.open
         self.commanderView = commander
 
         win.contentView = commander

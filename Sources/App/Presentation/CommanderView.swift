@@ -51,9 +51,7 @@ public final class CommanderView: NSView {
     /// Mounted drives for the location menu; replaceable in tests.
     public var drivesProvider: () -> [LocationMenu.Item] = LocationMenu.mountedDrives
     /// Shows the location menu under a panel's drive bar; replaceable in tests (popping up blocks).
-    public var presentMenu: (NSMenu, PanelView) -> Void = { menu, panel in
-        menu.popUp(positioning: menu.items.first, at: panel.menuAnchor, in: panel)
-    }
+    public var presentMenu: (NSMenu, PanelView) -> Void = Modal.popUp
     /// Where folder sizes are worked out.
     public var sizingQueue = DispatchQueue(label: "ClassicCommander.folderSize", qos: .userInitiated)
 
@@ -363,7 +361,7 @@ public final class CommanderView: NSView {
         alert.window.initialFirstResponder = field
         alert.addButton(withTitle: "Show")
         alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        guard Modal.run(alert) == .alertFirstButtonReturn else { return nil }
         let text = field.stringValue.trimmingCharacters(in: .whitespaces)
         if !text.isEmpty { lastShowMask = text }
         return text
@@ -378,22 +376,17 @@ public final class CommanderView: NSView {
         }
         let ops = settings.operation
         let launch = TerminalLauncher.launch(appPath: ops.terminalApp, template: ops.terminalArguments, folder: panel.model.directory)
-        let config = NSWorkspace.OpenConfiguration()
-        let report: (Error?) -> Void = { [weak self] error in
-            guard let error = error else { return }
-            DispatchQueue.main.async {
-                self?.showHint("Could not open the terminal: \(error.localizedDescription)", duration: 4)
-                NSSound.beep()
-            }
-        }
-        switch launch {
-        case let .openFolder(app, folder):
-            NSWorkspace.shared.open([folder], withApplicationAt: app, configuration: config) { _, e in report(e) }
-        case let .run(app, arguments):
-            config.arguments = arguments
-            config.createsNewApplicationInstance = true
-            NSWorkspace.shared.openApplication(at: app, configuration: config) { _, e in report(e) }
-        }
+        Modal.launch(launch, failed: reportTerminalFailure)
+    }
+
+    /// Launch errors arrive on a background thread.
+    func reportTerminalFailure(_ error: Error) {
+        DispatchQueue.main.async { [weak self] in self?.terminalFailed(error) }
+    }
+
+    func terminalFailed(_ error: Error) {
+        showHint("Could not open the terminal: \(error.localizedDescription)", duration: 4)
+        NSSound.beep()
     }
 
     /// Ctrl+U: the left panel's contents go right and the right panel's go left; the active side stays.

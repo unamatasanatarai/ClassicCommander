@@ -181,7 +181,7 @@ public final class FTPClient: RemoteClient {
         input.fileHandleForWriting.write(Data(config.utf8))
         try? input.fileHandleForWriting.close()
 
-        while exited.wait(timeout: .now() + 0.25) == .timedOut {
+        while exited.wait(timeout: .now() + RemoteTiming.pollInterval) == .timedOut {
             if cancel?.isCancelled == true {
                 process.terminate()
                 process.waitUntilExit()

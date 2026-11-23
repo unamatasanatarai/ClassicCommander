@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help setup build run kill test dmg release revoke clean
+.PHONY: help setup build run kill test coverage dmg release revoke clean
 
 APP_NAME  ?= $(shell bash -c 'source ./scripts/config.sh && echo "$$APP_NAME"')
 BUNDLE_ID ?= $(shell bash -c 'source ./scripts/config.sh && echo "$$BUNDLE_ID"')
@@ -38,6 +38,10 @@ kill:
 ## test: Run native Swift unit test suite
 test:
 	@./scripts/test.sh
+
+## coverage: Run the tests with code coverage; fails unless every function and closure is called
+coverage:
+	@./scripts/coverage.sh --check
 
 ## dmg: Build styled DMG distribution package
 dmg:

@@ -200,7 +200,7 @@ public struct Theme: Equatable {
 /// Stored as {"text": "#FFFFFF", ...}. Colours missing from saved data (e.g. slots added in a
 /// later version) take the default theme's value, so an upgrade never throws away a custom theme.
 extension Theme: Codable {
-    private struct SlotKey: CodingKey {
+    struct SlotKey: CodingKey {
         var stringValue: String
         var intValue: Int? { nil }
         init(stringValue: String) { self.stringValue = stringValue }

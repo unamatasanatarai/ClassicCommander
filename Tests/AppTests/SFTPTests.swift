@@ -327,6 +327,32 @@ public enum SFTPTests {
             try expect(RemoteSession.path(of: right.model.directory) == www, "a file link is not entered")
         }
 
+        testRunner("SFTP panel: an unknown host key is shown, trusted, saved and the connection retried") {
+            let view = CoverageTests.commander()
+            let suite = "SFTPTrust-\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let ftp = view.ftp
+            ftp.repository = FTPProfileRepository(defaults: defaults, credentials: MemoryCredentialStore())
+            var profile = server.profile(trusted: false)
+            ftp.repository.save(profile, password: nil)
+            var shown = ""
+            ftp.askHostKeyTrust = { shown = $0; return false }
+            var outcome: Result<Void, FTPError>?
+            ftp.connect(profile, password: nil, side: .right) { outcome = $0 }
+            CoverageTests.wait { outcome != nil }
+            try expect(shown.contains("SHA256:") && outcome.map { if case .failure(.hostKeyUnknown) = $0 { return true } else { return false } } == true,
+                       "declined: \(String(describing: outcome))")
+            ftp.askHostKeyTrust = { _ in true }
+            outcome = nil
+            ftp.connect(profile, password: nil, side: .right) { outcome = $0 }
+            CoverageTests.wait { outcome != nil }
+            guard case .success = outcome else { throw Fail(description: "trusted connect: \(String(describing: outcome))") }
+            profile = ftp.repository.profile(profile.id)!
+            try expect(!profile.trustedHostKeys.isEmpty, "trusted keys saved in the profile")
+            ftp.disconnect(.right)
+        }
+
         testRunner("SFTP Find Files: names and text on the server") {
             let session = RemoteSession(client: SFTPClient(profile: server.profile(), secret: nil))
             defer { session.client.close() }
