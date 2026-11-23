@@ -50,8 +50,35 @@ public final class FTPController {
         Self.removeOldTemporaryCopies()
         transfers.onChange = { [weak self] job in
             self?.transfersWindow.refresh()
-            if job.state == .finished || job.state == .cancelled { self?.commander?.reloadPanels() }
+            if job.state == .finished || job.state == .cancelled {
+                self?.commander?.reloadPanels()
+                // Problems are never silent: the queue opens on a job with failures.
+                if job.failedCount > 0 && self?.runSynchronously == false { self?.transfersWindow.present() }
+            }
         }
+        // "Target file exists": asked through the commander's prompts (the real dialog in the app).
+        transfers.resolveConflict = { [weak self] conflict in
+            self?.commander?.fileCommands.prompts.resolveConflict(conflict) ?? .skip
+        }
+    }
+
+    /// Runs a copy or move job. The queue window opens for queued jobs, and for any job still
+    /// running after a moment (quick renames and small copies don't flash it up).
+    func startJob(_ job: TransferJob, synchronously: Bool = false) {
+        let sync = synchronously || runSynchronously
+        transfers.enqueue(job, synchronously: sync)
+        guard !sync else { return }
+        if job.waitsInQueue { return transfersWindow.present() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.queueWindowDelay) { [weak self] in
+            self?.showQueueIfRunning(job)
+        }
+    }
+
+    /// How long a job may run before the queue window opens by itself.
+    static var queueWindowDelay: TimeInterval = 0.7
+
+    func showQueueIfRunning(_ job: TransferJob) {
+        if TransferManager.isUnfinished(job) { transfersWindow.present() }
     }
 
     public func session(for panel: PanelView) -> RemoteSession? {
@@ -287,6 +314,18 @@ public final class FTPController {
     }
 
     /// Re-reads the remote folder (Refresh, and after transfers).
+    /// ⇧6 on a server: renames there, then shows the folder again with the cursor on the new name.
+    func rename(_ entry: FileEntry, to name: String, in panel: PanelView) {
+        guard let session = session(for: panel) else { return }
+        let from = RemoteSession.path(of: entry.url)
+        let to = RemoteSession.normalize((from as NSString).deletingLastPathComponent + "/" + name)
+        background({ try session.client.rename(from, to: to) }) { [weak self] result in
+            if case .failure(let e) = result { self?.report(e, title: "Rename failed") }
+            self?.refresh(panel)
+            panel.model.focus(name: name, visibleRows: panel.visibleRows)
+        }
+    }
+
     func refresh(_ panel: PanelView) {
         guard let session = session(for: panel) else { return }
         let path = RemoteSession.path(of: panel.model.directory)
@@ -357,8 +396,8 @@ public final class FTPController {
 
     // MARK: File commands
 
-    private func location(for entry: FileEntry, in panel: PanelView) -> TransferLocation {
-        if let s = session(for: panel) { return .remote(s, RemoteSession.path(of: entry.url)) }
+    private func location(for entry: FileEntry, in panel: PanelView?) -> TransferLocation {
+        if let panel = panel, let s = session(for: panel) { return .remote(s, RemoteSession.path(of: entry.url)) }
         return .local(entry.url)
     }
 
@@ -367,23 +406,34 @@ public final class FTPController {
         return .local(panel.model.directory)
     }
 
-    /// 5 / 6 when either panel is remote. Returns false when both panels are local.
-    func transfer(move: Bool, prompts: FileCommandPrompts) -> Bool {
+    /// A folder given by its URL (local, or ccftp:// on a connected server).
+    private func folderLocation(of url: URL) -> TransferLocation {
+        if let id = RemoteSession.sessionID(of: url), let s = sessions[id] { return .remote(s, RemoteSession.path(of: url)) }
+        return .local(url)
+    }
+
+    /// 5 / 6 (or a drop) when a server is involved. Returns false when everything is local.
+    func transfer(move: Bool, prompts: FileCommandPrompts, drop: PanelDrop? = nil) -> Bool {
         guard let commander = commander else { return false }
-        let source = commander.activeView
-        let target = commander.view(for: commander.model.activeSide.other)
-        guard source.model.isRemote || target.model.isRemote else { return false }
-        let items = source.model.operationTargets
+        var source: PanelView? = commander.activeView
+        var items = commander.activeView.model.operationTargets
+        var destination = folderLocation(commander.view(for: commander.model.activeSide.other))
+        if let drop = drop {
+            source = drop.source
+            items = drop.entries
+            destination = folderLocation(of: drop.folder)
+        }
+        guard source?.model.isRemote == true || destination.isRemote else { return false }
         guard !items.isEmpty else { NSSound.beep(); return true }
 
-        let destination = folderLocation(target)
         let verb = move ? "Move" : "Copy"
         let what = FileCommands.describe(items)
         let defaultText = destination.displayPath.hasSuffix("/") ? destination.displayPath : destination.displayPath + "/"
-        guard let typed = prompts.askText(title: verb, message: "\(verb) \(what) to:", defaultValue: defaultText, okTitle: verb) else { return true }
+        guard let answer = prompts.askTransfer(FileCommands.question(verb: verb, items: items, target: defaultText)) else { return true }
+        let typed = answer.target
 
         // Typing just a new name for one item of a remote folder renames it on the server.
-        if move, let session = session(for: source), items.count == 1, !typed.contains("/"), !typed.isEmpty {
+        if move, let source = source, let session = session(for: source), items.count == 1, !typed.contains("/"), !typed.isEmpty {
             let from = RemoteSession.path(of: items[0].url)
             let to = RemoteSession.normalize((from as NSString).deletingLastPathComponent + "/" + typed)
             background({ try session.client.rename(from, to: to) }) { [weak self] result in
@@ -397,36 +447,25 @@ public final class FTPController {
             return true
         }
 
-        let sources = items.map { TransferPlanner.Source(location: location(for: $0, in: source), isFolder: $0.kind == .directory, size: $0.size ?? 0) }
+        let sources = items.map {
+            TransferPlanner.Source(location: location(for: $0, in: source), isFolder: $0.kind == .directory,
+                                   size: $0.size ?? 0, modified: $0.modified)
+        }
         commander.showHint("Preparing \(verb.lowercased())…", duration: 30)
-        background({ try TransferPlanner.plan(sources, into: destination) }) { [weak self] result in
+        background({ try TransferPlanner.plan(sources, into: destination, move: move, mask: answer.fileMask) }) { [weak self] result in
             guard let self = self else { return }
             commander.showHint("", duration: 0.01)
             switch result {
             case .failure(let e):
                 self.report(e, title: "\(verb) failed")
-            case .success(var plan):
-                // Existing targets: ask (with "for all"), as for local copies.
-                var skip = Set<Int>()
-                var remembered: ConflictChoice?
-                for i in plan.conflicts {
-                    let item = plan.items[i]
-                    let choice: ConflictChoice
-                    if let r = remembered { choice = r } else {
-                        let answer = prompts.resolveConflict(source: URL(fileURLWithPath: item.source.displayPath),
-                                                              existing: URL(fileURLWithPath: item.destination.displayPath))
-                        choice = answer.0
-                        if answer.applyToAll { remembered = answer.0 }
-                    }
-                    if choice == .cancel { return }
-                    if choice == .skip { skip.insert(i) }
-                }
-                plan.items = plan.items.enumerated().filter { !skip.contains($0.offset) }.map(\.element)
+            case .success(let plan):
+                // Existing targets are asked about while copying ("target file exists").
                 let job = TransferJob(title: "\(verb) \(what): \(sources.first?.location.displayPath ?? "") → \(destination.displayPath)",
                                       items: plan.items, isMove: move, sourceFoldersToRemove: move ? plan.foldersToRemove : [])
-                source.model.clearMarks()
-                if !self.runSynchronously { self.transfersWindow.present() }
-                self.transfers.enqueue(job)
+                job.verify = answer.verify
+                job.waitsInQueue = answer.queue
+                source?.model.clearMarks()
+                self.startJob(job)
             }
         }
         return true

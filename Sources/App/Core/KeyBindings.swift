@@ -93,6 +93,14 @@ public enum CommandAction: String, CaseIterable, Codable {
     case ftpConnect, ftpNewConnection, ftpDisconnect, ftpTransfers, refresh
     case swapPanels
     case openTerminal
+    case openInFinder
+    case selectAll, deselectAll, selectSameExtension, deselectSameExtension, restoreSelection, showMarkedOnly
+    case copyNames, copyPaths, copyNamesWithDetails, copyPathsWithDetails
+    case compareByDate, compareBySize
+    case directoryHotlist
+    case multiRename
+    case renameInPlace, deletePermanently
+    case newTab, closeTab, nextTab, previousTab
     case sortByName, sortByExtension, sortByDate, sortBySize, sortUnsorted, reverseOrder
     case showAllFiles, showPrograms, showCustomFilter
     case toggleHiddenFiles, toggleFunctionKeyBar, toggleFolderBrackets
@@ -129,7 +137,7 @@ public enum CommandAction: String, CaseIterable, Codable {
         case .ftpConnect: return "FTP connect (connection manager)"
         case .ftpNewConnection: return "FTP new connection"
         case .ftpDisconnect: return "FTP disconnect"
-        case .ftpTransfers: return "FTP transfers window"
+        case .ftpTransfers: return "Copy / move queue window"
         case .sortByName: return "Sort by name"
         case .sortByExtension: return "Sort by extension"
         case .sortByDate: return "Sort by date/time"
@@ -143,6 +151,27 @@ public enum CommandAction: String, CaseIterable, Codable {
         case .toggleFunctionKeyBar: return "Show the function key button bar"
         case .toggleFolderBrackets: return "Show [brackets] around folder names"
         case .openTerminal: return "Open terminal here (in the active panel's folder)"
+        case .openInFinder: return "Open this folder in Finder (like “open .” in Terminal)"
+        case .selectAll: return "Select all (Ctrl+Num+)"
+        case .deselectAll: return "Unselect all (Ctrl+Num-)"
+        case .selectSameExtension: return "Select all files with the same extension"
+        case .deselectSameExtension: return "Unselect all files with the same extension"
+        case .restoreSelection: return "Restore the previous selection"
+        case .showMarkedOnly: return "Show only the selected files (toggle)"
+        case .copyNames: return "Copy selected names to the clipboard"
+        case .copyPaths: return "Copy selected names with full paths to the clipboard"
+        case .copyNamesWithDetails: return "Copy selected names with all details to the clipboard (table)"
+        case .copyPathsWithDetails: return "Copy selected full paths with all details to the clipboard (table)"
+        case .compareByDate: return "Compare directories: select newer and missing files"
+        case .compareBySize: return "Compare directories: select files that differ in size, and missing ones"
+        case .directoryHotlist: return "Directory hotlist: quick locations (Ctrl+D)"
+        case .multiRename: return "Multi-Rename Tool (Ctrl+M)"
+        case .renameInPlace: return "Rename in place (Shift+F6)"
+        case .deletePermanently: return "Delete permanently, without the Trash (Shift+F8)"
+        case .newTab: return "New tab (same folder)"
+        case .closeTab: return "Close tab"
+        case .nextTab: return "Next tab"
+        case .previousTab: return "Previous tab"
         case .swapPanels: return "Swap panels (left ↔ right, as Ctrl+U in Total Commander)"
         case .refresh: return "Refresh (re-read folder)"
         }
@@ -183,7 +212,8 @@ public struct KeyBindings: Equatable, Codable {
         .parentFolder: [KeyCombo(KeyCode.delete), KeyCombo(KeyCode.left), KeyCombo(KeyCode.h), KeyCombo(KeyCode.up, .command)],
         .switchPanel: [KeyCombo(KeyCode.tab), KeyCombo(KeyCode.tab, .shift)],
         .toggleSelection: [KeyCombo(KeyCode.space)],
-        .invertSelection: [KeyCombo(KeyCode.eight, .shift), KeyCombo(KeyCode.keypadMultiply)],
+        // ⇧8 is Delete permanently (Total Commander's Shift+F8); invert stays on Num * and ⌃⇧8.
+        .invertSelection: [KeyCombo(KeyCode.keypadMultiply), KeyCombo(KeyCode.eight, [.control, .shift])],
         // No number pad on Mac keyboards: "+" is ⇧= (plain "=" too, same key), "-" is the "-" key.
         .selectByMask: [KeyCombo(KeyCode.equal, .shift), KeyCombo(KeyCode.equal), KeyCombo(KeyCode.keypadPlus)],
         .deselectByMask: [KeyCombo(KeyCode.minus), KeyCombo(KeyCode.keypadMinus)],
@@ -207,6 +237,29 @@ public struct KeyBindings: Equatable, Codable {
         .ftpTransfers: [],
         .swapPanels: [KeyCombo(32, .control)],
         .openTerminal: [KeyCombo(17, [.control, .shift])],
+        .openInFinder: [KeyCombo(31, [.control, .shift])],   // ⌃⇧O
+        // Total Commander's Ctrl+Num+ / Ctrl+Num- (no number pad: ⌃= is ⌃+, and ⌃-).
+        .selectAll: [KeyCombo(KeyCode.equal, .control), KeyCombo(KeyCode.equal, [.control, .shift]), KeyCombo(KeyCode.keypadPlus, .control)],
+        .deselectAll: [KeyCombo(KeyCode.minus, .control), KeyCombo(KeyCode.keypadMinus, .control)],
+        .selectSameExtension: [],
+        .deselectSameExtension: [],
+        .restoreSelection: [],
+        .showMarkedOnly: [],
+        .copyNames: [],
+        .copyPaths: [],
+        .copyNamesWithDetails: [],
+        .copyPathsWithDetails: [],
+        .compareByDate: [],
+        .compareBySize: [],
+        .directoryHotlist: [KeyCombo(2, .control)],   // ⌃D, as in Total Commander
+        .multiRename: [KeyCombo(46, .control)],       // ⌃M
+        .renameInPlace: [KeyCombo(KeyCode.six, .shift), KeyCombo(KeyCode.f6, .shift)],
+        .deletePermanently: [KeyCombo(KeyCode.eight, .shift), KeyCombo(KeyCode.f8, .shift)],
+        // Total Commander: Ctrl+T new tab, Ctrl+W close, Ctrl+Tab / Ctrl+Shift+Tab switch.
+        .newTab: [KeyCombo(17, .control)],
+        .closeTab: [KeyCombo(13, .control)],
+        .nextTab: [KeyCombo(KeyCode.tab, .control)],
+        .previousTab: [KeyCombo(KeyCode.tab, [.control, .shift])],
         // Total Commander's Ctrl+F3…F7 (sort) and Ctrl+F10…F12 (show) without F keys:
         // ⌃3…⌃7 sort, ⌃8 / ⌃9 / ⌃0 show all / programs / custom.
         .sortByName: [KeyCombo(20, .control)],
@@ -221,7 +274,7 @@ public struct KeyBindings: Equatable, Codable {
         .toggleHiddenFiles: [KeyCombo(47, [.command, .shift])],    // Finder's ⌘⇧.
         .toggleFunctionKeyBar: [],
         .toggleFolderBrackets: [],
-        .refresh: [KeyCombo(15, .control)],
+        .refresh: [KeyCombo(KeyCode.two), KeyCombo(15, .control)],
     ])
 
     public func keys(for action: CommandAction) -> [KeyCombo] {

@@ -28,6 +28,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         if activatesApp { NSApp.setActivationPolicy(.regular) }
         // No "Show Tab Bar / Show All Tabs" (macOS adds them to a menu named View).
         NSWindow.allowsAutomaticWindowTabbing = false
+        ComboHover.install()
         setupMainMenu()
 
         updateStatusBarIcon()
@@ -106,12 +107,34 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         }
         viewMenuItem.submenu = viewMenu
 
+        // Select Menu (Total Commander's "Mark" menu): every way to select, copy names, compare folders.
+        let selectMenuItem = NSMenuItem()
+        mainMenu.addItem(selectMenuItem)
+        let selectMenu = NSMenu(title: "Select")
+        selectMenu.delegate = self
+        let selectGroups: [[CommandAction]] = [
+            [.selectByMask, .deselectByMask, .selectAll, .deselectAll, .invertSelection],
+            [.selectSameExtension, .deselectSameExtension, .restoreSelection, .showMarkedOnly],
+            [.copyNames, .copyPaths, .copyNamesWithDetails, .copyPathsWithDetails],
+            [.compareByDate, .compareBySize],
+        ]
+        for (i, group) in selectGroups.enumerated() {
+            if i > 0 { selectMenu.addItem(.separator()) }
+            for action in group {
+                let item = NSMenuItem(title: Self.menuTitles[action] ?? action.label, action: #selector(netCommand(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = action.rawValue
+                selectMenu.addItem(item)
+            }
+        }
+        selectMenuItem.submenu = selectMenu
+
         // Commands Menu (Total Commander's tools)
         let commandsMenuItem = NSMenuItem()
         mainMenu.addItem(commandsMenuItem)
         let commandsMenu = NSMenu(title: "Commands")
         commandsMenu.delegate = self
-        for action in [CommandAction.findFiles, .synchronizeDirs, nil, .openTerminal, .swapPanels] {
+        for action in [CommandAction.findFiles, .synchronizeDirs, .multiRename, nil, .openTerminal, .openInFinder, .swapPanels] {
             guard let action = action else { commandsMenu.addItem(.separator()); continue }
             let item = NSMenuItem(title: Self.menuTitles[action] ?? action.label, action: #selector(netCommand(_:)), keyEquivalent: "")
             item.target = self
@@ -128,7 +151,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         for (title, action) in [("FTP Connect…", CommandAction.ftpConnect),
                                 ("FTP New Connection…", .ftpNewConnection),
                                 ("FTP Disconnect", .ftpDisconnect),
-                                ("Transfers…", .ftpTransfers)] {
+                                ("Queue…", .ftpTransfers)] {
             let item = NSMenuItem(title: title, action: #selector(netCommand(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = action.rawValue
@@ -177,13 +200,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
     }
 
     static let menuTitles: [CommandAction: String] = [
-        .findFiles: "Find Files…", .synchronizeDirs: "Synchronize Directories…", .openTerminal: "Open Terminal Here",
-        .ftpConnect: "FTP Connect…", .ftpNewConnection: "FTP New Connection…", .ftpDisconnect: "FTP Disconnect", .ftpTransfers: "Transfers…",
+        .findFiles: "Find Files…", .synchronizeDirs: "Synchronize Directories…", .openTerminal: "Open Terminal Here", .openInFinder: "Open in Finder", .multiRename: "Multi-Rename Tool…",
+        .ftpConnect: "FTP Connect…", .ftpNewConnection: "FTP New Connection…", .ftpDisconnect: "FTP Disconnect", .ftpTransfers: "Queue…",
         .sortByName: "Sort by Name", .sortByExtension: "Sort by Extension", .sortByDate: "Sort by Date/Time",
         .sortBySize: "Sort by Size", .sortUnsorted: "Unsorted", .reverseOrder: "Reverse Order",
         .showAllFiles: "All Files", .showPrograms: "Programs", .showCustomFilter: "Custom Filter…",
         .toggleHiddenFiles: "Hidden Files", .toggleFunctionKeyBar: "Function Key Buttons", .toggleFolderBrackets: "[Brackets] Around Folders",
         .quickFilter: "Quick Filter…", .refresh: "Refresh", .swapPanels: "Swap Panels",
+        .selectByMask: "Select Group…", .deselectByMask: "Unselect Group…", .selectAll: "Select All", .deselectAll: "Unselect All",
+        .invertSelection: "Invert Selection", .selectSameExtension: "Select All with Same Extension",
+        .deselectSameExtension: "Unselect All with Same Extension", .restoreSelection: "Restore Selection",
+        .showMarkedOnly: "Show Selected Only", .copyNames: "Copy Names to Clipboard",
+        .copyPaths: "Copy Names with Path to Clipboard", .copyNamesWithDetails: "Copy Names with All Details to Clipboard",
+        .copyPathsWithDetails: "Copy Names with Path and All Details to Clipboard",
+        .compareByDate: "Compare Directories (Newer and Missing)", .compareBySize: "Compare Directories (Size and Missing)",
     ]
 
     /// Commander menus show each item's current key (Options → Shortcuts may change it) as a real
@@ -261,6 +291,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         case .toggleHiddenFiles: on = display.showHiddenFiles
         case .toggleFunctionKeyBar: on = display.showFunctionKeyBar
         case .toggleFolderBrackets: on = display.showFolderBrackets
+        case .showMarkedOnly: on = panel.showsMarkedOnly
         default: break
         }
         if let on = on { item.state = on ? .on : .off }
@@ -299,7 +330,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
     private func applySettings() {
         updateStatusBarIcon()
         commanderView?.settings = settings.settings
-        window.backgroundColor = settings.theme.chrome.nsColor
+        // Every window (dialogs, alerts and menus too) follows the theme of the panels.
+        AppWindows.apply(settings.theme)
     }
 
     @objc private func openWindowFromMenu() {
@@ -314,15 +346,21 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
             defer: false
         )
         win.title = AppConfig.appName
+        // Closing only hides it: the app keeps this window and shows it again from the Dock.
+        // (Released on close, the Dock icon would bring back a freed window and crash.)
+        win.isReleasedWhenClosed = false
         win.minSize = NSSize(width: 640, height: 320)
-        win.backgroundColor = settings.theme.chrome.nsColor
+        AppWindows.apply(settings.theme)
+        AppWindows.style(win)
+        AppWindows.mainWindow = win
         win.center()
         if !windowAutosaveName.isEmpty { win.setFrameAutosaveName(windowAutosaveName) }
 
         let home = FileManager.default.homeDirectoryForCurrentUser
+        // Both panels open where they were when the app was last used.
         let model = CommanderModel(
-            left: PanelModel(directory: home),
-            right: PanelModel(directory: URL(fileURLWithPath: "/"))
+            left: PanelModel(directory: settings.lastFolder(.left) ?? home),
+            right: PanelModel(directory: settings.lastFolder(.right) ?? URL(fileURLWithPath: "/"))
         )
         let commander = CommanderView(model: model)
         commander.settings = settings.settings
@@ -330,6 +368,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         NotificationCenter.default.addObserver(self, selector: #selector(settingsDidChange),
                                                name: SettingsStore.didChange, object: settings)
         commander.onOpenFile = Modal.open
+        commander.onFolderChange = { [weak self] side, folder in self?.settings.rememberFolder(folder, side: side) }
+        for side in [CommanderModel.Side.left, .right] {
+            let saved = settings.tabs(side)
+            if !saved.paths.isEmpty {
+                commander.restoreTabs(PanelTabs(saved: saved.paths, active: saved.active,
+                                                fallback: commander.view(for: side).model.directory), side: side)
+            }
+        }
+        commander.onTabsChange = { [weak self] side, tabs in self?.settings.saveTabs(tabs, side: side) }
+        commander.splitRatio = settings.splitRatio
+        commander.onSplitChange = { [weak self] ratio in self?.settings.splitRatio = ratio }
         self.commanderView = commander
 
         win.contentView = commander
@@ -337,6 +386,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         win.makeFirstResponder(commander)
         win.delegate = self
         return win
+    }
+
+    /// Finder's "Open With → ClassicCommander" (and files dropped on the Dock icon): shown in the
+    /// panel chosen in Options → Operation.
+    public func application(_ sender: NSApplication, open urls: [URL]) {
+        showWindow()
+        commanderView?.show(urls, in: settings.operation.finderOpensIn == .left ? .left : .right)
     }
 
     public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

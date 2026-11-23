@@ -20,6 +20,16 @@ enum Modal {
         return alert.runModal()
     }
 
+    /// Tests: the button code a modal window (Copy / Move dialog, "target file exists") ends with;
+    /// the window is passed in so its fields can be filled first.
+    static var answerWindow: ((NSWindow) -> NSApplication.ModalResponse)?
+
+    /// Shows a window modally until one of its buttons stops it.
+    static func runWindow(_ window: NSWindow) -> NSApplication.ModalResponse {
+        if let answer = answerWindow { return answer(window) }
+        return NSApp.runModal(for: window)
+    }
+
     /// Shows an alert as a sheet on `window` (modally without one) and reports the button pressed.
     static func sheet(_ alert: NSAlert, for window: NSWindow?, completion: ((NSApplication.ModalResponse) -> Void)? = nil) {
         if let answer = answerAlert { completion?(answer(alert)); return }
@@ -61,6 +71,15 @@ enum Modal {
         func finished(_ response: NSApplication.ModalResponse) {
             completion(response == .OK ? Modal.urls(of: panel) : [])
         }
+    }
+
+    /// Tests: files that would have been opened with a chosen app.
+    static var openedWith: (([URL], URL) -> Void)?
+
+    /// Opens files with a chosen app (Open With).
+    static func open(_ urls: [URL], with app: URL) {
+        if let openedWith = openedWith { openedWith(urls, app); return }
+        NSWorkspace.shared.open(urls, withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
     }
 
     /// Opens a file with its default app.
@@ -105,6 +124,25 @@ enum Modal {
     static func popUp(_ menu: NSMenu, at point: NSPoint, in view: NSView, selecting item: NSMenuItem? = nil) {
         if let poppedUp = poppedUp { poppedUp(menu); return }
         menu.popUp(positioning: item, at: point, in: view)
+    }
+
+    /// Tests: the items of a drag that would have started.
+    static var dragged: (([NSDraggingItem]) -> Void)?
+
+    /// Starts dragging `items` out of `source` (files to the other panel, Finder or any app).
+    static func drag(_ items: [NSDraggingItem], event: NSEvent, source: NSView & NSDraggingSource) {
+        if let dragged = dragged { dragged(items); return }
+        source.beginDraggingSession(with: items, event: event, source: source)
+    }
+
+    /// Tests: text that would have been put on the clipboard.
+    static var copied: ((String) -> Void)?
+
+    /// Puts text on the clipboard.
+    static func copyToClipboard(_ text: String) {
+        if let copied = copied { copied(text); return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 
     /// Quits the app.

@@ -1,7 +1,7 @@
 import AppKit
 
 /// Find Files (⌥7), laid out like Total Commander's dialog:
-///   tabs General / Advanced / Plugins / Load/Save, Start search / Cancel / Help on the right,
+///   tabs General / Advanced, Start search / Cancel / Help on the right,
 ///   "Search results:" list (first line is the summary), View / New search / Go to file /
 ///   Feed to listbox under it, and a status line at the bottom.
 /// Searches run in the background and results appear as they are found; Cancel stops a running
@@ -79,11 +79,6 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
     let sameNameBox = NSButton(checkboxWithTitle: "same name", target: nil, action: nil)
     let sameSizeBox = NSButton(checkboxWithTitle: "same size", target: nil, action: nil)
     let sameContentsBox = NSButton(checkboxWithTitle: "same contents", target: nil, action: nil)
-    private let samePluginBox = NSButton(checkboxWithTitle: "same plugin fields:", target: nil, action: nil)
-
-    // Load/Save
-    let templateTable = NSTableView()
-    private(set) var templates: [String: FileSearchConfiguration] = [:]
 
     // Frame
     let tabs = NSTabView()
@@ -105,7 +100,6 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
         static let forHistory = "findFiles.searchForHistory"
         static let inHistory = "findFiles.searchInHistory"
         static let textHistory = "findFiles.findTextHistory"
-        static let templates = "findFiles.templates"
     }
 
     private static let depthChoices: [(String, SubdirectoryDepth)] =
@@ -124,7 +118,8 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 690),
                               styleMask: [.titled, .closable, .resizable, .miniaturizable],
                               backing: .buffered, defer: true)
-        window.title = "Find Files"
+        window.title = AppWindows.title("Find Files")
+        AppWindows.style(window)
         window.minSize = NSSize(width: 780, height: 600)
         window.isReleasedWhenClosed = false
         super.init(window: window)
@@ -132,10 +127,6 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
         if let data = defaults.data(forKey: Key.config),
            let saved = try? JSONDecoder().decode(FileSearchConfiguration.self, from: data) {
             config = saved
-        }
-        if let data = defaults.data(forKey: Key.templates),
-           let saved = try? JSONDecoder().decode([String: FileSearchConfiguration].self, from: data) {
-            templates = saved
         }
         window.contentView = buildContent()
         window.center()
@@ -162,6 +153,7 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
         }
         writeUI()
         updateEnabled()
+        if let window = window { AppWindows.place(window) }
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         window?.makeFirstResponder(searchFor)
@@ -185,8 +177,7 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
     }
 
     private func buildContent() -> NSView {
-        for (title, view) in [("General", buildGeneral()), ("Advanced", buildAdvanced()),
-                              ("Plugins", buildPlugins()), ("Load/Save", buildLoadSave())] {
+        for (title, view) in [("General", buildGeneral()), ("Advanced", buildAdvanced())] {
             let item = NSTabViewItem(identifier: title)
             item.label = title
             let container = NSView()
@@ -380,14 +371,6 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
         attrGrid.columnSpacing = 18
         attrGrid.rowSpacing = 6
 
-        samePluginBox.isEnabled = false
-        let pluginPopup = NSPopUpButton()
-        pluginPopup.isEnabled = false
-        pluginPopup.widthAnchor.constraint(equalToConstant: 260).isActive = true
-        let plus = NSButton(title: "+", target: nil, action: nil)
-        plus.isEnabled = false
-        plus.bezelStyle = .rounded
-
         func row(_ views: [NSView]) -> NSStackView {
             let s = NSStackView(views: views)
             s.spacing = 6
@@ -404,59 +387,11 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
             [separator(), separator()],
             [duplicatesBox, NSGridCell.emptyContentView],
             [NSGridCell.emptyContentView, row([sameNameBox, sameSizeBox, sameContentsBox])],
-            [NSGridCell.emptyContentView, row([samePluginBox, pluginPopup, plus])],
         ])
         grid.rowSpacing = 8
         grid.columnSpacing = 10
         grid.column(at: 0).xPlacement = .leading
         return grid
-    }
-
-    private func buildPlugins() -> NSView {
-        let text = NSTextField(wrappingLabelWithString: """
-            Search in plugins
-
-            Total Commander can search with content plugins (WDX), e.g. by image size or MP3 tags. \
-            Content plugins are Windows libraries and cannot run on macOS, so this page has no options \
-            in ClassicCommander. Use the General and Advanced pages instead.
-            """)
-        text.textColor = .secondaryLabelColor
-        text.preferredMaxLayoutWidth = 520
-        return text
-    }
-
-    private func buildLoadSave() -> NSView {
-        let column = NSTableColumn(identifier: .init("name"))
-        templateTable.addTableColumn(column)
-        templateTable.headerView = nil
-        templateTable.dataSource = self
-        templateTable.delegate = self
-        templateTable.target = self
-        templateTable.doubleAction = #selector(loadTemplate)
-        let scroll = NSScrollView()
-        scroll.documentView = templateTable
-        scroll.hasVerticalScroller = true
-        scroll.borderType = .bezelBorder
-        scroll.widthAnchor.constraint(equalToConstant: 330).isActive = true
-        scroll.heightAnchor.constraint(equalToConstant: 250).isActive = true
-
-        let load = NSButton(title: "Load", target: self, action: #selector(loadTemplate))
-        let save = NSButton(title: "Save…", target: self, action: #selector(saveTemplate))
-        let delete = NSButton(title: "Delete", target: self, action: #selector(deleteTemplate))
-        for b in [load, save, delete] {
-            b.bezelStyle = .rounded
-            b.widthAnchor.constraint(equalToConstant: 110).isActive = true
-        }
-        let buttons = NSStackView(views: [load, save, delete])
-        buttons.orientation = .vertical
-        buttons.spacing = 6
-        let row = NSStackView(views: [scroll, buttons])
-        row.alignment = .top
-        row.spacing = 12
-        let stack = NSStackView(views: [label("Stored searches:"), row])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        return stack
     }
 
     // MARK: UI <-> configuration
@@ -883,7 +818,7 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
             Duplicates are grouped; “same contents” compares the bytes.
 
             Results: double-click or Go to file jumps there; Feed to listbox shows all results in the panel; \
-            View opens Quick Look. Load/Save stores search setups by name.
+            View opens Quick Look.
             """
         Modal.sheet(alert, for: window)
     }
@@ -923,62 +858,13 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
         if let data = try? JSONEncoder().encode(config) { defaults.set(data, forKey: Key.config) }
     }
 
-    // MARK: Load/Save
-
-    var templateNames: [String] { templates.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending } }
-
-    /// Stores the current setup under `name` (used by "Save…" and by tests).
-    func storeTemplate(named name: String) {
-        readUI()
-        templates[name] = config
-        if let data = try? JSONEncoder().encode(templates) { defaults.set(data, forKey: Key.templates) }
-        templateTable.reloadData()
-    }
-
-    @objc private func saveTemplate() {
-        let alert = NSAlert()
-        alert.messageText = "Store search"
-        alert.informativeText = "Name for this search setup:"
-        let field = NSTextField(string: searchFor.stringValue)
-        field.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-        guard let window = window else { return }
-        Modal.sheet(alert, for: window) { [weak self] response in
-            let name = field.stringValue.trimmingCharacters(in: .whitespaces)
-            guard response == .alertFirstButtonReturn, !name.isEmpty else { return }
-            self?.storeTemplate(named: name)
-        }
-    }
-
-    @objc func loadTemplate() {
-        let i = templateTable.clickedRow >= 0 ? templateTable.clickedRow : templateTable.selectedRow
-        guard templateNames.indices.contains(i), let saved = templates[templateNames[i]] else { return NSSound.beep() }
-        config = saved
-        writeUI()
-        updateEnabled()
-        tabs.selectTabViewItem(at: 0)
-    }
-
-    @objc private func deleteTemplate() {
-        let i = templateTable.selectedRow
-        guard templateNames.indices.contains(i) else { return NSSound.beep() }
-        templates[templateNames[i]] = nil
-        if let data = try? JSONEncoder().encode(templates) { defaults.set(data, forKey: Key.templates) }
-        templateTable.reloadData()
-    }
-
     // MARK: Tables
 
     public func numberOfRows(in tableView: NSTableView) -> Int {
-        tableView === templateTable ? templateNames.count : displayRows.count
+        displayRows.count
     }
 
     public func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
-        if tableView === templateTable {
-            return NSTextField(labelWithString: templateNames[row])
-        }
         let label: NSTextField
         switch displayRows[row] {
         case .summary:
@@ -997,7 +883,6 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
     }
 
     public func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
-        if tableView === templateTable { return true }
         if case .separator = displayRows[row] { return false }
         return true
     }

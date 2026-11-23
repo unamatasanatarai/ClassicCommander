@@ -15,13 +15,18 @@ public final class PanelModel {
     public private(set) var entries: [FileEntry] = [] { didSet { revision &+= 1 } }
     /// Changes whenever entries, marks or folder sizes change (views cache derived text by it).
     public private(set) var revision = 0
-    /// Every entry of the directory, sorted, before the quick filter.
-    private var allEntries: [FileEntry] = []
+    /// Every entry of the directory, sorted, before the quick filter and the Show filter.
+    public private(set) var allEntries: [FileEntry] = []
     /// Set while the panel shows Find Files results ("Feed to listbox") instead of a folder.
     /// Entries then carry their real paths; ".." returns to the folder.
     public private(set) var virtualTitle: String?
     /// Quick Filter (⌃S) text; nil when the panel is not filtered. Cleared on changing directory.
     public private(set) var quickFilter: String?
+    /// Only marked entries are shown (a selection set to "mark and hide all others"). Esc, another
+    /// folder or a cleared quick filter shows everything again.
+    public private(set) var showsMarkedOnly = false
+    /// The marks before the last selection command or file operation (Select → Restore Selection).
+    public private(set) var previousMarks: Set<String> = []
     /// View → Show: which files the panel lists (folders always). Unlike the Quick Filter it stays
     /// when changing folders.
     public private(set) var showFilter: PanelShowFilter = .all
@@ -131,7 +136,58 @@ public final class PanelModel {
     }
 
     public func clearMarks() {
+        rememberMarks()
         marked = []
+    }
+
+    /// Keeps the current marks for Restore Selection (an empty selection keeps the older one).
+    private func rememberMarks() {
+        if !marked.isEmpty { previousMarks = marked }
+    }
+
+    /// Select → Restore Selection: the marks from before the last selection command or file
+    /// operation (those still in the folder).
+    @discardableResult
+    public func restoreMarks() -> Int {
+        let present = Set(realEntries.map(\.name))
+        let restored = previousMarks.intersection(present)
+        rememberMarks()
+        marked = restored
+        return restored.count
+    }
+
+    /// ⌃+ / ⌃−: every file and folder marked, or none.
+    public func markAll(_ mark: Bool) {
+        rememberMarks()
+        marked = mark ? Set(realEntries.map(\.name)) : []
+    }
+
+    /// Marks (or unmarks) every file with the extension of the entry under the cursor
+    /// (files without one: every file without one). Returns how many, or nil on ".." or a folder.
+    @discardableResult
+    public func setMarksWithCurrentExtension(_ mark: Bool) -> Int? {
+        guard let entry = currentEntry, entry.kind == .file else { return nil }
+        let ext = (entry.name as NSString).pathExtension.lowercased()
+        let hits = realEntries.filter { $0.kind == .file && ($0.name as NSString).pathExtension.lowercased() == ext }.map(\.name)
+        rememberMarks()
+        if mark { marked.formUnion(hits) } else { marked.subtract(hits) }
+        return hits.count
+    }
+
+    /// Shows only the marked entries (and ".."), or everything again.
+    public func showMarkedOnly(_ on: Bool, visibleRows: Int) {
+        showsMarkedOnly = on
+        let focused = currentEntry?.name
+        entries = filtered(allEntries)
+        cursor = focused.flatMap { n in entries.firstIndex { $0.name == n } }
+            ?? entries.firstIndex { $0.kind != .parent } ?? 0
+        ensureCursorVisible(visibleRows: visibleRows)
+    }
+
+    /// Replaces the marks with `names` (those in this folder), keeping the old ones for Restore.
+    public func setMarks(_ names: Set<String>) {
+        rememberMarks()
+        marked = names.intersection(realEntries.map(\.name))
     }
 
     /// Puts the cursor on the entry with this name, if present.
@@ -150,8 +206,9 @@ public final class PanelModel {
 
     /// "+" / "-": marks (or unmarks) every entry the mask matches. Returns how many matched.
     @discardableResult
-    public func setMarks(_ mark: Bool, matching mask: FileMask) -> Int {
-        let hits = realEntries.filter { mask.matches($0) }.map(\.name)
+    public func setMarks(_ mark: Bool, matching mask: FileMask, folders: Bool = true) -> Int {
+        let hits = realEntries.filter { (folders || $0.kind == .file) && mask.matches($0) }.map(\.name)
+        rememberMarks()
         if mark { marked.formUnion(hits) } else { marked.subtract(hits) }
         return hits.count
     }
@@ -168,6 +225,7 @@ public final class PanelModel {
     /// "*": every unmarked file and folder becomes marked and vice versa ("..” excluded).
     public func invertMarks() {
         let all = Set(realEntries.map(\.name))
+        rememberMarks()
         marked = all.subtracting(marked)
     }
 
@@ -234,13 +292,18 @@ public final class PanelModel {
     }
 
     /// Quick Filter: shows only matching entries (".." stays). nil or "" shows everything again.
-    /// The cursor keeps its entry when it is still visible.
+    /// While filtering, every change puts the cursor on the first match; clearing the filter keeps
+    /// the cursor on its entry.
     public func setQuickFilter(_ text: String?, visibleRows: Int) {
         let focused = currentEntry?.name
         quickFilter = (text?.isEmpty ?? true) ? nil : text
         entries = filtered(allEntries)
-        cursor = focused.flatMap { n in entries.firstIndex { $0.name == n } }
-            ?? entries.firstIndex { $0.kind != .parent } ?? 0
+        let firstMatch = entries.firstIndex { $0.kind != .parent }
+        if quickFilter != nil {
+            cursor = firstMatch ?? 0
+        } else {
+            cursor = focused.flatMap { n in entries.firstIndex { $0.name == n } } ?? firstMatch ?? 0
+        }
         ensureCursorVisible(visibleRows: visibleRows)
     }
 
@@ -250,7 +313,8 @@ public final class PanelModel {
     }
 
     private func filtered(_ list: [FileEntry]) -> [FileEntry] {
-        let shown = showFilter == .all ? list : list.filter { $0.kind != .file || showFilter.shows($0) }
+        var shown = showFilter == .all ? list : list.filter { $0.kind != .file || showFilter.shows($0) }
+        if showsMarkedOnly { shown = shown.filter { $0.kind == .parent || marked.contains($0.name) } }
         guard let f = quickFilter else { return shown }
         return shown.filter { $0.kind == .parent || Self.quickMatches($0.name, f) }
     }
@@ -408,6 +472,7 @@ public final class PanelModel {
         }
         virtualTitle = title
         quickFilter = nil
+        showsMarkedOnly = false
         allEntries = [FileEntry(name: "..", url: directory, kind: .parent)] + EntrySorting.sorted(list, by: sortOrder)
         entries = allEntries
         marked = []
@@ -433,7 +498,10 @@ public final class PanelModel {
         if !isRoot(url) { all.insert(FileEntry.parent(of: url), at: 0) }
         let changedDirectory = url != directory
         directory = url
-        if changedDirectory { quickFilter = nil }
+        if changedDirectory {
+            quickFilter = nil
+            showsMarkedOnly = false
+        }
         allEntries = all
         entries = filtered(all)
         errorMessage = nil
@@ -463,6 +531,8 @@ public final class PanelModel {
         swap(&allEntries, &other.allEntries)
         swap(&virtualTitle, &other.virtualTitle)
         swap(&quickFilter, &other.quickFilter)
+        swap(&showsMarkedOnly, &other.showsMarkedOnly)
+        swap(&previousMarks, &other.previousMarks)
         swap(&showFilter, &other.showFilter)
         swap(&cursor, &other.cursor)
         swap(&scrollTop, &other.scrollTop)

@@ -12,6 +12,10 @@ struct TestMain {
         Modal.opened = { _ in }
         Modal.launched = { _ in }
         Modal.terminated = {}
+        Modal.dragged = { _ in }
+        Modal.copied = { _ in }
+        Modal.answerWindow = { _ in .cancel }
+        Modal.openedWith = { _, _ in }
         Modal.poppedUp = { _ in }
         // Running curl/sftp are polled often, so progress reporting runs even for quick transfers.
         RemoteTiming.pollInterval = 0.01
@@ -54,6 +58,18 @@ struct TestMain {
 
         print("\n--- SFTP Suite ---")
         SFTPTests.run(testRunner: runTest)
+
+        print("\n--- Multi-Rename Suite ---")
+        MultiRenameTests.run(testRunner: runTest)
+
+        print("\n--- Copy / Move Queue Suite ---")
+        TransferTests.run(testRunner: runTest)
+
+        print("\n--- Select Menu and Quick Locations Suite ---")
+        SelectTests.run(testRunner: runTest)
+
+        print("\n--- Windows and Drag & Drop Suite ---")
+        WindowAndDragTests.run(testRunner: runTest)
 
         print("\n--- Security Regression Suite ---")
         SecurityTests.run(testRunner: runTest)

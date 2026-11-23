@@ -44,6 +44,7 @@ public final class ListerWindowController: NSWindowController, NSWindowDelegate,
                               styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: true)
         window.minSize = NSSize(width: 480, height: 300)
         window.isReleasedWhenClosed = false
+        AppWindows.style(window)
         super.init(window: window)
         window.delegate = self
         window.contentView = buildContent()
@@ -55,6 +56,7 @@ public final class ListerWindowController: NSWindowController, NSWindowDelegate,
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     public func present() {
+        if let window = window { AppWindows.place(window) }
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         focusContent()
@@ -128,7 +130,7 @@ public final class ListerWindowController: NSWindowController, NSWindowDelegate,
 
     /// Reads the current file and picks the mode that suits it.
     private func load() {
-        window?.title = "Lister - [\(url.path)]"
+        window?.title = AppWindows.title("Lister - [\(url.path)]")
         hexReader = try? HexReader(url: url)
         do {
             let handle = try FileHandle(forReadingFrom: url)

@@ -181,11 +181,12 @@ public struct Theme: Equatable {
         .markText: "#FF0000",
     ])
 
-    /// Blue panels with white text and a cyan cursor bar. The default theme.
+    /// Blue panels with white text and a white cursor bar. The default theme
+    /// (a copy is kept in docs/themes/classic-blue.json, importable in Options).
     public static let classicBlue = make([
         .text: "#FFFFFF", .directoryText: "#FFFFFF",
         .background: "#0000A8", .background2: "#0000A8",
-        .cursorBackground: "#00A8A8", .cursorText: "#000000",
+        .cursorBackground: "#FFFFFF", .cursorText: "#000000",
         .activePathBackground: "#00A8A8", .activePathText: "#000000",
         .inactivePathBackground: "#0000A8", .inactivePathText: "#FFFFFF",
         // Total Commander keeps the Windows header control: light grey, black text, whatever the panel colours.
@@ -193,6 +194,13 @@ public struct Theme: Equatable {
         .chrome: "#D4D0C8", .chromeText: "#000000", .lines: "#55FFFF",
         .markText: "#FFFF55",
     ])
+
+    /// The earlier default: Classic Blue with a cyan cursor bar.
+    public static let classicBlueCyan: Theme = {
+        var t = classicBlue
+        t.cursorBackground = RGBColor(hex: "#00A8A8")!
+        return t
+    }()
 
     public static let standard: Theme = .classicBlue
 }
@@ -229,6 +237,7 @@ extension Theme: Codable {
 extension Theme {
     public static let presets: [(name: String, theme: Theme)] = [
         ("Classic Blue", .classicBlue),
+        ("Classic Blue (cyan cursor)", .classicBlueCyan),
         ("Total Commander", .totalCommander),
     ]
 }

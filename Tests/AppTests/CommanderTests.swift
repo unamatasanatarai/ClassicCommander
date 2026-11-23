@@ -186,6 +186,7 @@ public enum CommanderTests {
             try expect(g == ["--working-directory=" + folder.path], "folder kept in one argument (no shell): \(g)")
             try expect(TerminalLauncher.preset(forBundleID: "org.alacritty")?.arguments.contains("{dir}") == true, "Alacritty preset")
             try expect(KeyBindings.standard.action(for: KeyCombo(17, [.control, .shift])) == .openTerminal, "⌃⇧T")
+            try expect(KeyBindings.standard.action(for: KeyCombo(31, [.control, .shift])) == .openInFinder, "⌃⇧O")
             let old = try JSONDecoder().decode(OperationOptions.self, from: Data(#"{"maxTransfers":2}"#.utf8))
             try expect(old.terminalApp == TerminalLauncher.defaultApp && old.terminalArguments.isEmpty && old.maxTransfers == 2, "old settings")
 
@@ -312,9 +313,14 @@ public enum CommanderTests {
             try expect(de.attributes(file) == "-644" && de.attributes(parent) == "----", "attrs")
             try expect(de.compact(0) == "0 b" && de.compact(90_522) == "88,4 k", "compact: \(de.compact(90_522))")
             try expect(de.compact(82_141_904_896) == "76,5 G", "compact G: \(de.compact(82_141_904_896))")
-            try expect(de.summary([parent, file, dir]) == "0 b / 15,6 k in 0 / 1 files, 0 / 1 dir(s)",
+            try expect(de.summary([parent, file, dir]) == "1 file, 1 folder · 15,6 KB",
                        "summary: \(de.summary([parent, file, dir]))")
-            try expect(de.summary([file]) == "0 b / 15,6 k in 0 / 1 files", "no dir part without dirs")
+            try expect(de.summary([file]) == "1 file · 15,6 KB", "no folder part without folders")
+            try expect(de.summary([file, file], selected: (1, 0, 15_965)) == "Selected 1 of 2 files · 15,6 KB of 31,2 KB",
+                       "selection: \(de.summary([file, file], selected: (1, 0, 15_965)))")
+            try expect(de.readable(812) == "812 B" && de.readable(90_522) == "88,4 KB", "readable")
+            try expect(de.size(2_042_908, as: .bytes) == "2.042.908 bytes" && de.size(1, as: .bytes) == "1 byte"
+                       && de.size(2_042_908, as: .readable) == "1,9 MB", "size formats")
             let vol = VolumeInfo(name: "system2", available: 82_141_904_896, total: 125_735_239_680)
             try expect(de.volume(vol) == "[system2]  76,5 G of 117,1 G free", "volume: \(de.volume(vol))")
             try expect(EntryFormatter.header(for: URL(fileURLWithPath: "/Users")) == "/Users/*.*", "header")
@@ -382,6 +388,12 @@ public enum CommanderTests {
             try expect(Theme.classicBlue.text.hex == "#FFFFFF", "Classic Blue text is white")
             try expect(Theme.classicBlue.background.hex == "#0000A8", "Classic Blue background is blue")
             try expect(Theme.presets.first?.name == "Classic Blue", "Classic Blue listed first")
+            try expect(Theme.classicBlue.cursorBackground.hex == "#FFFFFF", "Classic Blue has a white cursor bar")
+            try expect(Theme.classicBlueCyan.cursorBackground.hex == "#00A8A8", "the earlier cyan cursor stays as a preset")
+            // The copy of the default kept in the repo imports as exactly the default.
+            let copy = try Data(contentsOf: URL(fileURLWithPath: "docs/themes/classic-blue.json"))
+            try expect(try SettingsFile.importing(copy, onto: Settings(theme: .totalCommander)).theme == .classicBlue,
+                       "docs/themes/classic-blue.json is the default theme")
             try expect(DisplayOptions.standard.showFolderBrackets, "brackets on by default")
         }
 
@@ -457,7 +469,7 @@ public enum CommanderTests {
             try expect(!store.display.showFolderBrackets && notified == 1, "checkbox saved immediately")
 
             let popup = try findView(NSPopUpButton.self, in: root, where: { $0.itemTitles.contains("Classic Blue") })
-            try expect(popup.itemTitles == ["Classic Blue", "Total Commander"], "presets: \(popup.itemTitles)")
+            try expect(popup.itemTitles == ["Classic Blue", "Classic Blue (cyan cursor)", "Total Commander"], "presets: \(popup.itemTitles)")
             popup.selectItem(withTitle: "Total Commander")
             popup.sendAction(popup.action, to: popup.target)
             try expect(store.theme == .totalCommander, "preset applied immediately")
@@ -531,7 +543,8 @@ public enum CommanderTests {
             try expect(keys.action(for: KeyCombo(KeyCode.space)) == .toggleSelection, "Space selects")
             try expect(keys.action(for: KeyCombo(KeyCode.tab, .shift)) == .switchPanel, "⇧⇥ switches too")
             try expect(keys.action(for: KeyCombo(KeyCode.down, .command)) == .open, "⌘↓ opens")
-            try expect(keys.action(for: KeyCombo(KeyCode.two)) == nil, "plain 2 unbound")
+            try expect(keys.action(for: KeyCombo(KeyCode.two)) == .refresh, "2 refreshes")
+            try expect(keys.action(for: KeyCombo(21)) == nil, "plain 4 unbound")
             try expect(keys.add(KeyCombo(KeyCode.home), to: .goHome) == .firstItem, "reports previous owner")
             try expect(keys.keys(for: .firstItem).isEmpty && keys.action(for: KeyCombo(KeyCode.home)) == .goHome, "moved")
             keys.remove(KeyCombo(KeyCode.home), from: .goHome)
@@ -563,7 +576,7 @@ public enum CommanderTests {
             t = panel.selectionTotals
             try expect(t.bytes == 4096, "folder size counts once known")
             let f = EntryFormatter(locale: Locale(identifier: "de_DE"))
-            try expect(f.summary(panel.realEntries, selected: t) == "4,0 k / 6,0 k in 1 / 3 files, 1 / 2 dir(s)",
+            try expect(f.summary(panel.realEntries, selected: t) == "Selected 1 of 3 files, 1 of 2 folders · 4,0 KB of 6,0 KB",
                        "status: \(f.summary(panel.realEntries, selected: t))")
             try expect(f.size(panel.entries[1], folderSize: panel.folderSize(for: panel.entries[1])) == "2.048", "size shown")
             panel.toggleMarkAtCursor()
@@ -651,61 +664,143 @@ public enum CommanderTests {
             let root = try makeTree()
             defer { try? FileManager.default.removeItem(at: root) }
             let a = root.appendingPathComponent("file2.txt"), b = root.appendingPathComponent("file10.txt")
-            var plan = TransferOperation.plan(sources: [a], target: root.path + "/alpha/", base: root)
+            var plan = TransferTarget.plan(sources: [a], target: root.path + "/alpha/", base: root)
             try expect(plan.pairs.first?.1.path == root.appendingPathComponent("alpha/file2.txt").path && plan.createFolder == nil, "into folder")
-            plan = TransferOperation.plan(sources: [a], target: "renamed.txt", base: root)
+            plan = TransferTarget.plan(sources: [a], target: "renamed.txt", base: root)
             try expect(plan.pairs.first?.1.lastPathComponent == "renamed.txt", "relative rename")
-            plan = TransferOperation.plan(sources: [a, b], target: "newdir", base: root)
+            plan = TransferTarget.plan(sources: [a, b], target: "newdir", base: root)
             try expect(plan.createFolder?.lastPathComponent == "newdir" && plan.pairs.count == 2, "creates folder for several")
-            plan = TransferOperation.plan(sources: [a], target: root.path + "/alpha/*.*", base: root)
+            plan = TransferTarget.plan(sources: [a], target: root.path + "/alpha/*.*", base: root)
             try expect(plan.pairs.first?.1.deletingLastPathComponent().lastPathComponent == "alpha", "*.* suffix ignored")
         }
 
-        testRunner("Copy: conflicts ask, apply-to-all is remembered, folders merge, cannot copy into itself") {
+        /// A local copy or move through the queue, as 5 / 6 do it (synchronously).
+        func runLocal(_ sources: [URL], to target: String, base: URL, move: Bool,
+                      resolve: @escaping (TransferConflict) -> ConflictDecision) throws -> TransferJob {
+            let (pairs, create) = TransferTarget.plan(sources: sources, target: target, base: base)
+            let planned = pairs.map { pair -> (TransferPlanner.Source, TransferLocation) in
+                var isDir: ObjCBool = false
+                FileManager.default.fileExists(atPath: pair.0.path, isDirectory: &isDir)
+                return (TransferPlanner.Source(location: .local(pair.0), isFolder: isDir.boolValue, size: 0,
+                                               modified: (try? pair.0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate),
+                        .local(pair.1))
+            }
+            let plan = try TransferPlanner.plan(planned, move: move, mask: nil)
+            var items = plan.items
+            if let folder = create { items.insert(TransferItem(source: .local(folder), destination: .local(folder), size: 0, isFolder: true), at: 0) }
+            let manager = TransferManager()
+            manager.resolveConflict = resolve
+            let job = TransferJob(title: "test", items: items, isMove: move, sourceFoldersToRemove: move ? plan.foldersToRemove : [])
+            manager.enqueue(job, synchronously: true)
+            return job
+        }
+
+        testRunner("Copy: conflicts ask, Replace all is remembered, folders merge, cannot copy into itself") {
             let root = try makeTree()
             defer { try? FileManager.default.removeItem(at: root) }
             let fm = FileManager.default
             let dest = root.appendingPathComponent("Beta")
             try Data("old".utf8).write(to: dest.appendingPathComponent("file2.txt"))
             try Data("old".utf8).write(to: dest.appendingPathComponent("file10.txt"))
-            var asked = 0
-            let copy = TransferOperation(kind: .copy, resolve: { _, _ in asked += 1; return (.overwrite, true) })
-            var report = copy.run(sources: [root.appendingPathComponent("file2.txt"), root.appendingPathComponent("file10.txt"),
-                                            root.appendingPathComponent("archive.tar.gz")],
-                                  target: dest.path, base: root)
-            try expect(report.done == 3 && report.succeeded, "report: \(report)")
-            try expect(asked == 1, "asked once, then applied to all (asked \(asked))")
+            var asked: [TransferConflict] = []
+            var job = try runLocal([root.appendingPathComponent("file2.txt"), root.appendingPathComponent("file10.txt"),
+                                    root.appendingPathComponent("archive.tar.gz")], to: dest.path, base: root, move: false) { c in
+                asked.append(c)
+                return .replaceAll
+            }
+            try expect(job.doneCount == 3 && job.failedCount == 0, "results: \(job.results)")
+            try expect(asked.count == 1, "asked once, then applied to all (asked \(asked.count))")
+            try expect(asked.first?.targetSize == 3 && asked.first?.sourceSize == 0 && asked.first?.target.name == "file2.txt",
+                       "the dialog gets both sides")
             let overwritten = try Data(contentsOf: dest.appendingPathComponent("file2.txt"))
             try expect(overwritten.count == 2048, "overwritten")
             try expect(fm.fileExists(atPath: root.appendingPathComponent("file2.txt").path), "copy keeps source")
 
             try fm.createDirectory(at: dest.appendingPathComponent("alpha"), withIntermediateDirectories: true)
             try Data("keep".utf8).write(to: dest.appendingPathComponent("alpha/mine.txt"))
-            let skip = TransferOperation(kind: .copy, resolve: { _, _ in (.skip, false) })
-            report = skip.run(sources: [root.appendingPathComponent("alpha")], target: dest.path, base: root)
+            try Data("old".utf8).write(to: dest.appendingPathComponent("alpha/inner.txt"))
+            job = try runLocal([root.appendingPathComponent("alpha")], to: dest.path, base: root, move: false) { _ in .skip }
             try expect(fm.fileExists(atPath: dest.appendingPathComponent("alpha/mine.txt").path), "merge keeps existing files")
-            try expect(fm.fileExists(atPath: dest.appendingPathComponent("alpha/inner.txt").path), "merge adds new files")
+            try expect((try String(contentsOf: dest.appendingPathComponent("alpha/inner.txt"))) == "old", "skipped: kept")
+            try expect(job.results.contains(.skipped("the target exists")), "skip reported")
 
-            report = skip.run(sources: [root.appendingPathComponent("alpha")], target: root.path + "/alpha/sub/", base: root)
-            try expect(!report.errors.isEmpty, "into itself is refused")
+            try expect(TransferTarget.problem(root.appendingPathComponent("alpha"), root.appendingPathComponent("alpha/sub/alpha"), move: false) != nil,
+                       "into itself is refused")
+            try expect(TransferTarget.problem(root.appendingPathComponent("a"), root.appendingPathComponent("a"), move: true) != nil, "onto itself")
+            try expect(TransferTarget.problem(root.appendingPathComponent("a"), root.appendingPathComponent("b"), move: true) == nil, "fine")
 
-            let cancel = TransferOperation(kind: .copy, resolve: { _, _ in (.cancel, false) })
-            report = cancel.run(sources: [root.appendingPathComponent("file2.txt")], target: dest.path, base: root)
-            try expect(report.cancelled && report.done == 0, "cancel stops")
+            job = try runLocal([root.appendingPathComponent("file2.txt")], to: dest.path, base: root, move: false) { _ in .cancel }
+            try expect(job.state == .cancelled && job.doneCount == 0, "cancel stops")
+
+            // Rename: the copy gets a new name next to the existing file.
+            job = try runLocal([root.appendingPathComponent("file10.txt")], to: dest.path, base: root, move: false) { c in
+                c.target.name == "file10.txt" ? .rename("file10 (2).txt") : .skip
+            }
+            try expect(fm.fileExists(atPath: dest.appendingPathComponent("file10 (2).txt").path) && job.doneCount == 1, "renamed copy")
+
+            // Replace all older: only the older targets are replaced.
+            let older = dest.appendingPathComponent("file2.txt"), newer = dest.appendingPathComponent("file10.txt")
+            try Data("o".utf8).write(to: older)
+            try Data("n".utf8).write(to: newer)
+            try fm.setAttributes([.modificationDate: Date(timeIntervalSince1970: 0)], ofItemAtPath: older.path)
+            try fm.setAttributes([.modificationDate: Date().addingTimeInterval(3600)], ofItemAtPath: newer.path)
+            job = try runLocal([root.appendingPathComponent("file2.txt"), root.appendingPathComponent("file10.txt")],
+                               to: dest.path, base: root, move: false) { _ in .replaceAllOlder }
+            try expect(try Data(contentsOf: older).count == 2048 && (try String(contentsOf: newer)) == "n", "older replaced, newer kept")
         }
 
-        testRunner("Move: renames in place, moves into a folder, merged source folder disappears") {
+        testRunner("Move: renames in place, folders in one step, merged source folder disappears, verify") {
             let root = try makeTree()
             defer { try? FileManager.default.removeItem(at: root) }
             let fm = FileManager.default
-            let move = TransferOperation(kind: .move, resolve: { _, _ in (.skip, false) })
-            var report = move.run(sources: [root.appendingPathComponent("file2.txt")], target: "two.txt", base: root)
-            try expect(report.done == 1 && fm.fileExists(atPath: root.appendingPathComponent("two.txt").path)
+            var job = try runLocal([root.appendingPathComponent("file2.txt")], to: "two.txt", base: root, move: true) { _ in .skip }
+            try expect(job.doneCount == 1 && fm.fileExists(atPath: root.appendingPathComponent("two.txt").path)
                        && !fm.fileExists(atPath: root.appendingPathComponent("file2.txt").path), "renamed")
-            try fm.createDirectory(at: root.appendingPathComponent("Beta/alpha"), withIntermediateDirectories: true)
-            report = move.run(sources: [root.appendingPathComponent("alpha")], target: root.path + "/Beta", base: root)
-            try expect(fm.fileExists(atPath: root.appendingPathComponent("Beta/alpha/inner.txt").path), "merged in")
-            try expect(!fm.fileExists(atPath: root.appendingPathComponent("alpha").path), "emptied source removed")
+            job = try runLocal([root.appendingPathComponent("alpha")], to: root.path + "/Moved", base: root, move: true) { _ in .skip }
+            try expect(job.items.count == 1 && job.items[0].isWholeFolder, "a folder on the same disk moves in one step")
+            try expect(fm.fileExists(atPath: root.appendingPathComponent("Moved/inner.txt").path)
+                       && !fm.fileExists(atPath: root.appendingPathComponent("Moved/alpha").path), "moved whole (new name)")
+            try fm.createDirectory(at: root.appendingPathComponent("Beta/Moved"), withIntermediateDirectories: true)
+            job = try runLocal([root.appendingPathComponent("Moved")], to: root.path + "/Beta", base: root, move: true) { _ in .skip }
+            try expect(fm.fileExists(atPath: root.appendingPathComponent("Beta/Moved/inner.txt").path), "merged in")
+            try expect(!fm.fileExists(atPath: root.appendingPathComponent("Moved").path), "emptied source removed")
+
+            // Verify: a copy is read back; a move copies, verifies, then removes the original.
+            let manager = TransferManager()
+            let a = root.appendingPathComponent("two.txt"), b = root.appendingPathComponent("Beta/two.txt")
+            let verified = TransferJob(title: "v", items: [TransferItem(source: .local(a), destination: .local(b), size: 2048, isFolder: false)], isMove: true)
+            verified.verify = true
+            manager.enqueue(verified, synchronously: true)
+            try expect(verified.doneCount == 1 && fm.fileExists(atPath: b.path) && !fm.fileExists(atPath: a.path), "verified move")
+            try Data("different".utf8).write(to: a)
+            let item = TransferItem(source: .local(a), destination: .local(b), size: 9, isFolder: false)
+            do {
+                try manager.verify(item, at: .local(b))
+                throw TestFailure(description: "a different file must fail verification")
+            } catch FTPError.verificationFailed {}
+            try manager.verify(TransferItem(source: .remote(RemoteSession(client: FTPClient(profile: FTPProfile(), password: nil)), "/x"),
+                                            destination: .local(b), size: 2048, isFolder: false), at: .local(b))
+        }
+
+        testRunner("Transfer planner: only files of type, folders that hold them, stats") {
+            let root = try makeTree()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let target = try FileManager.default.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: root, create: true)
+            defer { try? FileManager.default.removeItem(at: target) }
+            let sources = [TransferPlanner.Source(location: .local(root.appendingPathComponent("alpha")), isFolder: true, size: 0),
+                           TransferPlanner.Source(location: .local(root.appendingPathComponent("Beta")), isFolder: true, size: 0),
+                           TransferPlanner.Source(location: .local(root.appendingPathComponent("archive.tar.gz")), isFolder: false, size: 2048)]
+            let plan = try TransferPlanner.plan(sources, into: .local(target), mask: FileMask("*.txt"))
+            try expect(plan.items.map { $0.destination.name } == ["alpha", "inner.txt"], "only .txt and its folder: \(plan.items.map { $0.destination.name })")
+            try expect(plan.fileCount == 1 && plan.bytes == 2048, "counts")
+            let entries = PanelModel(directory: root).entries.filter { $0.kind != .parent }
+            let all = TransferStats.count(entries, mask: nil, cancel: CancelFlag())
+            try expect(all.files == 4 && all.folders == 2 && all.bytes == 4 * 2048 && all.complete, "stats: \(all)")
+            let txt = TransferStats.count(entries, mask: FileMask("*.txt"), cancel: CancelFlag())
+            try expect(txt.files == 3, "masked stats: \(txt)")
+            let remote = TransferStats.count([FileEntry(name: "d", url: URL(string: "ccftp://s/d")!, kind: .directory)], mask: nil, cancel: CancelFlag())
+            try expect(!remote.complete && remote.folders == 1, "server folders aren't walked")
+            try expect(TransferAnswer(target: "/x", mask: "  ").fileMask == nil && TransferAnswer(target: "/x", mask: "*.c").fileMask != nil, "mask")
         }
 
         testRunner("Commander 5/6/7/8: copy to the other panel, move, new folder, delete to Trash") {
@@ -909,7 +1004,9 @@ public enum CommanderTests {
             panel.endRightSelection()
             try expect(names() == ["alpha"], "starting on .. : \(names())")
 
-            try expect(KeyBindings.standard.action(for: KeyCombo(KeyCode.eight, .shift)) == .invertSelection, "⇧8 inverts")
+            try expect(KeyBindings.standard.action(for: KeyCombo(KeyCode.eight, [.control, .shift])) == .invertSelection, "⌃⇧8 inverts")
+            try expect(KeyBindings.standard.action(for: KeyCombo(KeyCode.eight, .shift)) == .deletePermanently, "⇧8 deletes permanently")
+            try expect(KeyBindings.standard.action(for: KeyCombo(KeyCode.six, .shift)) == .renameInPlace, "⇧6 renames in place")
             try expect(KeyBindings.standard.action(for: KeyCombo(KeyCode.eight)) == .delete, "plain 8 still deletes")
             view.perform(.invertSelection)
             try expect(names() == ["Beta", "archive.tar.gz", "file10.txt", "file2.txt"].sorted(), "inverted: \(names())")
@@ -1074,14 +1171,17 @@ public enum CommanderTests {
             try expect(p.quickSearchIndex(".", from: 0) == nil, ".. never matches")
         }
 
-        testRunner("Quick filter: only matches (and ..) remain, cursor kept, Esc/cd clears, sort and marks still work") {
+        testRunner("Quick filter: only matches (and ..) remain, cursor on the first match, Esc/cd clears, sort and marks still work") {
             let root = try makeTree()
             defer { try? FileManager.default.removeItem(at: root) }
             let p = PanelModel(directory: root)
-            p.focus(name: "file2.txt", visibleRows: 20)
+            p.focus(name: "file10.txt", visibleRows: 20)
             p.setQuickFilter("*.txt", visibleRows: 20)
             try expect(p.entries.map(\.name) == ["..", "file2.txt", "file10.txt"], "filtered: \(p.entries.map(\.name))")
-            try expect(p.currentEntry?.name == "file2.txt" && p.quickFilter == "*.txt", "cursor kept")
+            try expect(p.currentEntry?.name == "file2.txt" && p.quickFilter == "*.txt", "cursor on the first match, not kept")
+            p.focus(name: "..", visibleRows: 20)
+            p.setQuickFilter("file", visibleRows: 20)
+            try expect(p.currentEntry?.name == "file2.txt", "from .. too: every change selects the first match")
             p.sort(by: .name, visibleRows: 20)  // now descending
             try expect(p.entries.map(\.name) == ["..", "file10.txt", "file2.txt"], "sorting keeps the filter")
             p.setQuickFilter("*.txt", visibleRows: 20)
@@ -1090,8 +1190,9 @@ public enum CommanderTests {
             p.reload(visibleRows: 20)
             try expect(p.quickFilter == "*.txt" && p.entries.count == 3, "reload keeps the filter")
             try expect(p.quickFilterCount("q") == 0 && p.quickFilterCount("a") == 2, "counts")
+            p.focus(name: "file10.txt", visibleRows: 20)
             p.setQuickFilter(nil, visibleRows: 20)
-            try expect(p.entries.count == 6, "cleared")
+            try expect(p.entries.count == 6 && p.currentEntry?.name == "file10.txt", "cleared, cursor kept on its entry")
             p.setQuickFilter("al", visibleRows: 20)
             p.focus(name: "alpha", visibleRows: 20)
             p.enterCurrentFolder(visibleRows: 20)
@@ -1237,7 +1338,7 @@ public enum CommanderTests {
             try expect(filter("F5") == [.copy], "by key: \(filter("F5"))")
             try expect(filter("⌥7").contains(.findFiles), "by key symbol")
             try expect(filter("alt 7").first == .findFiles, "spelled modifiers: \(filter("alt 7"))")
-            try expect(filter("nwfl").first == .newFolder, "fuzzy: \(filter("nwfl"))")
+            try expect(filter("nwfold").first == .newFolder, "fuzzy: \(filter("nwfold"))")
             try expect(filter("qkflt").first == .quickFilter, "fuzzy 2: \(filter("qkflt"))")
             try expect(filter("zzzz").isEmpty, "no match")
             _ = filter("delete")
@@ -1264,7 +1365,8 @@ public enum CommanderTests {
 final class StubPrompts: FileCommandPrompts {
     var answer: String?
     var confirmAnswer = true
-    var conflict: (ConflictChoice, applyToAll: Bool) = (.skip, false)
+    var conflict: ConflictDecision = .skip
+    var conflicts: [TransferConflict] = []
     var lastMessage = ""
     var lastDefault = ""
     var problems: [String] = []
@@ -1281,7 +1383,10 @@ final class StubPrompts: FileCommandPrompts {
         return confirmAnswer
     }
 
-    func resolveConflict(source: URL, existing: URL) -> (ConflictChoice, applyToAll: Bool) { conflict }
+    func resolveConflict(_ c: TransferConflict) -> ConflictDecision {
+        conflicts.append(c)
+        return conflict
+    }
 
     func showProblems(title: String, report: OperationReport) {
         problems += report.errors

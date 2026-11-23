@@ -5,14 +5,24 @@ public protocol FileCommandPrompts: AnyObject {
     /// A text question (copy/move target, new folder name). nil means Cancel.
     func askText(title: String, message: String, defaultValue: String, okTitle: String) -> String?
     func confirm(title: String, message: String, okTitle: String) -> Bool
-    /// The target already exists. Always called on the main thread.
-    func resolveConflict(source: URL, existing: URL) -> (ConflictChoice, applyToAll: Bool)
+    /// The Copy / Move dialog: target, "only files of type", Verify, OK or Queue. nil means Cancel.
+    func askTransfer(_ question: TransferQuestion) -> TransferAnswer?
+    /// "Target file exists": replace, skip, rename… Always called on the main thread.
+    func resolveConflict(_ conflict: TransferConflict) -> ConflictDecision
     func showProblems(title: String, report: OperationReport)
+}
+
+extension FileCommandPrompts {
+    /// Just the target (the other options at their defaults), through `askText`.
+    public func askTransfer(_ question: TransferQuestion) -> TransferAnswer? {
+        askText(title: question.verb, message: question.message, defaultValue: question.defaultTarget, okTitle: question.verb)
+            .map { TransferAnswer(target: $0) }
+    }
 }
 
 /// F5 Copy, F6 Move/Rename, F7 New folder, F8 Delete — acting on the marked entries of the active
 /// panel (or the entry under the cursor), with the other panel's folder as the default target.
-/// Copies and moves run on a background queue; Esc cancels them between items.
+/// Copies and moves run in the queue (Net → Queue), local and FTP/SFTP alike.
 public final class FileCommands {
     weak var commander: CommanderView?
     public var prompts: FileCommandPrompts = AlertPrompts()
@@ -20,74 +30,112 @@ public final class FileCommands {
     public var runInBackground = true
     /// How F8 removes items; the Trash by default (tests swap in a plain delete of temp files).
     public var trash: ([URL]) -> OperationReport = FileCommandsCore.trash
-    public private(set) var isBusy = false
-    private var cancelFlag: CancelFlag?
-    private let queue = DispatchQueue(label: "ClassicCommander.fileOperation", qos: .userInitiated)
+    /// How ⇧8 removes items for good (tests swap it like `trash`).
+    public var remove: ([URL]) -> OperationReport = FileCommandsCore.remove
+    private let planning = DispatchQueue(label: "ClassicCommander.planning", qos: .userInitiated)
 
     init(commander: CommanderView) {
         self.commander = commander
-    }
-
-    public func cancelRunning() {
-        cancelFlag?.cancel()
     }
 
     // MARK: F5 / F6
 
     public func copy() {
         if commander?.ftp.transfer(move: false, prompts: prompts) == true { return }
-        transfer(.copy)
+        transfer(move: false, drop: nil)
     }
 
     public func move() {
         if commander?.ftp.transfer(move: true, prompts: prompts) == true { return }
-        transfer(.move)
+        transfer(move: true, drop: nil)
     }
 
-    private func transfer(_ kind: TransferOperation.Kind) {
-        guard !isBusy, let commander = commander else { return NSSound.beep() }
-        let source = commander.activeView
-        let other = commander.view(for: commander.model.activeSide.other)
-        let items = source.model.operationTargets
+    /// Files dropped on a panel: 5 Copy (6 Move) of exactly those files into the drop's folder,
+    /// with the usual dialog. Works for servers on either side.
+    public func drop(_ drop: PanelDrop) {
+        if commander?.ftp.transfer(move: drop.move, prompts: prompts, drop: drop) == true { return }
+        transfer(move: drop.move, drop: drop)
+    }
+
+    /// 5 / 6 on local folders: the marked entries of the active panel to the other panel,
+    /// or the files of a drop into its folder.
+    /// The Copy / Move dialog's question for these entries; it counts them (with a mask) when asked.
+    static func question(verb: String, items: [FileEntry], target: String) -> TransferQuestion {
+        TransferQuestion(verb: verb, message: "\(verb) \(describe(items)) to:", defaultTarget: target,
+                         count: { mask, cancel in TransferStats.count(items, mask: mask, cancel: cancel) })
+    }
+
+    /// 5 / 6 on local folders: the marked entries of the active panel to the other panel, or the
+    /// files of a drop into its folder. Planned in the background, then handed to the queue.
+    private func transfer(move: Bool, drop: PanelDrop?) {
+        guard let commander = commander else { return NSSound.beep() }
+        var source: PanelView? = commander.activeView
+        var items = commander.activeView.model.operationTargets
+        var folder = commander.view(for: commander.model.activeSide.other).model.directory
+        if let drop = drop {
+            source = drop.source
+            items = drop.entries
+            folder = drop.folder
+        }
         guard !items.isEmpty else { return NSSound.beep() }
 
-        let verb = kind == .copy ? "Copy" : "Move"
-        let message = "\(verb) \(Self.describe(items)) to:"
-        let defaultTarget = other.model.directory.path == "/" ? "/" : other.model.directory.path + "/"
-        guard let target = prompts.askText(title: verb, message: message, defaultValue: defaultTarget,
-                                           okTitle: verb) else { return }
+        let verb = move ? "Move" : "Copy"
+        let defaultTarget = folder.path == "/" ? "/" : folder.path + "/"
+        guard let answer = prompts.askTransfer(Self.question(verb: verb, items: items, target: defaultTarget)) else { return }
 
-        let flag = CancelFlag()
-        cancelFlag = flag
-        isBusy = true
-        let base = source.model.directory
-        let sources = items.map(\.url)
-        let prompts = self.prompts
-        let background = runInBackground
-        let operation = TransferOperation(
-            kind: kind,
-            resolve: { src, existing in
-                if Thread.isMainThread { return prompts.resolveConflict(source: src, existing: existing) }
-                return DispatchQueue.main.sync { prompts.resolveConflict(source: src, existing: existing) }
-            },
-            isCancelled: { flag.isCancelled },
-            progress: { [weak self] url in
-                let show: () -> Void = { self?.commander?.showHint("\(kind == .copy ? "Copying" : "Moving") \(url.lastPathComponent)…  (Esc cancels)", duration: 60) }
-                if background { DispatchQueue.main.async(execute: show) } else { show() }
-            }
-        )
-        let work = {
-            let report = operation.run(sources: sources, target: target, base: base)
-            let finish: () -> Void = { [weak self] in self?.finish(report, title: "\(verb) problems", marksFrom: source) }
-            if background { DispatchQueue.main.async(execute: finish) } else { finish() }
+        let base = source?.model.directory ?? folder
+        let (pairs, create) = TransferTarget.plan(sources: items.map(\.url), target: answer.target, base: base)
+        var problems: [String] = []
+        var planned: [(TransferPlanner.Source, TransferLocation)] = []
+        for (entry, pair) in zip(items, pairs) {
+            if let problem = TransferTarget.problem(pair.0, pair.1, move: move) { problems.append(problem); continue }
+            planned.append((TransferPlanner.Source(location: .local(pair.0), isFolder: entry.kind == .directory,
+                                                   size: entry.size ?? 0, modified: entry.modified), .local(pair.1)))
         }
-        if background { queue.async(execute: work) } else { work() }
+        if !problems.isEmpty {
+            var report = OperationReport()
+            report.errors = problems
+            prompts.showProblems(title: "\(verb) problems", report: report)
+        }
+        guard !planned.isEmpty else { return }
+        source?.model.clearMarks()   // Select → Restore Selection brings them back
+        let title = "\(verb) \(Self.describe(items)) → \(create?.path ?? pairs.first?.1.deletingLastPathComponent().path ?? "")"
+        let work = { [weak self] in
+            let result = Result { try TransferPlanner.plan(planned, move: move, mask: answer.fileMask) }
+            let finish: () -> Void = { self?.enqueue(result, title: title, create: create, move: move, answer: answer) }
+            if self?.runInBackground == true { DispatchQueue.main.async(execute: finish) } else { finish() }
+        }
+        if runInBackground { planning.async(execute: work) } else { work() }
+    }
+
+    /// Hands a planned copy or move to the queue (the queue window shows it if it takes a while).
+    private func enqueue(_ result: Result<TransferPlanner.Plan, Error>, title: String, create: URL?, move: Bool, answer: TransferAnswer) {
+        guard let commander = commander else { return }
+        switch result {
+        case .failure(let error):
+            var report = OperationReport()
+            report.errors = [error.localizedDescription]
+            prompts.showProblems(title: "\(move ? "Move" : "Copy") problems", report: report)
+        case .success(let plan):
+            guard !plan.items.isEmpty else {
+                commander.showHint("No files match “\(answer.mask)”", duration: 2)
+                return NSSound.beep()
+            }
+            var items = plan.items
+            if let folder = create {
+                items.insert(TransferItem(source: .local(folder), destination: .local(folder), size: 0, isFolder: true), at: 0)
+            }
+            let job = TransferJob(title: title, items: items, isMove: move, sourceFoldersToRemove: move ? plan.foldersToRemove : [])
+            job.verify = answer.verify
+            job.waitsInQueue = answer.queue
+            commander.ftp.startJob(job, synchronously: !runInBackground)
+        }
     }
 
     // MARK: F7
 
     public func newFolder() {
-        guard !isBusy, let commander = commander else { return NSSound.beep() }
+        guard let commander = commander else { return NSSound.beep() }
         if commander.ftp.newFolder(prompts: prompts) { return }
         let panel = commander.activeView
         guard let name = prompts.askText(title: "New Folder", message: "New folder (directory):",
@@ -106,24 +154,32 @@ public final class FileCommands {
 
     // MARK: F8
 
-    public func delete() {
-        guard !isBusy, let commander = commander else { return NSSound.beep() }
+    /// 8 moves to the Trash; ⇧8 (`permanently`) deletes for good, after a clear warning.
+    /// On a server there is no Trash: both delete permanently.
+    public func delete(permanently: Bool = false) {
+        guard let commander = commander else { return NSSound.beep() }
         if commander.ftp.delete(prompts: prompts) { return }
         let panel = commander.activeView
         let items = panel.model.operationTargets
         guard !items.isEmpty else { return NSSound.beep() }
-        guard prompts.confirm(title: "Delete", message: "Move \(Self.describe(items)) to the Trash?",
-                              okTitle: "Move to Trash") else { return }
-        let report = trash(items.map(\.url))
+        let report: OperationReport
+        if permanently {
+            guard prompts.confirm(title: "Delete permanently",
+                                  message: "Permanently delete \(Self.describe(items))?\nThey don't go to the Trash and can't be restored.",
+                                  okTitle: "Delete Permanently") else { return }
+            report = remove(items.map(\.url))
+        } else {
+            guard prompts.confirm(title: "Delete", message: "Move \(Self.describe(items)) to the Trash?",
+                                  okTitle: "Move to Trash") else { return }
+            report = trash(items.map(\.url))
+        }
         finish(report, title: "Delete problems", marksFrom: panel)
     }
 
     // MARK: Shared
 
-    private func finish(_ report: OperationReport, title: String, marksFrom panel: PanelView) {
-        isBusy = false
-        cancelFlag = nil
-        if report.done > 0 && report.errors.isEmpty { panel.model.clearMarks() }
+    private func finish(_ report: OperationReport, title: String, marksFrom panel: PanelView?) {
+        if report.done > 0 && report.errors.isEmpty { panel?.model.clearMarks() }
         commander?.reloadPanels()
         commander?.showHint(report.cancelled ? "Cancelled" : "Done", duration: 0.8)
         if !report.errors.isEmpty { prompts.showProblems(title: title, report: report) }
@@ -169,30 +225,17 @@ final class AlertPrompts: FileCommandPrompts {
         return Modal.run(alert) == .alertFirstButtonReturn
     }
 
-    func resolveConflict(source: URL, existing: URL) -> (ConflictChoice, applyToAll: Bool) {
-        let f = EntryFormatter.shared
-        func info(_ url: URL) -> String {
-            let v = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-            let size = v?.fileSize.map { f.grouped(Int64($0)) + " bytes" } ?? "folder"
-            let date = v?.contentModificationDate.map {
-                f.date(FileEntry(name: "", url: url, kind: .file, modified: $0))
-            } ?? ""
-            return "\(size)  \(date)"
-        }
-        let alert = NSAlert()
-        alert.messageText = "“\(existing.lastPathComponent)” already exists"
-        alert.informativeText = "Overwrite:\n   \(info(existing))\nwith:\n   \(info(source))"
-        alert.addButton(withTitle: "Overwrite")
-        alert.addButton(withTitle: "Skip")
-        alert.addButton(withTitle: "Cancel")
-        alert.showsSuppressionButton = true
-        alert.suppressionButton?.title = "Do this for all remaining conflicts"
-        let response = Modal.run(alert)
-        let all = alert.suppressionButton?.state == .on
-        switch response {
-        case .alertFirstButtonReturn: return (.overwrite, all)
-        case .alertSecondButtonReturn: return (.skip, all)
-        default: return (.cancel, false)
+    /// Sizes in the dialogs (Options → Display).
+    var sizeFormat: SizeFormat = .readable
+
+    func askTransfer(_ question: TransferQuestion) -> TransferAnswer? {
+        TransferDialogController(question: question, sizeFormat: sizeFormat).run()
+    }
+
+    func resolveConflict(_ conflict: TransferConflict) -> ConflictDecision {
+        ConflictDialogController(conflict: conflict, sizeFormat: sizeFormat).run { [weak self] suggested in
+            self?.askText(title: "Rename", message: "New name for the copy of “\(conflict.source.name)”:",
+                          defaultValue: suggested, okTitle: "Rename")
         }
     }
 

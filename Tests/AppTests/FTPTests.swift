@@ -341,6 +341,11 @@ public enum FTPTests {
             try expect(right.remote?.insecure == true && right.remote?.status.contains("FTP") == true, "plain FTP marked unencrypted")
             try expect(view.functionBar.shownActions.last == .ftpDisconnect, "FTP Disconnect button")
             try expect(right.model.entries.map(\.name).contains("index.html"), "listing shown")
+            var openedInFinder: URL?
+            Modal.opened = { openedInFinder = $0 }
+            view.perform(.openInFinder)
+            Modal.opened = { _ in }
+            try expect(openedInFinder == nil, "a server folder isn't opened in Finder")
 
             // Navigate: into assets and back up.
             right.model.focus(name: "assets", visibleRows: 20)
@@ -364,6 +369,14 @@ public enum FTPTests {
             view.perform(.copy)
             try expect(try Data(contentsOf: server.root.appendingPathComponent("www/from-mac.txt")) == Data("local file".utf8), "uploaded")
             try expect(right.model.entries.contains { $0.name == "from-mac.txt" }, "remote panel refreshed after the transfer")
+            // Again: the file is on the server now, so "target file exists" asks (here: rename it).
+            prompts.conflict = .rename("from-mac-2.txt")
+            model.left.focus(name: "from-mac.txt", visibleRows: 20)
+            view.perform(.copy)
+            try expect(prompts.conflicts.count == 1 && prompts.conflicts.first?.targetSize == 10, "asked with the server's size")
+            try expect(FileManager.default.fileExists(atPath: server.root.appendingPathComponent("www/from-mac-2.txt").path), "uploaded under the new name")
+            try FileManager.default.removeItem(at: server.root.appendingPathComponent("www/from-mac-2.txt"))
+            prompts.conflict = .skip
 
             // 6 with just a new name renames on the server.
             view.activate(.right)
@@ -372,10 +385,56 @@ public enum FTPTests {
             view.perform(.move)
             try expect(FileManager.default.fileExists(atPath: server.root.appendingPathComponent("www/renamed.txt").path), "renamed on server")
 
+            // ⇧6 on the server: renamed there, cursor on the new name; a failure is reported.
+            right.model.reload(visibleRows: 20)
+            right.model.focus(name: "renamed.txt", visibleRows: 20)
+            view.rename(right.model.currentEntry!, to: "inplace.txt", in: right)
+            try expect(FileManager.default.fileExists(atPath: server.root.appendingPathComponent("www/inplace.txt").path)
+                       && right.model.currentEntry?.name == "inplace.txt", "renamed in place on the server")
+            view.rename(FileEntry(name: "nope", url: right.model.directory.appendingPathComponent("nope"), kind: .file), to: "x", in: right)
+            try expect(messages.last?.contains("Rename failed") == true, "failure reported: \(messages.last ?? "")")
+            view.rename(right.model.currentEntry!, to: "renamed.txt", in: right)
+
+            // Multi-Rename on the server: the marked file gets a new name there, and Undo brings it back.
+            right.model.reload(visibleRows: 20)
+            right.model.setMarks(["renamed.txt"])
+            let tool = MultiRenameWindowController(commander: view, defaults: UserDefaults(suiteName: suite)!)
+            tool.present(for: right)
+            tool.nameField.stringValue = "[N]_srv"
+            tool.changed()
+            tool.startPressed()
+            try expect(FileManager.default.fileExists(atPath: server.root.appendingPathComponent("www/renamed_srv.txt").path), "multi-renamed on the server")
+            tool.startPressed()   // nothing changes now (same mask on the new name would add _srv again: allowed, then undone)
+            tool.undoPressed()
+            tool.close()
+            right.model.reload(visibleRows: 20)
+            for name in ["renamed_srv.txt", "renamed_srv_srv.txt"] where FileManager.default.fileExists(atPath: server.root.appendingPathComponent("www/" + name).path) {
+                try FileManager.default.moveItem(at: server.root.appendingPathComponent("www/" + name), to: server.root.appendingPathComponent("www/renamed.txt"))
+            }
+            right.model.clearMarks()
+
             // 7 creates a folder on the server; 8 deletes (permanently, after confirmation naming the server path).
             prompts.answer = "made"
             view.perform(.newFolder)
             try expect(FileManager.default.fileExists(atPath: server.root.appendingPathComponent("www/made").path), "mkdir")
+            // Drag & drop with the server: a file from Finder onto the remote folder row "made",
+            // and a remote file dragged onto the local panel.
+            let fromFinder = local.appendingPathComponent("dropped.txt")
+            try Data("dropped".utf8).write(to: fromFinder)
+            right.model.reload(visibleRows: 20)
+            guard let madeRow = right.model.entries.firstIndex(where: { $0.name == "made" }),
+                  let finderEntry = PanelView.droppedEntry(fromFinder) else { throw Fail(description: "no made row") }
+            view.drop(PanelDrop(entries: [finderEntry], source: nil, target: right, folder: right.model.entries[madeRow].url,
+                                folderRow: madeRow, move: false))
+            try expect(prompts.lastDefault.hasSuffix("/www/made/"), "uploads into the folder under the mouse: \(prompts.lastDefault)")
+            try expect(try Data(contentsOf: server.root.appendingPathComponent("www/made/dropped.txt")) == Data("dropped".utf8),
+                       "uploaded from Finder into the remote folder")
+            let page = right.model.entries.filter { $0.name == "index.html" }
+            view.drop(PanelDrop(entries: page, source: right, target: view.leftView, folder: local, folderRow: nil, move: false))
+            try expect(try Data(contentsOf: local.appendingPathComponent("index.html")) == Data("<html>hello</html>".utf8),
+                       "dragged from the server to the local panel")
+            try FileManager.default.removeItem(at: server.root.appendingPathComponent("www/made/dropped.txt"))
+            view.activate(.right)
             right.model.focus(name: "renamed.txt", visibleRows: 20)
             prompts.confirmAnswer = false
             view.perform(.delete)

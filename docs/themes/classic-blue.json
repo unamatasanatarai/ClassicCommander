@@ -1,0 +1,22 @@
+{
+  "format": "ClassicCommander settings",
+  "theme": {
+    "activePathBackground": "#00A8A8",
+    "activePathText": "#000000",
+    "background": "#0000A8",
+    "background2": "#0000A8",
+    "chrome": "#D4D0C8",
+    "chromeText": "#000000",
+    "cursorBackground": "#FFFFFF",
+    "cursorText": "#000000",
+    "directoryText": "#FFFFFF",
+    "headerBackground": "#F4F4F4",
+    "headerText": "#000000",
+    "inactivePathBackground": "#0000A8",
+    "inactivePathText": "#FFFFFF",
+    "lines": "#55FFFF",
+    "markText": "#FFFF55",
+    "text": "#FFFFFF"
+  },
+  "version": 1
+}

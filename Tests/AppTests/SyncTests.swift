@@ -254,7 +254,7 @@ public enum SyncTests {
 
             select("text.txt")
             try expect(key(20, "3"), "3 handled")
-            let diffWindows = NSApp.windows.filter { $0.title.hasPrefix("Compare: text.txt") }
+            let diffWindows = NSApp.windows.filter { $0.title.hasSuffix("Compare: text.txt") }
             guard let viewer = diffWindows.last?.windowController as? DiffWindowController else { throw Fail(description: "no diff window") }
             try expect(viewer.diff?.blocks.count == 2 && viewer.statusLabel.stringValue == "Difference 1 of 2", "diff: \(viewer.statusLabel.stringValue)")
             viewer.nextDifference()
@@ -265,7 +265,7 @@ public enum SyncTests {
             viewer.window?.close()
             select("same.txt")
             _ = key(99, "")
-            guard let same = NSApp.windows.last(where: { $0.title.hasPrefix("Compare: same.txt") })?.windowController as? DiffWindowController else {
+            guard let same = NSApp.windows.last(where: { $0.title.hasSuffix("Compare: same.txt") })?.windowController as? DiffWindowController else {
                 throw Fail(description: "no diff window for same.txt")
             }
             try expect(same.statusLabel.stringValue.hasPrefix("The files are identical"), same.statusLabel.stringValue)

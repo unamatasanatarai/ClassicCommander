@@ -107,8 +107,8 @@ public final class RemoteSession {
     }
 
     /// Every file below a remote folder, with paths relative to it, plus its subfolders (for recursive copies).
-    public func walk(_ path: String, cancel: CancelFlag? = nil) throws -> (files: [(path: String, size: Int64)], folders: [String]) {
-        var files: [(String, Int64)] = []
+    public func walk(_ path: String, cancel: CancelFlag? = nil) throws -> (files: [(path: String, size: Int64, modified: Date?)], folders: [String]) {
+        var files: [(String, Int64, Date?)] = []
         var folders: [String] = []
         let root = Self.normalize(path)
         let rootDepth = root.split(separator: "/").count
@@ -126,7 +126,7 @@ public final class RemoteSession {
                     folders.append(child)
                     queue.append(child)
                 } else {
-                    files.append((child, e.size))
+                    files.append((child, e.size, e.modified))
                 }
                 if files.count + folders.count > Self.maxEntries { throw Self.tooLarge }
             }

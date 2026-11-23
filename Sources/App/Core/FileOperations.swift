@@ -1,47 +1,18 @@
 import Foundation
 
-/// What to do when the destination already exists.
-public enum ConflictChoice: Equatable {
-    case overwrite, skip, cancel
-}
-
-/// Outcome of a copy, move or delete.
+/// Outcome of a delete or another operation done in one go.
 public struct OperationReport: Equatable {
     public var done = 0
     public var skipped = 0
     public var errors: [String] = []
     public var cancelled = false
-
-    public var succeeded: Bool { errors.isEmpty && !cancelled }
 }
 
-/// Copy (F5) and move/rename (F6), Total Commander style:
+/// Where Copy (5) and Move/Rename (6) put things, Total Commander style:
 /// - the target is a folder (items go inside it) or, for a single item, a new path (rename/copy-as);
-/// - several items into a folder that does not exist yet create it;
-/// - a folder landing on an existing folder is merged entry by entry;
-/// - any other clash asks `resolve(source, existing)`, which may answer for all later clashes too.
-/// Runs synchronously; callers put it on a background queue.
-public final class TransferOperation {
-    public enum Kind { case copy, move }
-
-    public let kind: Kind
-    private let fm = FileManager.default
-    private let resolve: (URL, URL) -> (ConflictChoice, applyToAll: Bool)
-    private let isCancelled: () -> Bool
-    private let progress: (URL) -> Void
-    private var rememberedChoice: ConflictChoice?
-    private var report = OperationReport()
-
-    public init(kind: Kind,
-                resolve: @escaping (URL, URL) -> (ConflictChoice, applyToAll: Bool),
-                isCancelled: @escaping () -> Bool = { false },
-                progress: @escaping (URL) -> Void = { _ in }) {
-        self.kind = kind
-        self.resolve = resolve
-        self.isCancelled = isCancelled
-        self.progress = progress
-    }
-
+/// - several items into a folder that does not exist yet create it.
+/// The copying itself runs in the queue (TransferManager).
+public enum TransferTarget {
     /// Pairs each source with its destination for the text typed in the dialog.
     /// A relative `target` is taken relative to `base` (the source panel's folder); "~" is home.
     public static func plan(sources: [URL], target: String, base: URL) -> (pairs: [(URL, URL)], createFolder: URL?) {
@@ -59,98 +30,70 @@ public final class TransferOperation {
         return (sources.map { ($0, dest) }, nil)
     }
 
-    public func run(sources: [URL], target: String, base: URL) -> OperationReport {
-        report = OperationReport()
-        rememberedChoice = nil
-        let (pairs, create) = Self.plan(sources: sources, target: target, base: base)
-        if let folder = create {
-            do {
-                try fm.createDirectory(at: folder, withIntermediateDirectories: true)
-            } catch {
-                report.errors.append("Cannot create \(folder.path): \(error.localizedDescription)")
-                return report
+    /// Why a pair can't be done (copying onto itself or into itself), or nil.
+    public static func problem(_ source: URL, _ destination: URL, move: Bool) -> String? {
+        let s = source.standardizedFileURL.path, d = destination.standardizedFileURL.path
+        if s == d { return "\(source.lastPathComponent): source and target are the same" }
+        if d.hasPrefix(s + "/") { return "\(source.lastPathComponent): cannot \(move ? "move" : "copy") a folder into itself" }
+        return nil
+    }
+}
+
+/// What the Copy / Move dialog asks.
+public struct TransferQuestion {
+    public let verb: String
+    public let message: String
+    public let defaultTarget: String
+    /// Counts what would be copied with a "files of type" mask (nil: all), in the background.
+    public let count: (FileMask?, CancelFlag) -> TransferStats
+}
+
+/// What the Copy / Move dialog answered.
+public struct TransferAnswer: Equatable {
+    public var target: String
+    /// "Only files of type" (empty: all files).
+    public var mask: String = ""
+    public var verify = false
+    /// ⌃2 Queue: wait for the queued jobs before it instead of starting now.
+    public var queue = false
+
+    public init(target: String, mask: String = "", verify: Bool = false, queue: Bool = false) {
+        self.target = target
+        self.mask = mask
+        self.verify = verify
+        self.queue = queue
+    }
+
+    public var fileMask: FileMask? { mask.trimmingCharacters(in: .whitespaces).isEmpty ? nil : FileMask(mask) }
+}
+
+/// Files, folders and bytes a copy would take (shown in the Copy / Move dialog).
+public struct TransferStats: Equatable {
+    public var files = 0
+    public var folders = 0
+    public var bytes: Int64 = 0
+    /// false when folders on a server weren't looked into (their contents aren't counted).
+    public var complete = true
+
+    /// Counts entries of a panel: local folders are walked; server folders only counted.
+    public static func count(_ entries: [FileEntry], mask: FileMask?, cancel: CancelFlag) -> TransferStats {
+        var stats = TransferStats()
+        func file(_ name: String, _ size: Int64) {
+            guard mask.map({ $0.matches(FileEntry(name: name, url: URL(fileURLWithPath: "/" + name), kind: .file)) }) ?? true else { return }
+            stats.files += 1
+            stats.bytes = stats.bytes.addingSaturated(size)
+        }
+        for entry in entries where !cancel.isCancelled {
+            if entry.kind == .file { file(entry.name, entry.size ?? 0); continue }
+            stats.folders += 1
+            guard entry.url.isFileURL else { stats.complete = false; continue }
+            let walker = FileManager.default.enumerator(at: entry.url, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey])
+            while let url = walker?.nextObject() as? URL, !cancel.isCancelled {
+                let v = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+                if v?.isDirectory == true { stats.folders += 1 } else { file(url.lastPathComponent, Int64(v?.fileSize ?? 0)) }
             }
         }
-        for (source, destination) in pairs {
-            if isCancelled() || report.cancelled { report.cancelled = true; break }
-            progress(source)
-            transfer(source.standardizedFileURL, to: destination.standardizedFileURL)
-        }
-        return report
-    }
-
-    private func transfer(_ source: URL, to destination: URL) {
-        if report.cancelled || isCancelled() { report.cancelled = true; return }
-        if source.path == destination.path {
-            report.errors.append("\(source.lastPathComponent): source and target are the same")
-            return
-        }
-        if destination.path.hasPrefix(source.path + "/") {
-            report.errors.append("\(source.lastPathComponent): cannot \(kind == .copy ? "copy" : "move") a folder into itself")
-            return
-        }
-
-        if exists(destination) {
-            if isDirectory(source) && isDirectory(destination) {
-                merge(source, into: destination)
-                return
-            }
-            switch choice(for: source, existing: destination) {
-            case .cancel:
-                report.cancelled = true
-                return
-            case .skip:
-                report.skipped += 1
-                return
-            case .overwrite:
-                do {
-                    try fm.removeItem(at: destination)
-                } catch {
-                    report.errors.append("Cannot replace \(destination.lastPathComponent): \(error.localizedDescription)")
-                    return
-                }
-            }
-        }
-
-        do {
-            switch kind {
-            case .copy: try fm.copyItem(at: source, to: destination)
-            case .move: try fm.moveItem(at: source, to: destination)
-            }
-            report.done += 1
-        } catch {
-            report.errors.append("\(source.lastPathComponent): \(error.localizedDescription)")
-        }
-    }
-
-    private func merge(_ source: URL, into destination: URL) {
-        let children = (try? fm.contentsOfDirectory(at: source, includingPropertiesForKeys: nil)) ?? []
-        for child in children {
-            transfer(child, to: destination.appendingPathComponent(child.lastPathComponent))
-            if report.cancelled { return }
-        }
-        // A merged move leaves the emptied source folder behind; remove it when nothing was kept.
-        if kind == .move, (try? fm.contentsOfDirectory(atPath: source.path))?.isEmpty == true {
-            try? fm.removeItem(at: source)
-        }
-    }
-
-    private func choice(for source: URL, existing: URL) -> ConflictChoice {
-        if let remembered = rememberedChoice { return remembered }
-        let (choice, all) = resolve(source, existing)
-        if all && choice != .cancel { rememberedChoice = choice }
-        return choice
-    }
-
-    private func exists(_ url: URL) -> Bool {
-        // lstat, so a dangling symlink at the destination still counts as "there".
-        var st = stat()
-        return lstat(url.path, &st) == 0
-    }
-
-    private func isDirectory(_ url: URL) -> Bool {
-        var isDir: ObjCBool = false
-        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
+        return stats
     }
 }
 
@@ -161,6 +104,20 @@ public enum FileCommandsCore {
         for url in urls {
             do {
                 try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+                report.done += 1
+            } catch {
+                report.errors.append("\(url.lastPathComponent): \(error.localizedDescription)")
+            }
+        }
+        return report
+    }
+
+    /// ⇧8: deletes items for good (no Trash).
+    public static func remove(_ urls: [URL]) -> OperationReport {
+        var report = OperationReport()
+        for url in urls {
+            do {
+                try FileManager.default.removeItem(at: url)
                 report.done += 1
             } catch {
                 report.errors.append("\(url.lastPathComponent): \(error.localizedDescription)")

@@ -12,6 +12,11 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
     let outline = NSOutlineView()
     let status = NSTextField(wrappingLabelWithString: "Double-click a saved profile to connect.")
     private(set) var editor: FTPProfileEditorController?
+    /// Need a saved connection selected (Delete also takes a folder); greyed out otherwise.
+    let connectButton = NSButton(title: "Connect", target: nil, action: nil)
+    let duplicateButton = NSButton(title: "Duplicate…", target: nil, action: nil)
+    let editButton = NSButton(title: "Edit…", target: nil, action: nil)
+    let deleteButton = NSButton(title: "Delete", target: nil, action: nil)
 
     /// Folder rows are their names; profile rows are profile ids.
     private final class Node: NSObject {
@@ -26,7 +31,8 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
         self.ftp = ftp
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 540), styleMask: [.titled, .closable, .resizable],
                               backing: .buffered, defer: true)
-        window.title = "Connect to FTP server"
+        window.title = AppWindows.title("Connect to FTP server")
+        AppWindows.style(window)
         window.minSize = NSSize(width: 640, height: 500)
         window.isReleasedWhenClosed = false
         super.init(window: window)
@@ -39,6 +45,7 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
 
     public func present(newConnection: Bool = false) {
         reload()
+        if let window = window { AppWindows.place(window) }
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         if newConnection { newProfile() }
@@ -51,6 +58,8 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
     private func build() -> NSView {
         let column = NSTableColumn(identifier: .init("name"))
         column.title = "Saved connections"
+        column.width = 220
+        column.minWidth = 150
         outline.addTableColumn(column)
         let detail = NSTableColumn(identifier: .init("detail"))
         detail.title = "Connection"
@@ -68,19 +77,24 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
         scroll.hasVerticalScroller = true
         scroll.borderType = .bezelBorder
 
-        let buttons: [(String, Selector)] = [
-            ("Connect", #selector(connectSelected)), ("New connection…", #selector(newProfile)),
-            ("New URL…", #selector(newURL)), ("Duplicate…", #selector(duplicate)), ("New folder…", #selector(newFolder)),
-            ("Edit…", #selector(edit)), ("Delete", #selector(deleteSelected)), ("Encrypt…", #selector(encryptInfo)),
+        let buttons: [(NSButton, Selector)] = [
+            (connectButton, #selector(connectSelected)),
+            (NSButton(title: "New connection…", target: nil, action: nil), #selector(newProfile)),
+            (NSButton(title: "New URL…", target: nil, action: nil), #selector(newURL)),
+            (duplicateButton, #selector(duplicate)),
+            (NSButton(title: "New folder…", target: nil, action: nil), #selector(newFolder)),
+            (editButton, #selector(edit)), (deleteButton, #selector(deleteSelected)),
+            (NSButton(title: "Encrypt…", target: nil, action: nil), #selector(encryptInfo)),
         ]
         var views: [NSView] = []
-        for (title, sel) in buttons {
-            let b = NSButton(title: title, target: self, action: sel)
+        for (b, sel) in buttons {
+            b.target = self
+            b.action = sel
             b.bezelStyle = .rounded
             b.widthAnchor.constraint(equalToConstant: 160).isActive = true
-            if title == "Connect" { b.keyEquivalent = "\r" }
             views.append(b)
         }
+        connectButton.keyEquivalent = "\r"
         let side = NSStackView(views: views)
         side.orientation = .vertical
         side.spacing = 6
@@ -129,7 +143,17 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
             let row = outline.row(forItem: node)
             if row >= 0 { outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false) }
         }
+        updateButtons()
     }
+
+    /// Connect, Duplicate and Edit need a saved connection; Delete a connection or a folder.
+    func updateButtons() {
+        let hasProfile = selectedProfile != nil
+        for b in [connectButton, duplicateButton, editButton] { b.isEnabled = hasProfile }
+        deleteButton.isEnabled = outline.selectedRow >= 0
+    }
+
+    public func outlineViewSelectionDidChange(_ notification: Notification) { updateButtons() }
 
     private func folderNode(_ name: String) -> Node {
         if let n = folderNodes[name] { return n }
@@ -174,7 +198,21 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
             if let p = node.profileID.flatMap(repository.profile), !p.isEncrypted { label.textColor = .systemOrange }
         }
         label.lineBreakMode = .byTruncatingTail
-        return label
+        return Self.centered(label)
+    }
+
+    /// A cell with its text vertically centred in the row (a bare label sits at the top).
+    static func centered(_ label: NSTextField) -> NSTableCellView {
+        let cell = NSTableCellView()
+        cell.textField = label
+        label.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -2),
+            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        return cell
     }
 
     var selectedProfile: FTPProfile? {
@@ -198,20 +236,28 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
         var password = profile.anonymous ? nil : repository.credentials.password(for: profile.id)
         // A key file only needs a passphrase when it is protected by one.
         let needsSecret = profile.usesKeyFile ? SFTPClient.keyNeedsPassphrase(profile.keyFilePath) : !profile.anonymous
+        var remember = false
         if needsSecret && password == nil {
             guard let typed = askPassword(for: profile) else { return }
-            password = typed.isEmpty ? nil : typed
+            password = typed.password.isEmpty ? nil : typed.password
+            remember = typed.save && password != nil
         }
-        connect(profile, password: password)
+        connect(profile, password: password, remember: remember)
     }
 
-    func connect(_ profile: FTPProfile, password: String?) {
+    /// `remember`: once the login works, the password typed in the prompt goes into the Keychain.
+    func connect(_ profile: FTPProfile, password: String?, remember: Bool = false) {
         status.stringValue = "Connecting to \(profile.hostAndPort)…"
         guard let ftp = ftp, let commander = ftp.commander else { return }
         ftp.connect(profile, password: password, side: commander.model.activeSide) { [weak self] result in
             guard let self = self else { return }
             switch result {
             case .success:
+                if remember, let password = password {
+                    var saved = profile
+                    saved.savePassword = true
+                    self.repository.save(saved, password: password)
+                }
                 self.status.stringValue = "Connected to \(profile.hostAndPort)."
                 self.close()
             case .failure(let e):
@@ -223,7 +269,8 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
         }
     }
 
-    private func askPassword(for profile: FTPProfile) -> String? {
+    /// The password (or key passphrase) prompt, with "Save in Keychain" (ticked when the profile saves passwords).
+    private func askPassword(for profile: FTPProfile) -> (password: String, save: Bool)? {
         let alert = NSAlert()
         if profile.usesKeyFile {
             alert.messageText = "Passphrase for the key \(profile.keyFile)"
@@ -237,7 +284,11 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
         alert.window.initialFirstResponder = field
         alert.addButton(withTitle: "Connect")
         alert.addButton(withTitle: "Cancel")
-        return Modal.run(alert) == .alertFirstButtonReturn ? field.stringValue : nil
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = profile.usesKeyFile ? "Save passphrase in Keychain" : "Save password in Keychain"
+        alert.suppressionButton?.state = profile.savePassword ? .on : .off
+        guard Modal.run(alert) == .alertFirstButtonReturn else { return nil }
+        return (field.stringValue, alert.suppressionButton?.state == .on)
     }
 
     @objc func newProfile() {

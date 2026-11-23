@@ -66,7 +66,8 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         self.defaults = defaults
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1060, height: 640),
                               styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: true)
-        window.title = "Synchronize directories"
+        window.title = AppWindows.title("Synchronize directories")
+        AppWindows.style(window)
         window.minSize = NSSize(width: 900, height: 420)
         window.isReleasedWhenClosed = false
         super.init(window: window)
@@ -95,6 +96,7 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         }
         if maskField.stringValue.isEmpty { maskField.stringValue = "*.*" }
         updateButtons()
+        if let window = window { AppWindows.place(window) }
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
     }
@@ -474,6 +476,7 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: viewer.window, queue: .main) { [weak self, weak viewer] _ in
             self?.diffWindows.removeAll { $0 === viewer }
         }
+        if let window = viewer.window { AppWindows.place(window) }
         viewer.showWindow(nil)
         let work = { () -> (Result<FileComparison, Error>, [URL]) in
             var temps: [URL] = []
@@ -758,7 +761,8 @@ final class SyncConfirmationController: NSWindowController, NSTableViewDataSourc
         self.shown = shown
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 480),
                               styleMask: [.titled, .resizable], backing: .buffered, defer: true)
-        window.title = "Synchronize"
+        window.title = AppWindows.title("Synchronize")
+        AppWindows.style(window)
         window.minSize = NSSize(width: 640, height: 420)
         window.maxSize = NSSize(width: 1200, height: 1200)
         super.init(window: window)

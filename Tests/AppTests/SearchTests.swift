@@ -311,7 +311,7 @@ public enum SearchTests {
             try expect(dialog.searchIn.stringValue == root.path, "starts in the active panel's folder")
             try expect(dialog.attributeBoxes.values.allSatisfy { $0.state == .mixed }, "attributes start as 'ignore'")
             try expect(dialog.attributeBoxes[.encrypted]?.isEnabled == false, "encrypted unavailable")
-            try expect(dialog.tabs.tabViewItems.map(\.label) == ["General", "Advanced", "Plugins", "Load/Save"], "TC tabs")
+            try expect(dialog.tabs.tabViewItems.map(\.label) == ["General", "Advanced"], "General and Advanced tabs only")
             try expect(dialog.charsetBoxes[.ansi]?.state == .on && dialog.charsetBoxes[.utf8]?.state == .on
                        && dialog.charsetBoxes[.utf16]?.state == .off, "default charsets ANSI + UTF8")
             try expect(dialog.archivesBox.isEnabled == false, "archives shown but not available")
@@ -379,18 +379,10 @@ public enum SearchTests {
             model.left.goUp(visibleRows: 20)
             try expect(model.left.virtualTitle == nil && model.left.directory.lastPathComponent == "sub", ".. leaves the listing")
 
-            // Load/Save: store a setup by name and load it back.
-            dialog.searchFor.stringValue = "*.md"
-            dialog.storeTemplate(named: "Markdown")
-            dialog.searchFor.stringValue = "other"
-            dialog.templateTable.selectRowIndexes(IndexSet(integer: dialog.templateNames.firstIndex(of: "Markdown")!), byExtendingSelection: false)
-            dialog.loadTemplate()
-            try expect(dialog.searchFor.stringValue == "*.md", "template loaded")
             dialog.searchFor.stringValue = "*.txt"
             dialog.readUI()
 
             let again = FindFilesWindowController(commander: view, defaults: defaults)
-            try expect(again.templateNames == ["Markdown"], "templates remembered")
             try expect(again.config.general.filenamePattern == "*.txt" && again.config.advanced.attributes == [.hidden: .excluded],
                        "settings remembered")
             again.present()

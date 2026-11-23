@@ -5,6 +5,11 @@ public enum TransferLocation {
     case local(URL)
     case remote(RemoteSession, String)
 
+    public var isRemote: Bool {
+        if case .remote = self { return true }
+        return false
+    }
+
     public var displayPath: String {
         switch self {
         case .local(let url): return url.path
@@ -16,6 +21,14 @@ public enum TransferLocation {
         switch self {
         case .local(let url): return url.lastPathComponent
         case .remote(_, let path): return (path as NSString).lastPathComponent
+        }
+    }
+
+    /// The same folder, another name (Rename in the "target exists" dialog).
+    func sibling(named name: String) -> TransferLocation {
+        switch self {
+        case .local(let url): return .local(url.deletingLastPathComponent().appendingPathComponent(name, isDirectory: false))
+        case let .remote(session, path): return .remote(session, RemoteSession.normalize((path as NSString).deletingLastPathComponent + "/" + name))
         }
     }
 
@@ -34,11 +47,35 @@ public struct TransferItem {
     public let destination: TransferLocation
     public let size: Int64
     public let isFolder: Bool
+    /// The source's date (shown when the target exists, and for "Replace all older").
+    public var modified: Date? = nil
+    /// The target existed when the job was planned (server targets are only checked then).
+    public var conflict = false
+    /// A local folder moved in one step (same disk, nothing at the target yet).
+    public var isWholeFolder = false
 }
 
 public enum TransferItemResult: Equatable {
     case pending, done, skipped(String), failed(String)
 }
+
+/// A file about to be copied onto one that exists: both sides, for the "target file exists" dialog.
+public struct TransferConflict {
+    public let source: TransferLocation
+    public let target: TransferLocation
+    public let sourceSize: Int64
+    public let sourceDate: Date?
+    public let targetSize: Int64?
+    public let targetDate: Date?
+}
+
+/// The answer to a "target file exists" question.
+public enum ConflictDecision: Equatable {
+    case replace, replaceAll, skip, skipAll, replaceAllOlder, rename(String), cancel
+}
+
+/// Thrown for a file the user chose to skip.
+struct TransferSkipped: Error {}
 
 /// A queued copy or move between this Mac and a server (or two servers, through this Mac).
 public final class TransferJob {
@@ -47,6 +84,16 @@ public final class TransferJob {
     public let id = UUID()
     public let title: String
     public let isMove: Bool
+    /// Each copied file is read back and compared (the dialog's "Verify").
+    public var verify = false
+    /// Added with "Queue": runs after the queued jobs before it, one at a time.
+    public var waitsInQueue = false
+    /// Files being copied right now.
+    public internal(set) var active: Set<Int> = []
+    /// Held back in the queue until the queued job before it is done.
+    var isHeld = false
+    /// "Replace all", "Skip all" or "Replace all older", once answered for this job.
+    var conflictRule: ConflictDecision?
     public internal(set) var items: [TransferItem]
     public internal(set) var results: [TransferItemResult]
     /// Folders to remove after a successful move (deepest first).
@@ -85,7 +132,7 @@ public final class TransferJob {
     /// "Done", "3 failed", "Cancelled", "Running 4 of 10", "Queued".
     public var statusText: String {
         switch state {
-        case .queued: return "Queued"
+        case .queued: return waitsInQueue ? "Waiting in the queue" : "Queued"
         case .running, .finishing:
             return "Copying \(running) at once · \(doneCount) of \(items.count) done"
         case .cancelled: return "Cancelled (\(doneCount) done)"
@@ -155,6 +202,9 @@ public final class TransferManager {
     public var limits = TransferLimits() {
         didSet { schedule() }
     }
+    /// Asks what to do with a file whose target exists; called on the main thread.
+    /// nil: targets are replaced.
+    public var resolveConflict: ((TransferConflict) -> ConflictDecision)?
 
     private let lock = NSLock()
     private let workers = DispatchQueue(label: "ClassicCommander.transfers", attributes: .concurrent)
@@ -168,15 +218,47 @@ public final class TransferManager {
 
     public init() {}
 
-    public func enqueue(_ job: TransferJob) {
+    /// Starts a job, or (`waitsInQueue`) lines it up behind the queued jobs still to finish.
+    /// `synchronously`: runs it on the calling thread, file after file (tests, quick renames).
+    public func enqueue(_ job: TransferJob, synchronously: Bool = false) {
+        lock.lock()
+        let mustWait = job.waitsInQueue && jobs.contains { $0.waitsInQueue && Self.isUnfinished($0) }
+        job.isHeld = mustWait
         jobs.append(job)
+        lock.unlock()
         notify(job)
+        if runSynchronously || synchronously { runSerially(job); return }
+        if mustWait { return }
+        workers.async { [weak self] in self?.start(job) }
+    }
+
+    static func isUnfinished(_ job: TransferJob) -> Bool {
+        job.state == .queued || job.state == .running || job.state == .finishing
+    }
+
+    /// The next queued job, once the one before it is done.
+    private func startNextInQueue() {
+        lock.lock()
+        let busy = jobs.contains { $0.waitsInQueue && !$0.isHeld && Self.isUnfinished($0) }
+        let next = busy ? nil : jobs.first { $0.isHeld && $0.state == .queued }
+        next?.isHeld = false
+        lock.unlock()
+        guard let job = next else { return }
         if runSynchronously { runSerially(job); return }
         workers.async { [weak self] in self?.start(job) }
     }
 
     public func clearFinished() {
+        lock.lock()
         jobs.removeAll { $0.state == .finished || $0.state == .cancelled }
+        lock.unlock()
+    }
+
+    /// "Remove completed": jobs that finished without problems leave the list.
+    public func removeCompleted() {
+        lock.lock()
+        jobs.removeAll { $0.state == .finished && $0.failedCount == 0 }
+        lock.unlock()
     }
 
     private func notify(_ job: TransferJob) {
@@ -187,6 +269,8 @@ public final class TransferManager {
     /// Creates the job's folders (in order, so parents come first), then queues its files.
     private func start(_ job: TransferJob) {
         lock.lock()
+        // Cancelled before it got going: it stays cancelled.
+        if job.state == .cancelled { lock.unlock(); return }
         job.state = .running
         job.started = Date()
         lock.unlock()
@@ -241,9 +325,22 @@ public final class TransferManager {
         for job in dropped { finishIfDone(job) }
     }
 
-    /// Cancel a job: running files stop, waiting ones are dropped.
+    /// Cancel a job: running files stop, waiting ones are dropped. A job still waiting in the
+    /// queue is just taken off it.
     public func cancel(_ job: TransferJob) {
         job.cancel()
+        lock.lock()
+        let neverStarted = job.isHeld
+        if neverStarted {
+            job.isHeld = false
+            job.state = .cancelled
+        }
+        lock.unlock()
+        if neverStarted {
+            notify(job)
+            startNextInQueue()
+            return
+        }
         schedule()
         finishIfDone(job)
     }
@@ -257,6 +354,8 @@ public final class TransferManager {
         if job.cancelFlag.isCancelled {
             result = .pending
         } else {
+            lock.lock(); job.active.insert(index); lock.unlock()
+            notify(job)
             do {
                 try perform(item, job: job) { [weak self] partial in
                     guard let self = self else { return }
@@ -274,6 +373,7 @@ public final class TransferManager {
             }
         }
         lock.lock()
+        job.active.remove(index)
         job.partial[index] = nil
         job.results[index] = result
         if result == .done { job.completedBytes = job.completedBytes.addingSaturated(item.size) }
@@ -306,9 +406,11 @@ public final class TransferManager {
         job.state = job.cancelFlag.isCancelled ? .cancelled : .finished
         lock.unlock()
         notify(job)
+        if job.waitsInQueue { startNextInQueue() }
     }
 
     static func result(for error: Error) -> TransferItemResult {
+        if error is TransferSkipped { return .skipped("the target exists") }
         if let e = error as? FTPError { return .failed(e.message) }
         return .failed(error.localizedDescription)
     }
@@ -320,6 +422,8 @@ public final class TransferManager {
         notify(job)
         for (i, item) in job.items.enumerated() {
             if job.cancelFlag.isCancelled { break }
+            job.active.insert(i)
+            defer { job.active.remove(i) }
             do {
                 try perform(item, job: job) { partial in job.partial[i] = partial }
                 job.results[i] = .done
@@ -361,7 +465,10 @@ public final class TransferManager {
             progress(0)   // folders carry no bytes
             return
         }
-        switch (item.source, item.destination) {
+        // An existing target: ask (or follow an earlier "… all"); Skip and Cancel end here.
+        guard let destination = try settle(item, job: job) else { throw TransferSkipped() }
+        let fm = FileManager.default
+        switch (item.source, destination) {
         case let (.local(url), .remote(session, path)):
             try session.client.upload(url, to: path, resume: job.resume, cancel: cancel, progress: progress)
             session.invalidate((path as NSString).deletingLastPathComponent)
@@ -369,15 +476,117 @@ public final class TransferManager {
             try session.client.download(path, to: url, expectedSize: item.size, resume: job.resume, cancel: cancel, progress: progress)
         case let (.remote(from, path), .remote(to, target)):
             // Server to server goes through a temporary file on this Mac.
-            let temp = FileManager.default.temporaryDirectory.appendingPathComponent("cc-ftp-\(UUID().uuidString)")
-            defer { try? FileManager.default.removeItem(at: temp) }
+            let temp = fm.temporaryDirectory.appendingPathComponent("cc-ftp-\(UUID().uuidString)")
+            defer { try? fm.removeItem(at: temp) }
             try from.client.download(path, to: temp, expectedSize: item.size, resume: false, cancel: cancel) { progress($0 / 2) }
             try to.client.upload(temp, to: target, resume: false, cancel: cancel) { progress(item.size / 2 + $0 / 2) }
             to.invalidate((target as NSString).deletingLastPathComponent)
         case let (.local(src), .local(dst)):
-            try FileManager.default.copyItem(at: src, to: dst)
+            if job.isMove && (item.isWholeFolder || !job.verify) {
+                // A rename on the same disk; macOS copies and deletes across disks.
+                if Self.exists(dst) { try fm.removeItem(at: dst) }
+                try fm.moveItem(at: src, to: dst)
+                progress(item.size)
+                return
+            }
+            try Self.copyLocal(src, to: dst)
+            progress(item.size)
         }
+        if job.verify { try verify(item, at: destination) }
         if job.isMove { try deleteSource(item.source) }
+    }
+
+    /// Copies a file, replacing what is there only once the copy is complete.
+    static func copyLocal(_ src: URL, to dst: URL) throws {
+        let fm = FileManager.default
+        guard exists(dst) else { return try fm.copyItem(at: src, to: dst) }
+        let temp = dst.deletingLastPathComponent().appendingPathComponent(".cc-copy-\(UUID().uuidString)")
+        do {
+            try fm.copyItem(at: src, to: temp)
+            _ = try fm.replaceItemAt(dst, withItemAt: temp)
+        } catch {
+            try? fm.removeItem(at: temp)
+            throw error
+        }
+    }
+
+    static func exists(_ url: URL) -> Bool {
+        var st = stat()
+        return lstat(url.path, &st) == 0   // lstat: a dangling link is there too
+    }
+
+    /// Size and date of whatever is at `location`, or nil when nothing is.
+    static func existing(_ location: TransferLocation) -> (size: Int64?, date: Date?)? {
+        switch location {
+        case .local(let url):
+            guard exists(url) else { return nil }
+            let v = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            return (v?.fileSize.map(Int64.init), v?.contentModificationDate)
+        case let .remote(session, path):
+            let dir = (path as NSString).deletingLastPathComponent, name = (path as NSString).lastPathComponent
+            guard let entry = (try? session.fetch(dir, useCache: false))?.first(where: { $0.name == name }) else { return nil }
+            return (entry.size, entry.modified)
+        }
+    }
+
+    /// Where the file really goes: its target, a new name chosen in the dialog, or nil to skip it.
+    func settle(_ item: TransferItem, job: TransferJob) throws -> TransferLocation? {
+        var target = item.destination
+        // Local targets are checked now; server targets were checked when the job was planned.
+        var check = !target.isRemote || item.conflict
+        while check, let found = Self.existing(target) {
+            let conflict = TransferConflict(source: item.source, target: target, sourceSize: item.size, sourceDate: item.modified,
+                                            targetSize: found.size, targetDate: found.date)
+            switch decide(conflict, job: job) {
+            case .replace, .replaceAll: return target
+            case .skip, .skipAll: return nil
+            case .replaceAllOlder:
+                // Replace only what is older than the file being copied.
+                let older = (found.date ?? .distantPast) < (item.modified ?? .distantFuture)
+                return older ? target : nil
+            case .rename(let name):
+                target = target.sibling(named: name)
+                check = true
+            case .cancel:
+                job.cancel()
+                throw FTPError.cancelled
+            }
+        }
+        return target
+    }
+
+    /// The job's "… all" answer, or the user's (asked on the main thread, one dialog at a time).
+    private func decide(_ conflict: TransferConflict, job: TransferJob) -> ConflictDecision {
+        let ask: () -> ConflictDecision = { [weak self] in
+            self?.lock.lock()
+            let rule = job.conflictRule
+            self?.lock.unlock()
+            if let rule = rule { return rule }
+            let answer = self?.resolveConflict?(conflict) ?? .replace
+            if [.replaceAll, .skipAll, .replaceAllOlder].contains(answer) {
+                self?.lock.lock(); job.conflictRule = answer; self?.lock.unlock()
+            }
+            return answer
+        }
+        return Thread.isMainThread ? ask() : DispatchQueue.main.sync(execute: ask)
+    }
+
+    /// Verify: reads the copy back (or, on a server, lists it) and compares it with the source.
+    func verify(_ item: TransferItem, at destination: TransferLocation) throws {
+        let ok: Bool
+        switch (item.source, destination) {
+        case let (.local(src), .local(dst)):
+            do {
+                ok = try FileComparison.fileSize(src) == FileComparison.fileSize(dst) && FileComparison.firstDifference(src, dst) == nil
+            } catch {
+                ok = false
+            }
+        case (_, .local(let dst)):
+            ok = (try? FileComparison.fileSize(dst)) == item.size
+        case (_, .remote):
+            ok = Self.existing(destination)?.size == item.size
+        }
+        if !ok { throw FTPError.verificationFailed("the copy differs from \(item.source.displayPath)") }
     }
 
     private func deleteSource(_ location: TransferLocation) throws {
@@ -403,16 +612,18 @@ public final class TransferManager {
 }
 
 /// Builds transfer jobs from what is selected in a panel: folders are walked (locally or on the
-/// server), the structure is kept, and existing targets are reported so the user can decide.
+/// server), the structure is kept, and existing targets are marked so the user can decide.
 public enum TransferPlanner {
     public struct Source {
         public let location: TransferLocation
         public let isFolder: Bool
         public let size: Int64
-        public init(location: TransferLocation, isFolder: Bool, size: Int64) {
+        public let modified: Date?
+        public init(location: TransferLocation, isFolder: Bool, size: Int64, modified: Date? = nil) {
             self.location = location
             self.isFolder = isFolder
             self.size = size
+            self.modified = modified
         }
     }
 
@@ -421,52 +632,97 @@ public enum TransferPlanner {
         /// Indexes of items whose destination file already exists.
         public var conflicts: [Int] = []
         public var foldersToRemove: [TransferLocation] = []
+        public var fileCount: Int { items.filter { !$0.isFolder }.count }
+        public var bytes: Int64 { items.reduce(0) { $0.addingSaturated($1.size) } }
     }
 
-    public static func plan(_ sources: [Source], into destination: TransferLocation, cancel: CancelFlag? = nil) throws -> Plan {
+    /// Each source goes into `destination` under its own name.
+    public static func plan(_ sources: [Source], into destination: TransferLocation, move: Bool = false,
+                            mask: FileMask? = nil, cancel: CancelFlag? = nil) throws -> Plan {
+        try plan(sources.map { ($0, destination.appending($0.location.name, isDirectory: $0.isFolder)) },
+                 move: move, mask: mask, cancel: cancel)
+    }
+
+    /// Each source goes to its own target (a new name: "copy as" / rename). `mask` keeps only the
+    /// files it matches (and the folders holding them). A local folder moved on the same disk to a
+    /// place where nothing is yet moves in one step.
+    public static func plan(_ pairs: [(Source, TransferLocation)], move: Bool, mask: FileMask?,
+                            cancel: CancelFlag? = nil) throws -> Plan {
         var plan = Plan()
-        for source in sources {
-            let target = destination.appending(source.location.name, isDirectory: source.isFolder)
+        let keep: (String) -> Bool = { name in
+            mask.map { $0.matches(FileEntry(name: name, url: URL(fileURLWithPath: "/" + name), kind: .file)) } ?? true
+        }
+        for (source, target) in pairs {
             if !source.isFolder {
-                plan.items.append(TransferItem(source: source.location, destination: target, size: source.size, isFolder: false))
+                if keep(source.location.name) {
+                    plan.items.append(TransferItem(source: source.location, destination: target, size: source.size, isFolder: false,
+                                                   modified: source.modified))
+                }
                 continue
             }
-            plan.items.append(TransferItem(source: source.location, destination: target, size: 0, isFolder: true))
+            if move, mask == nil, case let .local(from) = source.location, case let .local(to) = target,
+               !TransferManager.exists(to), sameVolume(from, to.deletingLastPathComponent()) {
+                plan.items.append(TransferItem(source: source.location, destination: target, size: 0, isFolder: false,
+                                               modified: source.modified, isWholeFolder: true))
+                continue
+            }
+            var tree: [TransferItem] = [TransferItem(source: source.location, destination: target, size: 0, isFolder: true)]
             var removeLater: [TransferLocation] = [source.location]
             switch source.location {
             case .local(let root):
                 // Walk the real path (e.g. /private/var/… for /var/…) so relative paths are cut correctly.
                 let real = FileSystemLister.realPath(of: root)
-                let walker = FileManager.default.enumerator(at: real, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey])
+                let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
+                let walker = FileManager.default.enumerator(at: real, includingPropertiesForKeys: keys)
                 let prefix = real.path + "/"
                 while let found = walker?.nextObject() as? URL {
                     if cancel?.isCancelled == true { throw FTPError.cancelled }
                     guard found.path.hasPrefix(prefix) else { continue }
                     let rel = String(found.path.dropFirst(prefix.count))
-                    let v = try? found.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+                    let v = try? found.resourceValues(forKeys: Set(keys))
                     let isDir = v?.isDirectory ?? false
                     let url = root.appendingPathComponent(rel, isDirectory: isDir)
-                    plan.items.append(TransferItem(source: .local(url), destination: target.appending(rel, isDirectory: isDir),
-                                                   size: isDir ? 0 : Int64(v?.fileSize ?? 0), isFolder: isDir))
+                    tree.append(TransferItem(source: .local(url), destination: target.appending(rel, isDirectory: isDir),
+                                             size: isDir ? 0 : Int64(v?.fileSize ?? 0), isFolder: isDir,
+                                             modified: v?.contentModificationDate))
                     if isDir { removeLater.append(.local(url)) }
                 }
             case let .remote(session, root):
-                let tree = try session.walk(root, cancel: cancel)
-                for folder in tree.folders {
+                let walked = try session.walk(root, cancel: cancel)
+                for folder in walked.folders {
                     let rel = String(folder.dropFirst(root.count + 1))
-                    plan.items.append(TransferItem(source: .remote(session, folder), destination: target.appending(rel, isDirectory: true), size: 0, isFolder: true))
+                    tree.append(TransferItem(source: .remote(session, folder), destination: target.appending(rel, isDirectory: true),
+                                             size: 0, isFolder: true))
                     removeLater.append(.remote(session, folder))
                 }
-                for file in tree.files {
+                for file in walked.files {
                     let rel = String(file.path.dropFirst(root.count + 1))
-                    plan.items.append(TransferItem(source: .remote(session, file.path), destination: target.appending(rel),
-                                                   size: file.size, isFolder: false))
+                    tree.append(TransferItem(source: .remote(session, file.path), destination: target.appending(rel),
+                                             size: file.size, isFolder: false, modified: file.modified))
                 }
             }
+            if mask != nil {
+                // Only matching files, and only the folders they end up in.
+                tree = tree.filter { $0.isFolder || keep($0.source.name) }
+                let filePaths = tree.filter { !$0.isFolder }.map { $0.destination.displayPath }
+                tree = tree.filter { item in
+                    !item.isFolder || filePaths.contains { $0.hasPrefix(item.destination.displayPath + "/") }
+                }
+            }
+            plan.items += tree
             plan.foldersToRemove += removeLater.reversed()
         }
         plan.conflicts = try findConflicts(plan.items)
+        for i in plan.conflicts { plan.items[i].conflict = true }
         return plan
+    }
+
+    /// Whether two local places are on the same volume (so a move is a rename).
+    static func sameVolume(_ a: URL, _ b: URL) -> Bool {
+        let key = URLResourceKey.volumeIdentifierKey
+        guard let va = (try? a.resourceValues(forKeys: [key]))?.volumeIdentifier as? NSObject,
+              let vb = (try? b.resourceValues(forKeys: [key]))?.volumeIdentifier as? NSObject else { return false }
+        return va.isEqual(vb)
     }
 
     /// Items whose destination file exists already (remote folders are listed once each).

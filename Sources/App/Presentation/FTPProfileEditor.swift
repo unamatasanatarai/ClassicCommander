@@ -46,7 +46,8 @@ final class FTPProfileEditorController: NSWindowController {
         self.initialPassword = password
         self.isNew = isNew
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 560), styleMask: [.titled], backing: .buffered, defer: true)
-        window.title = "Connection settings"
+        window.title = AppWindows.title("Connection settings")
+        AppWindows.style(window)
         super.init(window: window)
         window.contentView = build(folders: folders)
         load()

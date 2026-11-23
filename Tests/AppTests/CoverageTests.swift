@@ -74,16 +74,19 @@ public enum CoverageTests {
     }
 
     /// Dialogs answer with `response`; a text accessory gets `text`.
+    /// Answers alerts with `response`; the first button also answers OK in the Copy / Move dialog.
     static func answer(_ response: NSApplication.ModalResponse, text: String? = nil) {
         Modal.answerAlert = { alert in
             if let text = text { (alert.accessoryView as? NSTextField)?.stringValue = text }
             return response
         }
+        Modal.answerWindow = { _ in response == .alertFirstButtonReturn ? .OK : .cancel }
     }
 
     static func resetAnswers() {
         Modal.answerAlert = { _ in .cancel }
         Modal.answerPanel = { _ in [] }
+        Modal.answerWindow = { _ in .cancel }
     }
 
     static func commander(_ dir: URL = FileManager.default.temporaryDirectory) -> CommanderView {
@@ -261,6 +264,7 @@ public enum CoverageTests {
             let many = (0..<6).map { TransferItem(source: .remote(a, "/www/assets/big.bin"), destination: .local(local.appendingPathComponent("c\($0).bin")), size: 70_000, isFolder: false) }
             let job = TransferJob(title: "many", items: many, isMove: false)
             manager.enqueue(job)
+            wait { job.running > 0 }
             manager.cancel(job)
             wait { job.state == .cancelled || job.state == .finished }
             try expect(job.state == .cancelled && job.doneCount < 6, "cancelled: \(job.statusText)")
@@ -359,6 +363,9 @@ public enum CoverageTests {
             ftp.runSynchronously = true
             let manager = ftp.managerWindow
             manager.present()
+            try expect(manager.window?.title == AppWindows.title("Connect to FTP server"), "title starts with the app name")
+            try expect(!manager.connectButton.isEnabled && !manager.editButton.isEnabled && !manager.duplicateButton.isEnabled
+                       && !manager.deleteButton.isEnabled, "nothing selected: Connect/Duplicate/Edit/Delete greyed out")
             answer(.alertFirstButtonReturn, text: "Work")
             send(manager, "newFolder")
             try expect(ftp.repository.folders == ["Work"], "folder")
@@ -366,16 +373,40 @@ public enum CoverageTests {
             manager.newProfile()
             guard let editor = manager.editor else { throw Fail(description: "no editor") }
             try expect(editor.folderPopup.titleOfSelectedItem == "Work", "new profile goes into the selected folder")
+            try expect(manager.deleteButton.isEnabled && !manager.editButton.isEnabled && !manager.connectButton.isEnabled,
+                       "a folder can be deleted, not edited or connected")
             var p = server.profile()
             p.folder = "Work"
             p.savePassword = false
             ftp.repository.save(p, password: nil)
             send(editor, "cancelPressed")
             manager.reload(select: p.id)
-            // No saved password: asked for it, then connected.
+            try expect(manager.connectButton.isEnabled && manager.editButton.isEnabled && manager.duplicateButton.isEnabled
+                       && manager.deleteButton.isEnabled, "a connection enables every button")
+            let cell = manager.outlineView(manager.outline, viewFor: manager.outline.tableColumns[0],
+                                           item: manager.outline.item(atRow: manager.outline.selectedRow)!) as? NSTableCellView
+            try expect(cell?.textField?.stringValue == p.name, "name cell: \(String(describing: cell?.textField?.stringValue))")
+            // No saved password: asked for it, then connected (not saved: the profile doesn't save passwords).
             answer(.alertFirstButtonReturn, text: "s3cret pass")
             manager.connectSelected()
             try expect(view.rightView.model.isRemote || view.leftView.model.isRemote, "connected after the password prompt")
+            try expect(ftp.repository.credentials.password(for: p.id) == nil, "not saved when unticked")
+            ftp.disconnectActive()
+            // Ticked "Save password in Keychain": saved once the login works, and not asked again.
+            Modal.answerAlert = { alert in
+                (alert.accessoryView as? NSTextField)?.stringValue = "s3cret pass"
+                alert.suppressionButton?.state = .on
+                return .alertFirstButtonReturn
+            }
+            manager.reload(select: p.id)
+            manager.connectSelected()
+            try expect(ftp.repository.credentials.password(for: p.id) == "s3cret pass" && ftp.repository.profile(p.id)?.savePassword == true,
+                       "password saved from the prompt")
+            ftp.disconnectActive()
+            answer(.cancel)
+            manager.reload(select: p.id)
+            manager.connectSelected()
+            try expect(view.rightView.model.isRemote || view.leftView.model.isRemote, "connected with the saved password, no prompt")
             ftp.disconnectActive()
             answer(.alertFirstButtonReturn, text: "ftp://u:pw@files.example.com/x")
             send(manager, "newURL")
@@ -469,12 +500,15 @@ public enum CoverageTests {
             for w in NSApp.windows where w.title.contains("index.html") { w.close() }
         }
 
-        testRunner("UI: Transfers window — present, details, cancel, retry, clear") {
+        testRunner("UI: Queue window — present, file statuses, remove completed, cancel, retry, clear") {
             let server = try FTPTests.TestServer()
             defer { server.stop() }
             let manager = TransferManager()
             manager.runSynchronously = true
-            let window = TransfersWindowController(manager: manager)
+            let suite = "Queue-\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let window = TransfersWindowController(manager: manager, defaults: defaults)
             let session = RemoteSession(client: FTPClient(profile: server.profile(), password: "s3cret pass"))
             let local = try tempDir("TW")
             defer { try? FileManager.default.removeItem(at: local) }
@@ -486,7 +520,36 @@ public enum CoverageTests {
             window.present()
             window.table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
             send(window, "tableViewSelectionDidChange:", Notification(name: NSTableView.selectionDidChangeNotification))
-            try expect(window.details.string.contains("ok.html") && window.details.string.contains("✗"), "details: \(window.details.string)")
+            try expect(window.fileRows == [0, 1], "both files listed")
+            func cellText(_ column: Int, _ row: Int) -> String {
+                (window.tableView(window.files, viewFor: window.files.tableColumns[column], row: row) as? NSTextField)?.stringValue ?? ""
+            }
+            try expect(cellText(0, 0) == "Copied" && cellText(0, 1).hasPrefix("Failed") && cellText(1, 0).hasSuffix("ok.html"),
+                       "statuses: \(cellText(0, 0)) / \(cellText(0, 1))")
+            try expect(cellText(2, 0) == "18 B", "size: \(cellText(2, 0))")
+            window.sizeFormat = .bytes
+            try expect(cellText(2, 0) == "18 bytes", "size in bytes")
+            window.removeCompletedBox.state = .on
+            window.removeCompletedToggled()
+            try expect(defaults.bool(forKey: "queue.removeCompleted") && window.fileRows == [1], "copied files hidden: \(window.fileRows)")
+            try expect(window.tableView(window.files, viewFor: nil, row: 9) == nil, "no such row")
+            // Statuses while a job runs.
+            let pending = TransferJob(title: "p", items: [TransferItem(source: .local(local), destination: .local(local), size: 10, isFolder: false),
+                                                          TransferItem(source: .local(local), destination: .local(local), size: 0, isFolder: true)], isMove: true)
+            pending.active = [0]
+            pending.partial[0] = 5
+            try expect(TransfersWindowController.status(of: pending, at: 0).0 == "Moving 50 %", "\(TransfersWindowController.status(of: pending, at: 0))")
+            try expect(TransfersWindowController.status(of: pending, at: 1).0 == "Pending", "pending")
+            pending.results[1] = .done
+            pending.results[0] = .skipped("the target exists")
+            try expect(TransfersWindowController.status(of: pending, at: 1).0 == "Created"
+                       && TransfersWindowController.status(of: pending, at: 0).0.hasPrefix("Skipped"), "folder created, file skipped")
+            pending.state = .cancelled
+            pending.results[0] = .pending
+            pending.active = []
+            try expect(TransfersWindowController.status(of: pending, at: 0).0 == "Not done", "cancelled")
+            window.removeCompletedBox.state = .off
+            window.removeCompletedToggled()
             _ = window.tableView(window.table, viewFor: window.table.tableColumns[1], row: 0)
             _ = window.tableView(window.table, viewFor: window.table.tableColumns[2], row: 0)
             _ = window.tableView(window.table, viewFor: window.table.tableColumns[3], row: 0)
@@ -587,7 +650,7 @@ public enum CoverageTests {
             let pixels = NSEvent(cgEvent: CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: -45, wheel2: 0, wheel3: 0)!)!
             panel.scrollWheel(with: pixels)
             panel.mouseDown(with: mouse(.leftMouseDown, at: row(0), in: panel, clicks: 2))
-            panel.mouseDown(with: mouse(.leftMouseDown, at: center(l.upButton), in: panel))
+            panel.mouseDown(with: mouse(.leftMouseDown, at: center(l.hotlistButton), in: panel))
             panel.mouseDown(with: mouse(.leftMouseDown, at: center(l.rootButton), in: panel))
             try expect(panel.model.directory.path == "/", "root button")
             panel.mouseDown(with: mouse(.leftMouseDown, at: center(l.homeButton), in: panel))
@@ -596,7 +659,7 @@ public enum CoverageTests {
             let solo = PanelView(model: PanelModel(directory: dir))
             solo.frame = NSRect(x: 0, y: 0, width: 500, height: 400)
             let sl = solo.layoutInfo
-            solo.mouseDown(with: mouse(.leftMouseDown, at: center(sl.upButton), in: solo))
+            solo.mouseDown(with: mouse(.leftMouseDown, at: center(sl.hotlistButton), in: solo))
             solo.mouseDown(with: mouse(.leftMouseDown, at: center(sl.rootButton), in: solo))
             solo.mouseDown(with: mouse(.leftMouseDown, at: center(sl.homeButton), in: solo))
             // Drawing with search results shown (path bar names the results).
@@ -625,6 +688,11 @@ public enum CoverageTests {
             defer { Modal.launched = { _ in } }
             view.perform(.openTerminal)
             try expect(launched != nil, "terminal launched")
+            var opened: URL?
+            Modal.opened = { opened = $0 }
+            defer { Modal.opened = { _ in } }
+            view.perform(.openInFinder)
+            try expect(opened?.path == view.activeView.model.directory.path, "folder opened in Finder: \(String(describing: opened))")
             view.terminalFailed(FTPError.timeout)
             // Folder sizes in the background; leaving the folder cancels pending work.
             view.activeView.model.setShowFilter(.all, visibleRows: 20)
@@ -709,6 +777,51 @@ public enum CoverageTests {
             options.transferFields[0].integerValue = 5
             options.transfersChanged(options.transferFields[0])
             try expect(store.settings.operation.maxTransfers == 5, "transfers saved")
+            options.holdField.doubleValue = 1.26
+            options.holdChanged(options.holdField)
+            try expect(store.settings.operation.contextMenuHold == 1.3, "hold time saved, one decimal")
+            options.holdField.doubleValue = 50
+            options.holdChanged(options.holdField)
+            try expect(store.settings.operation.contextMenuHold == 10, "hold time capped")
+            options.finderPanelPopup.selectItem(at: 1)
+            options.finderPanelChosen()
+            try expect(store.settings.operation.finderOpensIn == .right, "Finder panel saved")
+            options.tabBarPopup.selectItem(at: 1)
+            options.sizeFormatPopup.selectItem(at: 0)
+            send(options, "displayToggled")
+            try expect(store.settings.display.sizeFormat == .bytes && store.settings.display.tabBar == .always, "size format and tab bar saved")
+            // Search: pages that mention it stay listed, matches are highlighted, Shortcuts filters too.
+            options.searchField.stringValue = "hidden files"
+            options.searchChanged()
+            try expect(options.visiblePageTitle == "Display" && !options.highlighted.isEmpty, "found on Display: \(String(describing: options.visiblePageTitle))")
+            options.searchField.stringValue = "refresh"
+            options.searchChanged()
+            try expect(options.visiblePageTitle == "Operation" || options.visiblePageTitle == "Shortcuts", "refresh: \(String(describing: options.visiblePageTitle))")
+            options.searchField.stringValue = "zzqqxx nothing"
+            options.searchChanged()
+            try expect(options.highlighted.isEmpty, "no match")
+            options.searchField.stringValue = ""
+            options.searchChanged()
+            try expect(options.highlighted.isEmpty && OptionsWindowController.matches("Show Hidden", ["hidden", "show"]), "cleared")
+            options.showPage(0)
+            options.autoRefreshPopup.selectItem(at: 2)
+            options.autoRefreshChosen()
+            try expect(store.settings.operation.autoRefresh == .everything, "auto refresh saved")
+            options.maskFoldersCheckbox.state = .off
+            options.renameExtensionCheckbox.state = .on
+            send(options, "operationToggled")
+            try expect(!store.settings.operation.maskSelectsFolders && store.settings.operation.renameSelectsExtension, "rename / mask options saved")
+            options.hideOthersCheckbox.state = .on
+            send(options, "operationToggled")
+            try expect(store.settings.operation.selectionHidesOthers, "hide others saved")
+            // A quick location saved from the panels while Options is open survives Options' own changes.
+            var withLocation = store.settings
+            withLocation.quickLocations = [QuickLocation(name: "Kept", path: "/tmp")]
+            store.save(withLocation)
+            options.hideOthersCheckbox.state = .off
+            send(options, "operationToggled")
+            try expect(store.settings.quickLocations.map(\.name) == ["Kept"] && !store.settings.operation.selectionHidesOthers,
+                       "Options keeps quick locations saved meanwhile")
             let file = FileManager.default.temporaryDirectory.appendingPathComponent("opts-\(UUID().uuidString).json")
             defer { try? FileManager.default.removeItem(at: file) }
             Modal.answerPanel = { _ in [file] }
@@ -766,8 +879,6 @@ public enum CoverageTests {
             defer { try? FileManager.default.removeItem(at: dir) }
             let a = dir.appendingPathComponent("a.txt"), b = dir.appendingPathComponent("b.txt")
             try Data("a".utf8).write(to: a); try Data("bb".utf8).write(to: b)
-            answer(.alertSecondButtonReturn)
-            _ = prompts.resolveConflict(source: a, existing: b)
             prompts.showProblems(title: "t", report: OperationReport())
             // Copy with a conflict, run in the background: the question comes back to the main thread.
             let left = dir.appendingPathComponent("L"), right = dir.appendingPathComponent("R")
@@ -777,14 +888,13 @@ public enum CoverageTests {
             let view = commander(left)
             view.rightView.model.go(to: right, visibleRows: 20)
             let stub = StubPrompts()
-            stub.conflict = (.overwrite, false)
+            stub.conflict = .replace
             view.fileCommands.prompts = stub
             view.fileCommands.runInBackground = true
             view.leftView.model.focus(name: "same.txt", visibleRows: 20)
             view.perform(.copy)
             wait(10) { (try? String(contentsOf: right.appendingPathComponent("same.txt"))) == "new" }
             try expect((try? String(contentsOf: right.appendingPathComponent("same.txt"))) == "new", "overwritten after asking")
-            view.fileCommands.cancelRunning()
         }
     }
 
@@ -860,7 +970,7 @@ public enum CoverageTests {
             standalone.start()
         }
 
-        testRunner("UI: Find Files — async search with live results, buttons, steppers, drives, calendar, templates") {
+        testRunner("UI: Find Files — async search with live results, buttons, steppers, drives, calendar") {
             defer { resetAnswers() }
             let dir = try tempDir("FindUI")
             defer { try? FileManager.default.removeItem(at: dir) }
@@ -880,7 +990,6 @@ public enum CoverageTests {
             send(dialog, "controlChanged")
             send(dialog, "stepped:", NSStepper())
             _ = dialog.tableView(dialog.table, shouldSelectRow: 1)
-            _ = dialog.tableView(dialog.templateTable, shouldSelectRow: 0)
             dialog.table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
             dialog.table.keyDown(with: key(0, "a"))
             let content = dialog.window!.contentView!
@@ -896,15 +1005,24 @@ public enum CoverageTests {
             send(dialog, "showCalendar:", dialog.dateFromButton)
             send(dialog, "calendarPicked")
             dialog.tabs.selectTabViewItem(at: 0)
-            answer(.alertFirstButtonReturn, text: "My search")
-            send(dialog, "saveTemplate")
-            dialog.storeTemplate(named: "Another")
-            try expect(dialog.templateNames == ["Another", "My search"], "templates saved and sorted: \(dialog.templateNames)")
-            dialog.templateTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-            send(dialog, "deleteTemplate")
-            try expect(dialog.templateNames == ["My search"], "template deleted")
             try click("New search", in: content)
             try click("Cancel", in: content)
+        }
+
+        testRunner("UI: windows share the app name in their titles and the theme's colours") {
+            try expect(AppWindows.title("Find Files") == AppWindows.appTitle + " - Find Files", "title prefix")
+            let transfers = TransfersWindowController(manager: TransferManager())
+            try expect(transfers.window?.title == AppWindows.title("Queue"), "secondary windows are prefixed")
+            var dark = Theme.standard
+            dark.chrome = RGBColor(hex: "#202020")!
+            AppWindows.apply(dark)
+            defer { AppWindows.apply(.standard) }
+            try expect(NSApp.appearance?.name == .darkAqua, "dark window colour: dark controls")
+            try expect(RGBColor(transfers.window!.backgroundColor) == dark.chrome, "open windows recoloured")
+            AppWindows.apply(.standard)
+            try expect(NSApp.appearance?.name == .aqua && RGBColor(transfers.window!.backgroundColor) == Theme.standard.chrome,
+                       "light window colour: light controls")
+            transfers.close()
         }
 
         testRunner("UI: app delegate — launch, menus, ticks, commands, options, settings, status icon, quit, reopen") {
@@ -913,12 +1031,29 @@ public enum CoverageTests {
             let defaults = UserDefaults(suiteName: suite)!
             defer { defaults.removePersistentDomain(forName: suite) }
             let store = SettingsStore(defaults: defaults)
+            // Panels open where they were last time; a folder that is gone gives its parent.
+            let lastLeft = try tempDir("LastLeft"), lastRight = try tempDir("LastRight")
+            defer { try? FileManager.default.removeItem(at: lastLeft); try? FileManager.default.removeItem(at: lastRight) }
+            try expect(store.lastFolder(.left) == nil, "nothing remembered yet")
+            store.rememberFolder(lastRight.appendingPathComponent("gone/deeper"), side: .right)
+            try expect(store.lastFolder(.right)?.path == lastRight.path, "missing folder: nearest existing parent")
+            store.rememberFolder(lastLeft, side: .left)
+            store.rememberFolder(URL(string: "ccftp://session/www")!, side: .left)
+            try expect(store.lastFolder(.left)?.path == lastLeft.path, "server folders aren't remembered")
+            store.rememberFolder(lastRight, side: .right)
             let app = AppDelegate(settings: store, windowAutosaveName: "")
             app.activatesApp = false
             let savedMenu = NSApp.mainMenu
             defer { NSApp.mainMenu = savedMenu }
             app.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
             guard let commander = app.commanderView, let menu = NSApp.mainMenu else { throw Fail(description: "not launched") }
+            try expect(commander.leftView.model.directory.path == lastLeft.path && commander.rightView.model.directory.path == lastRight.path,
+                       "both panels reopened in their last folders: \(commander.rightView.model.directory.path)")
+            commander.rightView.model.goUp(visibleRows: 20)
+            try expect(store.lastFolder(.right)?.path == lastRight.deletingLastPathComponent().path, "a new folder is remembered right away")
+            commander.swapPanels()
+            try expect(store.lastFolder(.left)?.path == lastRight.deletingLastPathComponent().path
+                       && store.lastFolder(.right)?.path == lastLeft.path, "swapping panels swaps the remembered folders")
             for item in menu.items { if let sub = item.submenu { app.menuNeedsUpdate(sub); sub.items.forEach { _ = app.validateMenuItem($0) } } }
             let sort = NSMenuItem(title: "", action: nil, keyEquivalent: "")
             sort.representedObject = CommandAction.sortBySize.rawValue
@@ -938,7 +1073,11 @@ public enum CoverageTests {
             Modal.opened = { _ in }
             try expect(opened != nil, "files open with their app")
             send(app, "openWindowFromMenu")
-            try expect(app.applicationShouldHandleReopen(NSApp, hasVisibleWindows: false), "reopen")
+            // Close the main window (another window stays open), then click the Dock icon.
+            try expect(commander.window?.isReleasedWhenClosed == false, "main window survives closing")
+            commander.window?.close()
+            try expect(app.applicationShouldHandleReopen(NSApp, hasVisibleWindows: true), "reopen")
+            try expect(commander.window?.isVisible == true, "the Dock icon brings the main window back")
             try expect(!app.applicationShouldTerminateAfterLastWindowClosed(NSApp), "stays running")
             app.windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification))
             var quit = false
@@ -948,7 +1087,7 @@ public enum CoverageTests {
             Modal.terminated = {}
             try expect(quit, "double ⌘Q quits")
             commander.window?.close()
-            for w in NSApp.windows where w.title == "Options" { w.close() }
+            for w in NSApp.windows where w.title == AppWindows.title("Options") { w.close() }
         }
 
         testRunner("UI: folder sizing (cancel check, cancel on leave), Lister find, terminal failures, host key trust") {

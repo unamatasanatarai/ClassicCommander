@@ -152,6 +152,24 @@ cat <<EOF >"${contents_dir}/Info.plist"
     <${LS_UI_ELEMENT}/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <!-- Finder's "Open With" lists ClassicCommander for every file and folder (never as the default app). -->
+            <key>CFBundleTypeName</key>
+            <string>Folder or file</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.folder</string>
+                <string>public.directory</string>
+                <string>public.item</string>
+            </array>
+        </dict>
+    </array>
     <key>NSHumanReadableCopyright</key>
     <string>${copyright_xml}</string>
 </dict>

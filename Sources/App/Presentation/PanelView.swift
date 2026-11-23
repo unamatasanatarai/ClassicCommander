@@ -5,7 +5,7 @@ import AppKit
 ///   path bar    "/Users/me/*.*"   (highlighted when the panel is active)
 ///   headers     ↑Name | Ext | Size | Date | Attr   (click to sort)
 ///   rows        icon + name, ext, size, date, attributes; cursor bar
-///   status      "0 b / 88,4 k in 0 / 11 files, 0 / 2 dir(s)"
+///   status      "11 files, 2 folders · 88,4 KB" (with a selection: "Selected 1 of 11 files, …")
 /// It does not take keyboard focus; `CommanderView` routes keys to the active panel's model.
 public final class PanelView: NSView {
     public let model: PanelModel
@@ -23,6 +23,10 @@ public final class PanelView: NSView {
     public var onActivate: (() -> Void)?
     /// Called on a double click on a row (the cursor is already on it).
     public var onOpen: (() -> Void)?
+    /// The ⇧6 name editor while it is open.
+    var renameField: RenameField?
+    /// Called on a click on ▼ in the path bar, to open the directory hotlist (like ⌃D).
+    public var onHotlist: (() -> Void)?
     /// Called on a click on the drive name, to open the location menu (like ⌥1 / ⌥2).
     public var onLocationMenu: (() -> Void)?
     /// Folders whose size is being worked out; they show "…" in the Size column meanwhile.
@@ -33,6 +37,11 @@ public final class PanelView: NSView {
     public var remote: (status: String, address: String, insecure: Bool)? { didSet { needsDisplay = true } }
     /// "Connecting…" / "Reading /path…" while a remote listing loads (shown in the status line).
     public var busyText: String? { didSet { needsDisplay = true } }
+    /// Files were dropped here: from a panel (`source`, nil = Finder or another app) into `folder`
+    /// (the panel's folder, or the folder row under the mouse); `move` when ⇧ or ⌘ was held.
+    public var onDrop: ((_ drop: PanelDrop) -> Void)?
+    /// Files dragged out were moved or deleted by another app (Finder, the Trash).
+    public var onFilesChanged: (() -> Void)?
     /// Navigation from the ~ \ .. buttons, routed through the commander (so it works for FTP too).
     public var onNavigate: ((CommandAction) -> Void)?
 
@@ -58,6 +67,7 @@ public final class PanelView: NSView {
     public init(model: PanelModel) {
         self.model = model
         super.init(frame: .zero)
+        registerForDraggedTypes([Self.entryDragType, .fileURL])
     }
 
     @available(*, unavailable)
@@ -87,8 +97,9 @@ public final class PanelView: NSView {
         let driveBar: NSRect
         let homeButton: NSRect
         let rootButton: NSRect
-        let upButton: NSRect
         let pathBar: NSRect
+        /// ▼ at the right end of the path bar: the directory hotlist (quick locations).
+        let hotlistButton: NSRect
         let listFrame: NSRect   // white area with border, header included
         let header: NSRect
         let rows: NSRect
@@ -99,10 +110,10 @@ public final class PanelView: NSView {
     var layoutInfo: Layout {
         let b = bounds
         let driveBar = NSRect(x: 0, y: 0, width: b.width, height: barHeight)
-        let upButton = NSRect(x: b.width - 24, y: 2, width: 22, height: barHeight - 4)
-        let rootButton = upButton.offsetBy(dx: -24, dy: 0)
+        let rootButton = NSRect(x: b.width - 24, y: 2, width: 22, height: barHeight - 4)
         let homeButton = rootButton.offsetBy(dx: -24, dy: 0)
         let pathBar = NSRect(x: 0, y: driveBar.maxY, width: b.width, height: barHeight - 2)
+        let hotlistButton = NSRect(x: b.width - 24, y: pathBar.minY, width: 24, height: pathBar.height)
         let status = NSRect(x: 0, y: b.height - barHeight, width: b.width, height: barHeight)
         let listFrame = NSRect(x: 0, y: pathBar.maxY + 2, width: b.width,
                                height: max(0, status.minY - pathBar.maxY - 2))
@@ -110,7 +121,7 @@ public final class PanelView: NSView {
         let header = NSRect(x: inner.minX, y: inner.minY, width: inner.width, height: headerHeight)
         let rows = NSRect(x: inner.minX, y: header.maxY, width: inner.width,
                           height: max(0, inner.maxY - header.maxY))
-        return Layout(driveBar: driveBar, homeButton: homeButton, rootButton: rootButton, upButton: upButton, pathBar: pathBar,
+        return Layout(driveBar: driveBar, homeButton: homeButton, rootButton: rootButton, pathBar: pathBar, hotlistButton: hotlistButton,
                       listFrame: listFrame, header: header, rows: rows, status: status,
                       columns: columns(x: inner.minX, width: inner.width))
     }
@@ -127,6 +138,14 @@ public final class PanelView: NSView {
             (.date, "Date", textWidth("00.00.00 00:00", PanelFont.digits) + pad, .left),
             (nil, "Attr", textWidth("-0000", PanelFont.digits) + pad, .left),
         ]
+    }()
+
+    /// The narrowest a panel gets (dragging the divider): every column at its smallest, with room
+    /// for the icon and 8 characters of the name.
+    static let minimumWidth: CGFloat = {
+        let name = 3 + 16 + 4 + textWidth("abcdefgh", PanelFont.regular) + 6
+        let fixed = fixedColumns.map(\.2)
+        return ceil(name + fixed[0] + minimumSizeWidth + shortDateWidth + fixed[3] + 4)
     }()
 
     /// Width at which the Date column has room for the time as well.
@@ -204,7 +223,7 @@ public final class PanelView: NSView {
             let textRect = NSRect(x: x, y: l.driveBar.minY, width: max(0, l.homeButton.minX - x - 4), height: barHeight)
             drawText(volume.text, in: textRect, color: palette.chromeText, font: PanelFont.regular)
         }
-        for (rect, title) in [(l.homeButton, "~"), (l.rootButton, "\\"), (l.upButton, "..")] {
+        for (rect, title) in [(l.homeButton, "~"), (l.rootButton, "\\")] {
             drawText(title, in: rect, color: palette.chromeText, font: PanelFont.regular, alignment: .center)
         }
     }
@@ -218,8 +237,11 @@ public final class PanelView: NSView {
             ?? EntryFormatter.header(for: model.directory)
         if let remote = remote { header = remote.address + EntryFormatter.header(for: model.directory) }
         if let filter = model.quickFilter { header += "    [filter: \(filter)]" }
-        drawText(header, in: l.pathBar.insetBy(dx: 6, dy: 0),
-                 color: fg, font: PanelFont.regular, truncation: .byTruncatingHead)
+        if model.showsMarkedOnly { header += "    [selected only — Esc shows all]" }
+        let textRect = NSRect(x: l.pathBar.minX + 6, y: l.pathBar.minY, width: max(0, l.hotlistButton.minX - l.pathBar.minX - 8),
+                              height: l.pathBar.height)
+        drawText(header, in: textRect, color: fg, font: PanelFont.regular, truncation: .byTruncatingHead)
+        drawText("▼", in: l.hotlistButton, color: fg, font: PanelFont.boldSmall, alignment: .center)
     }
 
     private func drawList(_ l: Layout) {
@@ -272,6 +294,18 @@ public final class PanelView: NSView {
             } else if index % 2 == 1 {
                 palette.background2.setFill()
                 rowRect.fill()
+            }
+            if index == holdRow, holdProgress > 0 {
+                // Long right-click: the bar fills up, then the context menu opens.
+                palette.lines.withAlphaComponent(0.5).setFill()
+                NSRect(x: rowRect.minX, y: rowRect.minY, width: rowRect.width * holdProgress, height: rowRect.height).fill()
+            }
+            if index == dropRow {
+                // The folder files dragged over this row would go into.
+                palette.lines.setStroke()
+                let frame = NSBezierPath(rect: rowRect.insetBy(dx: 1, dy: 1))
+                frame.lineWidth = 2
+                frame.stroke()
             }
 
             let marked = model.isMarked(entry)
@@ -409,8 +443,8 @@ public final class PanelView: NSView {
             if let nav = onNavigate { nav(.goRoot) } else { model.goToRoot(visibleRows: visibleRows) }
             return
         }
-        if l.upButton.contains(point) {
-            if let nav = onNavigate { nav(.parentFolder) } else { model.goUp(visibleRows: visibleRows) }
+        if l.hotlistButton.contains(point) {
+            onHotlist?()
             return
         }
         if l.driveBar.contains(point) {
@@ -431,6 +465,8 @@ public final class PanelView: NSView {
         model.setCursor(index, visibleRows: visibleRows)
         if event.clickCount == 2 {
             onOpen?()
+        } else {
+            dragOrigin = (point, index)
         }
     }
 
@@ -445,21 +481,193 @@ public final class PanelView: NSView {
         let point = convert(event.locationInWindow, from: nil)
         guard let index = row(at: point) else { return }
         beginRightSelection(atRow: index)
+        startHold(row: index, at: point)
     }
 
     public override func rightMouseDragged(with event: NSEvent) {
-        dragSelection(to: convert(event.locationInWindow, from: nil))
+        let point = convert(event.locationInWindow, from: nil)
+        if let held = holdRow, row(at: point) != held { cancelHold() }
+        dragSelection(to: point)
+    }
+
+    // MARK: Long right-click: context menu
+
+    /// Seconds the right button is held on a row before its context menu is ready (Options → Operation).
+    public var contextMenuHold: Double = 1
+    /// Opens the context menu for the marked entries (or the row), at a point of this view.
+    public var onContextMenu: ((NSPoint) -> Void)?
+    /// The row being held and how full its bar is (0…1); nil when nothing is held.
+    private(set) var holdRow: Int?
+    private(set) var holdProgress: CGFloat = 0
+    /// The bar is full: letting go of the button opens the menu (so it stays open).
+    private(set) var holdReady = false
+    private var holdStart = Date()
+    private var holdPoint = NSPoint.zero
+    private var holdTimer: Timer?
+
+    func startHold(row: Int, at point: NSPoint) {
+        cancelHold()
+        holdRow = row
+        holdPoint = point
+        holdStart = Date()
+        let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.holdTick(now: Date()) }
+        RunLoop.main.add(timer, forMode: .common)
+        holdTimer = timer
+    }
+
+    /// Fills the bar; once full it stays full until the button is released.
+    func holdTick(now: Date) {
+        guard holdRow != nil, !holdReady else { return }
+        holdProgress = CGFloat(min(1, now.timeIntervalSince(holdStart) / max(0.05, contextMenuHold)))
+        needsDisplay = true
+        guard holdProgress >= 1 else { return }
+        holdReady = true
+        holdTimer?.invalidate()
+        holdTimer = nil
+    }
+
+    /// The button was released: with a full bar, the context menu opens (and stays open).
+    func releaseHold() {
+        let ready = holdReady, point = holdPoint
+        cancelHold()
+        if ready { onContextMenu?(point) }
+    }
+
+    func cancelHold() {
+        holdTimer?.invalidate()
+        holdTimer = nil
+        if holdRow != nil { needsDisplay = true }
+        holdRow = nil
+        holdProgress = 0
+        holdReady = false
     }
 
     public override func mouseDragged(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
         // Control-drag continues a control-click selection.
-        if lastDragRow != nil { dragSelection(to: convert(event.locationInWindow, from: nil)) }
+        if lastDragRow != nil {
+            if let held = holdRow, row(at: point) != held { cancelHold() }
+            return dragSelection(to: point)
+        }
+        // Otherwise dragging a row drags its files (once the mouse has moved a few points).
+        guard let origin = dragOrigin, hypot(point.x - origin.point.x, point.y - origin.point.y) > 4 else { return }
+        dragOrigin = nil
+        let entries = draggedEntries(forRow: origin.row)
+        guard !entries.isEmpty else { return }
+        draggedEntries = entries
+        Modal.drag(draggingItems(for: entries, from: origin.row), event: event, source: self)
     }
 
-    public override func rightMouseUp(with event: NSEvent) { endRightSelection() }
+    public override func rightMouseUp(with event: NSEvent) {
+        endRightSelection()
+        releaseHold()
+    }
 
     public override func mouseUp(with event: NSEvent) {
+        dragOrigin = nil
         if lastDragRow != nil { endRightSelection() }
+        releaseHold()
+    }
+
+    // MARK: Drag and drop
+
+    /// Rows dragged between panels carry this type (plus file URLs for other apps, for local files).
+    static let entryDragType = NSPasteboard.PasteboardType("com.classiccommander.panel-entry")
+    /// Where a left click on a row happened, until the mouse is released or a drag starts.
+    private var dragOrigin: (point: NSPoint, row: Int)?
+    /// The entries of the drag in progress from this panel.
+    private(set) var draggedEntries: [FileEntry] = []
+
+    /// A marked row drags every marked entry; any other row drags only itself. ".." never drags.
+    func draggedEntries(forRow row: Int) -> [FileEntry] {
+        guard model.entries.indices.contains(row), model.entries[row].kind != .parent else { return [] }
+        let entry = model.entries[row]
+        return model.marked.contains(entry.name) ? model.operationTargets : [entry]
+    }
+
+    /// One dragging item per entry, shown as its icon and name stacked under the mouse.
+    func draggingItems(for entries: [FileEntry], from row: Int) -> [NSDraggingItem] {
+        let rows = layoutInfo.rows
+        let top = rows.minY + CGFloat(row - model.scrollTop) * rowHeight
+        return entries.enumerated().map { i, entry in
+            let item = NSPasteboardItem()
+            item.setString(entry.name, forType: Self.entryDragType)
+            if !model.isRemote { item.setString(entry.url.absoluteString, forType: .fileURL) }
+            let dragging = NSDraggingItem(pasteboardWriter: item)
+            let frame = NSRect(x: rows.minX, y: top + CGFloat(min(i, 4)) * 3, width: min(rows.width, 320), height: rowHeight)
+            dragging.setDraggingFrame(frame, contents: dragImage(for: entry, size: frame.size))
+            return dragging
+        }
+    }
+
+    private func dragImage(for entry: FileEntry, size: NSSize) -> NSImage {
+        let icon = IconProvider.shared.icon(for: entry, tint: palette.text)
+        let name = EntryFormatter.visible(entry.name) as NSString
+        return NSImage(size: size, flipped: false) { rect in
+            icon.draw(in: NSRect(x: 2, y: (rect.height - 16) / 2, width: 16, height: 16))
+            name.draw(at: NSPoint(x: 22, y: (rect.height - 16) / 2),
+                      withAttributes: [.font: PanelFont.regular, .foregroundColor: NSColor.labelColor])
+            return true
+        }
+    }
+
+    /// ⇧ or ⌘ held: move (as with 6); otherwise copy (as with 5).
+    static func dropOperation(for flags: NSEvent.ModifierFlags) -> NSDragOperation {
+        flags.contains(.shift) || flags.contains(.command) ? .move : .copy
+    }
+
+    /// The folder row under the mouse while files are dragged over this panel (drawn framed).
+    private(set) var dropRow: Int? { didSet { if dropRow != oldValue { needsDisplay = true } } }
+
+    /// What dropping here would do: the files, where they come from and the folder they go into.
+    /// nil when the drop isn't possible (a panel onto itself outside a folder row, a search result list, …).
+    func dropTarget(_ info: NSDraggingInfo, move: Bool) -> PanelDrop? {
+        guard model.virtualTitle == nil else { return nil }
+        let source = info.draggingSource as? PanelView
+        let entries: [FileEntry]
+        if let source = source {
+            entries = source.draggedEntries
+        } else {
+            let urls = info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+            entries = urls.compactMap(Self.droppedEntry)
+        }
+        guard !entries.isEmpty else { return nil }
+        // A folder row under the mouse (not one of the dragged folders) is the target; ".." is the parent.
+        var folderRow: Int?
+        if let row = row(at: convert(info.draggingLocation, from: nil)), model.entries[row].kind != .file,
+           !(source === self && entries.contains { $0.name == model.entries[row].name }) {
+            folderRow = row
+        }
+        if source === self && folderRow == nil { return nil }
+        let folder = folderRow.map { model.entries[$0].url } ?? model.directory
+        return PanelDrop(entries: entries, source: source, target: self, folder: folder, folderRow: folderRow, move: move)
+    }
+
+    /// A file dropped from Finder or another app (Finder passes file reference URLs: resolved to paths).
+    static func droppedEntry(_ url: URL) -> FileEntry? {
+        guard let file = (url as NSURL).filePathURL?.standardizedFileURL else { return nil }
+        let values = try? file.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+        let isFolder = values?.isDirectory == true
+        return FileEntry(name: file.lastPathComponent, url: file, kind: isFolder ? .directory : .file,
+                         size: values?.fileSize.map(Int64.init))
+    }
+
+    public override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { draggingUpdated(sender) }
+
+    public override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        let operation = Self.dropOperation(for: NSEvent.modifierFlags)
+        let target = dropTarget(sender, move: operation == .move)
+        dropRow = target?.folderRow
+        return target == nil ? [] : operation
+    }
+
+    public override func draggingExited(_ sender: NSDraggingInfo?) { dropRow = nil }
+
+    public override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        dropRow = nil
+        guard let drop = dropTarget(sender, move: Self.dropOperation(for: NSEvent.modifierFlags) == .move) else { return false }
+        onDrop?(drop)
+        return true
     }
 
     /// Right click on a row: toggle its mark; the result decides what a following drag does.
@@ -529,4 +737,110 @@ public final class PanelView: NSView {
         model.scroll(by: -rows, visibleRows: visibleRows)
         needsDisplay = true
     }
+}
+
+extension PanelView: NSDraggingSource {
+    /// Inside the app: copy or move to a panel. Other apps decide as they do for Finder's own drags
+    /// (Finder moves on the same disk, copies to another one, ⌥ copies, ⌘ moves; the Trash deletes).
+    /// Files on a server only drag to the other panel.
+    public func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        switch context {
+        case .withinApplication: return [.copy, .move]
+        default: return model.isRemote ? [] : [.copy, .move, .generic, .delete]
+        }
+    }
+
+    /// Files moved or deleted by another app are gone from this folder: read it again.
+    public func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        draggedEntries = []
+        if !operation.isDisjoint(with: [.move, .generic, .delete]) { onFilesChanged?() }
+    }
+}
+
+/// Files dropped onto a panel.
+public struct PanelDrop {
+    public let entries: [FileEntry]
+    /// The panel they were dragged from; nil for Finder and other apps.
+    public weak var source: PanelView?
+    public weak var target: PanelView?
+    /// The folder they go into.
+    public let folder: URL
+    /// The folder row of `target` they were dropped on (nil = the panel's own folder).
+    public let folderRow: Int?
+    public let move: Bool
+}
+
+// MARK: - ⇧6 Rename in place
+
+extension PanelView {
+    /// Where the name of the row under the cursor is drawn.
+    var cursorNameRect: NSRect? {
+        let l = layoutInfo
+        guard let name = l.columns.first, model.entries.indices.contains(model.cursor) else { return nil }
+        let y = l.rows.minY + CGFloat(model.cursor - model.scrollTop) * 19
+        let x = name.x + 3 + 16 + 2
+        return NSRect(x: x, y: y - 1, width: max(60, name.x + name.width - x - 2), height: 21)
+    }
+
+    /// Puts an editable copy of the name over the cursor row. `done` gets the new name, or nil
+    /// for Esc / clicking elsewhere.
+    func beginRename(selectingExtension: Bool, done: @escaping (String?) -> Void) {
+        guard let entry = model.currentEntry, let rect = cursorNameRect else { return done(nil) }
+        renameField?.finish(nil)
+        let field = RenameField(frame: rect)
+        field.stringValue = entry.name
+        field.font = PanelFont.regular
+        field.onDone = { [weak self, weak field] name in
+            field?.removeFromSuperview()
+            self?.renameField = nil
+            done(name)
+        }
+        addSubview(field)
+        renameField = field
+        window?.makeFirstResponder(field)
+        // The name without its extension, like Finder (or everything, per Options).
+        let ext = (entry.name as NSString).pathExtension
+        let length = selectingExtension || ext.isEmpty || entry.kind != .file
+            ? (entry.name as NSString).length : (entry.name as NSString).length - (ext as NSString).length - 1
+        field.currentEditor()?.selectedRange = NSRange(location: 0, length: max(0, length))
+    }
+}
+
+/// The in-place name editor: Return commits, Esc (or leaving it) cancels.
+final class RenameField: NSTextField, NSTextFieldDelegate {
+    var onDone: ((String?) -> Void)?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        delegate = self
+        focusRingType = .exterior
+        lineBreakMode = .byClipping
+        cell?.isScrollable = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    /// Ends editing once: with the new name, or nil to cancel.
+    func finish(_ name: String?) {
+        guard let done = onDone else { return }
+        onDone = nil
+        done(name)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        switch selector {
+        case #selector(NSResponder.insertNewline(_:)):
+            finish(stringValue)
+            return true
+        case #selector(NSResponder.cancelOperation(_:)):
+            finish(nil)
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Clicking elsewhere (or another window) cancels, as Esc does.
+    func controlTextDidEndEditing(_ obj: Notification) { finish(nil) }
 }

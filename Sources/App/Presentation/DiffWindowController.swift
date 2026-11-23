@@ -24,7 +24,8 @@ final class DiffWindowController: NSWindowController, NSWindowDelegate {
         self.rightTitle = rightTitle
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 700),
                               styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: true)
-        window.title = "Compare: " + (leftTitle as NSString).lastPathComponent
+        window.title = AppWindows.title("Compare: " + (leftTitle as NSString).lastPathComponent)
+        AppWindows.style(window)
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 600, height: 300)
         super.init(window: window)
