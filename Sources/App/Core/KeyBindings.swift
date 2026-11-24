@@ -99,6 +99,8 @@ public enum CommandAction: String, CaseIterable, Codable {
     case compareByDate, compareBySize
     case directoryHotlist
     case multiRename
+    case packFiles
+    case unpackFiles
     case renameInPlace, deletePermanently
     case newTab, closeTab, nextTab, previousTab
     case sortByName, sortByExtension, sortByDate, sortBySize, sortUnsorted, reverseOrder
@@ -167,6 +169,8 @@ public enum CommandAction: String, CaseIterable, Codable {
         case .compareBySize: return "Compare directories: select files that differ in size, and missing ones"
         case .directoryHotlist: return "Directory hotlist: quick locations (Ctrl+D)"
         case .multiRename: return "Multi-Rename Tool (Ctrl+M)"
+        case .packFiles: return "Pack files…"
+        case .unpackFiles: return "Unpack files…"
         case .renameInPlace: return "Rename in place (Shift+F6)"
         case .deletePermanently: return "Delete permanently, without the Trash (Shift+F8)"
         case .newTab: return "New tab (same folder)"
@@ -255,6 +259,8 @@ public struct KeyBindings: Equatable, Codable {
         .compareBySize: [],
         .directoryHotlist: [KeyCombo(2, .control)],   // ⌃D, as in Total Commander
         .multiRename: [KeyCombo(46, .control)],       // ⌃M
+        .packFiles: [KeyCombo(35, [.option, .command])],   // ⌥⌘P
+        .unpackFiles: [KeyCombo(32, [.option, .command])], // ⌥⌘U
         .renameInPlace: [KeyCombo(KeyCode.six, .shift), KeyCombo(KeyCode.f6, .shift)],
         .deletePermanently: [KeyCombo(KeyCode.eight, .shift), KeyCombo(KeyCode.f8, .shift)],
         // Total Commander: Ctrl+T new tab, Ctrl+W / ⌘W close, Ctrl+Tab / Ctrl+Shift+Tab switch.

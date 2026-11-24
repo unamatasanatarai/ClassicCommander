@@ -411,6 +411,11 @@ public final class PanelModel {
             ensureCursorVisible(visibleRows: visibleRows)
             return result
         case .file:
+            if entry.url.isFileURL, entry.url.pathExtension.lowercased() == "zip", !isInsideZip {
+                let result = load(entry.url.normalizedLocation, focusing: nil)
+                ensureCursorVisible(visibleRows: visibleRows)
+                return result
+            }
             return .file(entry.url)
         }
     }
@@ -530,6 +535,7 @@ public final class PanelModel {
 
     /// True while the panel shows a remote (FTP) folder.
     public var isRemote: Bool { directory.isRemoteLocation }
+    public var isInsideZip: Bool { ZipArchive.split(directory) != nil }
 
     /// Swap panels (Total Commander's Ctrl+U): the two panels trade everything they show —
     /// folder, source, cursor, marks, sort order, filter, folder sizes and Find Files results.

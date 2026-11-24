@@ -256,7 +256,9 @@ public final class ListerWindowController: NSWindowController, NSWindowDelegate,
         let mods = event.modifierFlags.intersection([.command, .control, .option])
         if event.keyCode == KeyCode.escape && mods.isEmpty { window?.performClose(nil); return true }
         if event.keyCode == KeyCode.f7 && mods.isEmpty { showFind(); return true }
-        guard mods.isEmpty, let ch = event.charactersIgnoringModifiers?.lowercased() else { return false }
+        guard mods.isEmpty else { return false }
+        if event.characters == "G" { scrollToBottom(); return true }
+        guard let ch = event.charactersIgnoringModifiers?.lowercased() else { return false }
         switch ch {
         case "1", "2", "3", "4": show(mode: ListerMode(rawValue: Int(ch)!)!)
         case "n": step(1)
@@ -264,9 +266,42 @@ public final class ListerWindowController: NSWindowController, NSWindowDelegate,
         case "w": if mode == .text { setWrap(!wrap) }
         case "q": window?.performClose(nil)
         case "7": showFind()
+        case "d": scrollHalfPage(down: true)
+        case "u": scrollHalfPage(down: false)
         default: return false
         }
         return true
+    }
+
+    private var activeScrollView: NSScrollView? {
+        switch mode {
+        case .text, .binary: return textScroll
+        case .hex: return hexScroll
+        case .preview: return nil
+        }
+    }
+
+    private func scrollHalfPage(down: Bool) {
+        guard let scroll = activeScrollView else { return }
+        let clip = scroll.contentView
+        let half = clip.bounds.height / 2
+        let docHeight = scroll.documentView?.bounds.height ?? 0
+        let maxY = max(0, docHeight - clip.bounds.height)
+        var origin = clip.bounds.origin
+        origin.y = down ? min(maxY, origin.y + half) : max(0, origin.y - half)
+        clip.scroll(to: origin)
+        scroll.reflectScrolledClipView(clip)
+    }
+
+    private func scrollToBottom() {
+        guard let scroll = activeScrollView else { return }
+        let clip = scroll.contentView
+        let docHeight = scroll.documentView?.bounds.height ?? 0
+        let maxY = max(0, docHeight - clip.bounds.height)
+        var origin = clip.bounds.origin
+        origin.y = maxY
+        clip.scroll(to: origin)
+        scroll.reflectScrolledClipView(clip)
     }
 
     private func showFind() {

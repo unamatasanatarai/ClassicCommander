@@ -134,7 +134,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         mainMenu.addItem(commandsMenuItem)
         let commandsMenu = NSMenu(title: "Commands")
         commandsMenu.delegate = self
-        for action in [CommandAction.findFiles, .synchronizeDirs, .multiRename, nil, .openTerminal, .openInFinder, .swapPanels] {
+        for action in [CommandAction.findFiles, .synchronizeDirs, .multiRename, .packFiles, .unpackFiles, nil, .openTerminal, .openInFinder, .swapPanels] {
             guard let action = action else { commandsMenu.addItem(.separator()); continue }
             let item = NSMenuItem(title: Self.menuTitles[action] ?? action.label, action: #selector(netCommand(_:)), keyEquivalent: "")
             item.target = self
@@ -213,7 +213,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
     }
 
     static let menuTitles: [CommandAction: String] = [
-        .findFiles: "Find Files…", .synchronizeDirs: "Synchronize Directories…", .openTerminal: "Open Terminal Here", .openInFinder: "Open in Finder", .multiRename: "Multi-Rename Tool…",
+        .findFiles: "Find Files…", .synchronizeDirs: "Synchronize Directories…", .openTerminal: "Open Terminal Here", .openInFinder: "Open in Finder", .multiRename: "Multi-Rename Tool…", .packFiles: "Pack…", .unpackFiles: "Unpack…",
         .ftpConnect: "FTP Connect…", .ftpNewConnection: "FTP New Connection…", .ftpDisconnect: "FTP Disconnect", .ftpTransfers: "Queue…",
         .sortByName: "Sort by Name", .sortByExtension: "Sort by Extension", .sortByDate: "Sort by Date/Time",
         .sortBySize: "Sort by Size", .sortUnsorted: "Unsorted", .reverseOrder: "Reverse Order",
@@ -255,10 +255,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
     }
 
     public func menuDidClose(_ menu: NSMenu) {
-        for item in menu.items where item.representedObject is String {
-            item.keyEquivalent = ""
-            item.keyEquivalentModifierMask = []
-        }
+        // Shortcuts are kept intact; `menuHasKeyEquivalent` returns false so closed menus never intercept keys.
     }
 
     /// Key presses never consult these menus (and never trigger menuNeedsUpdate).

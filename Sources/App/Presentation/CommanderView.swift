@@ -518,12 +518,16 @@ public final class CommanderView: NSView {
         case .nextTab, .previousTab:
             guard let t = tabs[model.activeSide], t.count > 1 else { return NSSound.beep() }
             selectTab(t.neighbour(action == .nextTab ? 1 : -1), side: model.activeSide)
+        case .packFiles:
+            fileCommands.pack()
+        case .unpackFiles:
+            fileCommands.unpack()
         case .multiRename:
             if panel.model.entries.contains(where: { $0.kind != .parent }) { multiRename.present(for: panel) } else { NSSound.beep() }
-        case .sortByName: panel.model.setSort(.name, visibleRows: rows)
-        case .sortByExtension: panel.model.setSort(.ext, visibleRows: rows)
-        case .sortByDate: panel.model.setSort(.date, visibleRows: rows)
-        case .sortBySize: panel.model.setSort(.size, visibleRows: rows)
+        case .sortByName: panel.model.sort(by: .name, visibleRows: rows)
+        case .sortByExtension: panel.model.sort(by: .ext, visibleRows: rows)
+        case .sortByDate: panel.model.sort(by: .date, visibleRows: rows)
+        case .sortBySize: panel.model.sort(by: .size, visibleRows: rows)
         case .sortUnsorted: panel.model.setSort(.unsorted, visibleRows: rows)
         case .reverseOrder: panel.model.reverseSort(visibleRows: rows)
         case .showAllFiles: panel.model.setShowFilter(.all, visibleRows: rows)
@@ -750,7 +754,16 @@ public final class CommanderView: NSView {
         // Remote panels (Enter and double-click alike) download files and fetch folders first.
         if ftp.navigate(panel, .open) { panel.needsDisplay = true; return }
         switch panel.model.openCurrent(visibleRows: panel.visibleRows) {
-        case .file(let url) where url.isFileURL: onOpenFile?(url)
+        case .file(let url) where url.isFileURL:
+            if panel.model.isInsideZip {
+                if let temp = try? ZipArchive.extractToTemp(url: url) {
+                    onOpenFile?(temp)
+                } else {
+                    NSSound.beep()
+                }
+            } else {
+                onOpenFile?(url)
+            }
         case .file: NSSound.beep()
         case .failed: NSSound.beep()
         case .navigated, .none: break
@@ -799,6 +812,10 @@ public final class CommanderView: NSView {
                 calculateSize(of: entry, in: panel)
             }
             return nil
+        }
+        if panel.model.isInsideZip {
+            guard let temp = try? ZipArchive.extractToTemp(url: entry.url) else { NSSound.beep(); return nil }
+            return openLister(files: [temp], index: 0)
         }
         let files = panel.model.entries.filter { $0.kind == .file }
         let index = files.firstIndex { $0.url == entry.url } ?? 0

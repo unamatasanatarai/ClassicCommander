@@ -14,6 +14,9 @@ public struct FileSystemLister: DirectoryListing {
     }
 
     public func entries(in directory: URL) throws -> [FileEntry] {
+        if ZipArchive.split(directory) != nil {
+            return try ZipArchive.entries(in: directory)
+        }
         // Not `.skipsHiddenFiles`: that also hides flagged system folders like /usr and /bin,
         // which a file commander must show. Only dotfiles are hidden.
         // A path ending in a symlink to a folder (e.g. ~/bin -> …/configs/bin) is listed through
