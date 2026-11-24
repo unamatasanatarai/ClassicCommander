@@ -152,9 +152,8 @@ public final class ListerWindowController: NSWindowController, NSWindowDelegate,
     public func show(mode new: ListerMode) {
         mode = new
         modeControl.selectedSegment = new.rawValue - 1
+        closePreview()
         container.subviews.forEach { $0.removeFromSuperview() }
-        preview?.close()
-        preview = nil
         let content: NSView
         switch new {
         case .text:
@@ -287,10 +286,21 @@ public final class ListerWindowController: NSWindowController, NSWindowDelegate,
         }
     }
 
+    private func closePreview() {
+        guard let p = preview else { return }
+        if let responder = window?.firstResponder as? NSView, responder === p || responder.isDescendant(of: p) {
+            window?.makeFirstResponder(nil)
+        }
+        p.previewItem = nil
+        p.close()
+        p.removeFromSuperview()
+        preview = nil
+    }
+
     public func windowWillClose(_ notification: Notification) {
         if let m = monitor { NSEvent.removeMonitor(m) }
         monitor = nil
-        preview?.close()
+        closePreview()
         onClose?(self)
     }
 
