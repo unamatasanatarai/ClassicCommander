@@ -226,9 +226,15 @@ final class ConflictDialogController: NSWindowController {
         }
         buttons[0].keyEquivalent = "\r"
         buttons[buttons.count - 1].keyEquivalent = "\u{1b}"
-        let row = NSStackView(views: buttons)
-        row.spacing = 6
-        let stack = NSStackView(views: [title, replace, with, row])
+        let row1 = NSStackView(views: [buttons[0], buttons[1], buttons[4]])
+        row1.spacing = 8
+        let row2 = NSStackView(views: [buttons[2], buttons[3], buttons[5], buttons[6]])
+        row2.spacing = 8
+        let buttonStack = NSStackView(views: [row1, row2])
+        buttonStack.orientation = .vertical
+        buttonStack.alignment = .leading
+        buttonStack.spacing = 8
+        let stack = NSStackView(views: [title, replace, with, buttonStack])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12

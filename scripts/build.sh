@@ -89,6 +89,7 @@ if [[ "${DEBUG:-0}" == "1" || "${CONFIGURATION:-}" == "debug" ]]; then
     swiftc_flags=(
         -Onone
         -DDEBUG
+        -num-threads "$(sysctl -n hw.ncpu)"
     )
     build_mode="debug"
 else

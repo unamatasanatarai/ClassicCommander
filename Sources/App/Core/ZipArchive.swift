@@ -228,7 +228,7 @@ public enum ZipArchive {
     }
 
     /// Packs `items` (relative to `sourceDirectory`) into `archiveURL`, using 7zip if available or `/usr/bin/zip`.
-    public static func pack(items: [FileEntry], from sourceDirectory: URL, to archiveURL: URL) throws {
+    public static func pack(items: [FileEntry], from sourceDirectory: URL, to archiveURL: URL, onProcess: ((Process) -> Void)? = nil) throws {
         guard !items.isEmpty else { return }
         try FileManager.default.createDirectory(at: archiveURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let names = items.map(\.name)
@@ -243,6 +243,7 @@ public enum ZipArchive {
         }
         let errPipe = Pipe()
         proc.standardError = errPipe
+        onProcess?(proc)
         try proc.run()
         let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
         proc.waitUntilExit()

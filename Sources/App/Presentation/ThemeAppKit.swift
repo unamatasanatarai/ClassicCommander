@@ -49,7 +49,7 @@ struct Palette {
         markText = t.markText.nsColor
         chromeLight = chrome.blended(withFraction: 0.6, of: .white) ?? chrome
         chromeShadow = chrome.blended(withFraction: 0.35, of: .black) ?? chrome
-        markOnCursorText = t.markText.readable(on: t.cursorBackground).nsColor
+        markOnCursorText = t.markOnCursorText.nsColor
         let bottom = headerBackground.blended(withFraction: 0.12, of: .black) ?? headerBackground
         headerGradient = NSGradient(starting: headerBackground, ending: bottom) ?? NSGradient(colors: [headerBackground])!
     }

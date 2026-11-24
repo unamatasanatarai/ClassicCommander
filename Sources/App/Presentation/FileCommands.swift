@@ -1,5 +1,11 @@
 import AppKit
 
+private final class BlockAction: NSObject {
+    private let block: () -> Void
+    init(_ block: @escaping () -> Void) { self.block = block }
+    @objc func invoke() { block() }
+}
+
 /// The questions file commands ask. `AlertPrompts` shows real dialogs; tests answer directly.
 public protocol FileCommandPrompts: AnyObject {
     /// A text question (copy/move target, new folder name). nil means Cancel.
@@ -77,15 +83,76 @@ public final class FileCommands {
             okTitle: "Pack"
         ) else { return }
         let archiveURL = URL(fileURLWithPath: answer, isDirectory: false)
-        do {
-            try ZipArchive.pack(items: items, from: sourcePanel.model.directory, to: archiveURL)
-            sourcePanel.model.clearMarks()
-            commander.leftView.model.reload(visibleRows: commander.leftView.visibleRows)
-            commander.rightView.model.reload(visibleRows: commander.rightView.visibleRows)
-            commander.leftView.needsDisplay = true
-            commander.rightView.needsDisplay = true
-        } catch {
-            NSSound.beep()
+        let sourceDir = sourcePanel.model.directory
+
+        let progressWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 380, height: 110),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        progressWindow.title = "Pack Files"
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 110))
+        let label = NSTextField(labelWithString: "Packing \(archiveURL.lastPathComponent)…")
+        label.frame = NSRect(x: 20, y: 74, width: 340, height: 18)
+        label.lineBreakMode = .byTruncatingMiddle
+        let bar = NSProgressIndicator(frame: NSRect(x: 20, y: 46, width: 340, height: 20))
+        bar.style = .bar
+        bar.isIndeterminate = true
+        bar.startAnimation(nil)
+        var runningProcess: Process?
+        var cancelled = false
+        let cancelBtn = NSButton(title: "Cancel", target: nil, action: nil)
+        cancelBtn.frame = NSRect(x: 280, y: 12, width: 80, height: 26)
+        cancelBtn.bezelStyle = .rounded
+        content.addSubview(label)
+        content.addSubview(bar)
+        content.addSubview(cancelBtn)
+        progressWindow.contentView = content
+        if let parent = commander.window {
+            let pf = parent.frame
+            progressWindow.setFrameOrigin(NSPoint(
+                x: pf.midX - progressWindow.frame.width / 2,
+                y: pf.midY - progressWindow.frame.height / 2
+            ))
+        } else {
+            progressWindow.center()
+        }
+        progressWindow.makeKeyAndOrderFront(nil)
+
+        let cancelHandler = BlockAction {
+            cancelled = true
+            runningProcess?.terminate()
+        }
+        cancelBtn.target = cancelHandler
+        cancelBtn.action = #selector(BlockAction.invoke)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            var packError: Error?
+            do {
+                try ZipArchive.pack(items: items, from: sourceDir, to: archiveURL) { proc in
+                    runningProcess = proc
+                }
+            } catch {
+                packError = error
+            }
+            DispatchQueue.main.async {
+                _ = cancelHandler
+                progressWindow.orderOut(nil)
+                if cancelled {
+                    try? FileManager.default.removeItem(at: archiveURL)
+                    return
+                }
+                if packError != nil {
+                    NSSound.beep()
+                    return
+                }
+                sourcePanel.model.clearMarks()
+                commander.leftView.model.reload(visibleRows: commander.leftView.visibleRows)
+                commander.rightView.model.reload(visibleRows: commander.rightView.visibleRows)
+                commander.leftView.needsDisplay = true
+                commander.rightView.needsDisplay = true
+            }
         }
     }
 
@@ -354,9 +421,19 @@ final class AlertPrompts: FileCommandPrompts {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = title
-        let shown = report.errors.prefix(12).joined(separator: "\n")
-        let more = report.errors.count > 12 ? "\n…and \(report.errors.count - 12) more" : ""
-        alert.informativeText = shown + more
+        let count = report.errors.count
+        alert.informativeText = "\(count) \(count == 1 ? "item" : "items") could not be processed:"
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 460, height: 180))
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 444, height: 180))
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.font = .systemFont(ofSize: 12)
+        textView.textContainerInset = NSSize(width: 6, height: 6)
+        textView.string = report.errors.joined(separator: "\n")
+        scroll.documentView = textView
+        alert.accessoryView = scroll
         Modal.run(alert)
     }
 }

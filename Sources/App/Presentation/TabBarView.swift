@@ -9,6 +9,7 @@ final class TabBarView: NSView {
         didSet {
             cachedTabRects = nil
             hoveredCloseTab = nil
+            ensureActiveTabVisible()
             needsDisplay = true
         }
     }
@@ -20,6 +21,7 @@ final class TabBarView: NSView {
     var onNew: (() -> Void)?
 
     private var cachedTabRects: [NSRect]?
+    private var scrollOffset: CGFloat = 0
     var hoveredCloseTab: Int? {
         didSet {
             if hoveredCloseTab != oldValue { needsDisplay = true }
@@ -54,12 +56,56 @@ final class TabBarView: NSView {
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         cachedTabRects = nil
+        clampScrollOffset()
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        let delta = abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) ? event.scrollingDeltaX : event.scrollingDeltaY
+        let multiplier: CGFloat = event.hasPreciseScrollingDeltas ? 1 : 20
+        let maxScroll = max(0, totalTabsWidth - bounds.width)
+        let next = min(maxScroll, max(0, scrollOffset - delta * multiplier))
+        if next != scrollOffset {
+            scrollOffset = next
+            cachedTabRects = nil
+            needsDisplay = true
+        }
+    }
+
+    private var totalTabsWidth: CGFloat {
+        let hasClose = tabs.count > 1
+        var total: CGFloat = 2
+        for (i, tab) in tabs.tabs.enumerated() {
+            let font = (i == tabs.active) ? PanelFont.bold : PanelFont.regular
+            let titleWidth = ceil((tab.title as NSString).size(withAttributes: [.font: font]).width)
+            let width = min(190, max(hasClose ? 70 : 60, titleWidth + (hasClose ? 36 : 24)))
+            total += width + 2
+        }
+        return total
+    }
+
+    private func clampScrollOffset() {
+        let maxScroll = max(0, totalTabsWidth - bounds.width)
+        scrollOffset = min(maxScroll, max(0, scrollOffset))
+    }
+
+    private func ensureActiveTabVisible() {
+        clampScrollOffset()
+        let rects = tabRects
+        guard rects.indices.contains(tabs.active), bounds.width > 0 else { return }
+        let r = rects[tabs.active]
+        if r.minX < 2 {
+            scrollOffset = max(0, scrollOffset - (2 - r.minX))
+            cachedTabRects = nil
+        } else if r.maxX > bounds.width - 2 {
+            scrollOffset = min(max(0, totalTabsWidth - bounds.width), scrollOffset + (r.maxX - (bounds.width - 2)))
+            cachedTabRects = nil
+        }
     }
 
     /// Where each tab is drawn.
     var tabRects: [NSRect] {
         if let cached = cachedTabRects { return cached }
-        var x: CGFloat = 2
+        var x: CGFloat = 2 - scrollOffset
         let h = bounds.height
         let hasClose = tabs.count > 1
         let rects = tabs.tabs.indices.map { i -> NSRect in

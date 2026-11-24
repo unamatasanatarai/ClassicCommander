@@ -355,9 +355,8 @@ public final class PanelView: NSView {
             }
 
             let marked = model.isMarked(entry)
-            let markedOnBar = marked && onBar
-            let textFont = markedOnBar ? PanelFont.bold : PanelFont.regular
-            let digitFont = markedOnBar ? PanelFont.boldDigits : PanelFont.digits
+            let textFont = PanelFont.regular
+            let digitFont = PanelFont.digits
             let color: NSColor
             if marked {
                 color = onBar ? palette.markOnCursorText : palette.markText
@@ -374,7 +373,7 @@ public final class PanelView: NSView {
                               from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
                     let textX = col.x + 3 + iconSize + 4
                     drawText(formatter.name(entry, folderBrackets: display.showFolderBrackets), in: NSRect(x: textX, y: y, width: col.x + col.width - textX - 4, height: rowHeight),
-                             color: color, font: markedOnBar ? PanelFont.bold : PanelFont.regular)
+                             color: color, font: PanelFont.regular)
                 case .ext?:
                     drawCell(EntryFormatter.visible(entry.displayExtension), col, y, color, textFont)
                 case .size?:
@@ -613,7 +612,7 @@ public final class PanelView: NSView {
         holdTimer = timer
     }
 
-    /// Fills the bar; when full (ended), the menu shows immediately (not after release).
+    /// Fills the bar; when full (ended), marks `holdReady` so releasing opens the menu.
     func holdTick(now: Date) {
         guard holdRow != nil, !holdReady else { return }
         holdProgress = CGFloat(min(1, now.timeIntervalSince(holdStart) / max(0.05, contextMenuHold)))
@@ -621,9 +620,8 @@ public final class PanelView: NSView {
         guard holdProgress >= 1 else { return }
         holdReady = true
         pendingRightSelectionRow = nil
-        let point = holdPoint
-        cancelHold()
-        onContextMenu?(point)
+        holdTimer?.invalidate()
+        holdTimer = nil
     }
 
     func releaseHold() {
@@ -658,6 +656,14 @@ public final class PanelView: NSView {
     }
 
     public override func rightMouseUp(with event: NSEvent) {
+        if holdReady {
+            let point = holdPoint
+            holdReady = false
+            pendingRightSelectionRow = nil
+            cancelHold()
+            onContextMenu?(point)
+            return
+        }
         if let row = pendingRightSelectionRow {
             pendingRightSelectionRow = nil
             beginRightSelection(atRow: row)

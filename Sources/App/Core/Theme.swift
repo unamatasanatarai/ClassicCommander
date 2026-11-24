@@ -73,7 +73,7 @@ public enum ThemeSlot: String, CaseIterable {
     case activeTabBackground, activeTabText
     case headerBackground, headerText
     case chrome, chromeText, lines
-    case markText
+    case markText, markOnCursorText
 
     public var label: String {
         switch self {
@@ -95,6 +95,7 @@ public enum ThemeSlot: String, CaseIterable {
         case .chromeText: return "Status bar text"
         case .lines: return "Lines and borders"
         case .markText: return "Marked (selected) text"
+        case .markOnCursorText: return "Marked text on cursor"
         }
     }
 }
@@ -118,6 +119,7 @@ public struct Theme: Equatable {
     public var chromeText: RGBColor
     public var lines: RGBColor
     public var markText: RGBColor
+    public var markOnCursorText: RGBColor
 
     public subscript(slot: ThemeSlot) -> RGBColor {
         get {
@@ -140,6 +142,7 @@ public struct Theme: Equatable {
             case .chromeText: return chromeText
             case .lines: return lines
             case .markText: return markText
+            case .markOnCursorText: return markOnCursorText
             }
         }
         set {
@@ -162,6 +165,7 @@ public struct Theme: Equatable {
             case .chromeText: chromeText = newValue
             case .lines: lines = newValue
             case .markText: markText = newValue
+            case .markOnCursorText: markOnCursorText = newValue
             }
         }
     }
@@ -177,7 +181,8 @@ public struct Theme: Equatable {
                      activeTabBackground: c(.activeTabBackground), activeTabText: c(.activeTabText),
                      headerBackground: c(.headerBackground),
                      headerText: c(.headerText), chrome: c(.chrome), chromeText: c(.chromeText),
-                     lines: c(.lines), markText: c(.markText))
+                     lines: c(.lines), markText: c(.markText),
+                     markOnCursorText: colors[.markOnCursorText].flatMap(RGBColor.init(hex:)) ?? c(.markText).readable(on: c(.cursorBackground)))
     }
 
     /// Total Commander's default look: white panels, grey chrome, light cursor bar with navy text.
@@ -190,7 +195,7 @@ public struct Theme: Equatable {
         .activeTabBackground: "#FFFFFF", .activeTabText: "#000000",
         .headerBackground: "#EEF0F3", .headerText: "#000000",
         .chrome: "#E4E4EA", .chromeText: "#000000", .lines: "#AAABBC",
-        .markText: "#FF0000",
+        .markText: "#FF0000", .markOnCursorText: "#FF0000",
     ])
 
     /// Blue panels with white text and a white cursor bar. The default theme
