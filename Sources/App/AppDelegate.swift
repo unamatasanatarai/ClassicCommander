@@ -179,7 +179,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         windowMenu.addItem(openWindowItem)
         windowMenu.addItem(NSMenuItem.separator())
 
-        let closeItem = NSMenuItem(title: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        let closeItem = NSMenuItem(title: "Close Window", action: #selector(closeWindowOrTab(_:)), keyEquivalent: "w")
+        closeItem.target = self
         windowMenu.addItem(closeItem)
         let minimizeItem = NSMenuItem(title: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(minimizeItem)
@@ -187,6 +188,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
 
         NSApp.mainMenu = mainMenu
         NSApp.windowsMenu = windowMenu
+    }
+
+    @objc func closeWindowOrTab(_ sender: Any?) {
+        if let keyWin = NSApp.keyWindow, keyWin !== window {
+            keyWin.performClose(sender)
+            return
+        }
+        if let commander = commanderView, commander.hasMultipleTabs(in: commander.model.activeSide) {
+            commander.perform(.closeTab)
+        } else {
+            window.performClose(sender)
+        }
     }
 
     @objc private func quitPressed() {
@@ -221,6 +234,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
     /// the menu is open (removed in menuDidClose), so a closed menu never takes a key: keys keep
     /// going to the panels, text fields and the shortcut recorder exactly as before.
     public func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu.title == "Window" {
+            for item in menu.items where item.action == #selector(closeWindowOrTab(_:)) {
+                let hasTabs = commanderView?.hasMultipleTabs(in: commanderView?.model.activeSide ?? .left) ?? false
+                item.title = hasTabs ? "Close Tab" : "Close Window"
+            }
+        }
         guard let keys = commanderView?.settings.keys else { return }
         for item in menu.items {
             guard let raw = item.representedObject as? String, let action = CommandAction(rawValue: raw) else { continue }
@@ -305,6 +324,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
     }
 
     @objc private func showOptions() {
+        optionsController.onOpenFTPManager = { [weak self] in
+            self?.showWindow()
+            self?.commanderView?.perform(.ftpConnect)
+        }
         optionsController.present()
         if activatesApp { NSApp.activate(ignoringOtherApps: true) }
     }

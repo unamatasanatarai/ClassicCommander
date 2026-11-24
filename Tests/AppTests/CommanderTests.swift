@@ -347,7 +347,7 @@ public enum CommanderTests {
             try expect(panel.entries.map(\.name) == names, "reload keeps the sort order")
         }
 
-        testRunner("Backslash button jumps to root, tilde button jumps home") {
+        testRunner("Backslash button jumps to root, tilde button jumps home, downloads button jumps to Downloads") {
             let root = try makeTree()
             defer { try? FileManager.default.removeItem(at: root) }
             let panel = PanelModel(directory: root)
@@ -356,6 +356,10 @@ public enum CommanderTests {
             let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL
             try expect(panel.goHome(visibleRows: 10) == .navigated && panel.directory == home, "~ goes home")
             try expect(panel.goHome(visibleRows: 10) == .none, "no-op at home")
+            let downloads = (FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+                ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")).standardizedFileURL
+            try expect(panel.goDownloads(visibleRows: 10) == .navigated && panel.directory == downloads, "downloads button goes to Downloads")
+            try expect(panel.goDownloads(visibleRows: 10) == .none, "no-op at downloads")
         }
 
         testRunner("Theme: hex round trip, slot subscript, presets distinct") {
@@ -455,7 +459,7 @@ public enum CommanderTests {
             let root = options.window!.contentView!
             try expect(options.working == store.settings && notified == 0, "opening saves nothing")
             try expect(options.visiblePageTitle == "Display", "opens on Display")
-            for (i, title) in ["Operation", "Quick Search", "Color", "Shortcuts"].enumerated() {
+            for (i, title) in ["Operation", "Quick Search", "FTP", "Color", "Shortcuts"].enumerated() {
                 options.showPage(i + 1)
                 try expect(options.visiblePageTitle == title, "page \(title)")
             }
@@ -558,6 +562,8 @@ public enum CommanderTests {
             try expect(KeyCombo(KeyCode.two, .option).displayName == "⌥2", "⌥2 name")
             try expect(KeyCombo(KeyCode.up, .command).displayName == "⌘↑", "⌘↑ name")
             try expect(KeyCombo(KeyCode.space).displayName == "Space", "Space name")
+            try expect(KeyCombo(KeyCode.q, .command).isReservedByMenu, "⌘Q is reserved by menu")
+            try expect(!KeyCombo(KeyCode.w, .command).isReservedByMenu, "⌘W can be used for closeTab")
         }
 
         testRunner("Marking: Space toggles, .. cannot be marked, totals and status line, reload keeps, cd clears") {

@@ -18,6 +18,15 @@ public final class PanelView: NSView {
     public var isActive = false { didSet { if isActive != oldValue { needsDisplay = true } } }
     /// Off for the Options preview, which has no real volume.
     public var showsVolumeInfo = true
+    /// Height of the tab bar shown between the drive bar and the path bar (0 when hidden).
+    public var tabHeight: CGFloat = 0 {
+        didSet {
+            if tabHeight != oldValue {
+                needsDisplay = true
+                model.ensureCursorVisible(visibleRows: visibleRows)
+            }
+        }
+    }
 
     /// Called on any click inside the panel, so the container can move focus here.
     public var onActivate: (() -> Void)?
@@ -25,6 +34,12 @@ public final class PanelView: NSView {
     public var onOpen: (() -> Void)?
     /// The ⇧6 name editor while it is open.
     var renameField: RenameField?
+    /// The in-place path editor while it is open.
+    var pathField: PathField?
+    /// Called to report hints or messages to the user.
+    public var onShowHint: ((String) -> Void)?
+    /// Optional custom handler for typed paths (e.g. for remote sessions).
+    public var onNavigateToPath: ((String) -> Bool)?
     /// Called on a click on ▼ in the path bar, to open the directory hotlist (like ⌃D).
     public var onHotlist: (() -> Void)?
     /// Called on a click on the drive name, to open the location menu (like ⌥1 / ⌥2).
@@ -95,6 +110,7 @@ public final class PanelView: NSView {
 
     struct Layout {
         let driveBar: NSRect
+        let downloadsButton: NSRect
         let homeButton: NSRect
         let rootButton: NSRect
         let pathBar: NSRect
@@ -112,7 +128,8 @@ public final class PanelView: NSView {
         let driveBar = NSRect(x: 0, y: 0, width: b.width, height: barHeight)
         let rootButton = NSRect(x: b.width - 24, y: 2, width: 22, height: barHeight - 4)
         let homeButton = rootButton.offsetBy(dx: -24, dy: 0)
-        let pathBar = NSRect(x: 0, y: driveBar.maxY, width: b.width, height: barHeight - 2)
+        let downloadsButton = homeButton.offsetBy(dx: -24, dy: 0)
+        let pathBar = NSRect(x: 0, y: driveBar.maxY + tabHeight, width: b.width, height: barHeight - 2)
         let hotlistButton = NSRect(x: b.width - 24, y: pathBar.minY, width: 24, height: pathBar.height)
         let status = NSRect(x: 0, y: b.height - barHeight, width: b.width, height: barHeight)
         let listFrame = NSRect(x: 0, y: pathBar.maxY + 2, width: b.width,
@@ -121,7 +138,7 @@ public final class PanelView: NSView {
         let header = NSRect(x: inner.minX, y: inner.minY, width: inner.width, height: headerHeight)
         let rows = NSRect(x: inner.minX, y: header.maxY, width: inner.width,
                           height: max(0, inner.maxY - header.maxY))
-        return Layout(driveBar: driveBar, homeButton: homeButton, rootButton: rootButton, pathBar: pathBar, hotlistButton: hotlistButton,
+        return Layout(driveBar: driveBar, downloadsButton: downloadsButton, homeButton: homeButton, rootButton: rootButton, pathBar: pathBar, hotlistButton: hotlistButton,
                       listFrame: listFrame, header: header, rows: rows, status: status,
                       columns: columns(x: inner.minX, width: inner.width))
     }
@@ -213,18 +230,46 @@ public final class PanelView: NSView {
             icon.draw(in: NSRect(x: x, y: l.driveBar.midY - iconSize / 2, width: iconSize, height: iconSize),
                       from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
             x += iconSize + 6
-            let textRect = NSRect(x: x, y: l.driveBar.minY, width: max(0, l.homeButton.minX - x - 4), height: barHeight)
+            let textRect = NSRect(x: x, y: l.driveBar.minY, width: max(0, l.downloadsButton.minX - x - 4), height: barHeight)
             drawText(remote.status, in: textRect, color: remote.insecure ? .systemRed : palette.chromeText, font: PanelFont.bold)
         } else if showsVolumeInfo {
             let volume = volumeDetails()
             volume.icon.draw(in: NSRect(x: x, y: l.driveBar.midY - iconSize / 2, width: iconSize, height: iconSize),
                             from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
             x += iconSize + 6
-            let textRect = NSRect(x: x, y: l.driveBar.minY, width: max(0, l.homeButton.minX - x - 4), height: barHeight)
+            let textRect = NSRect(x: x, y: l.driveBar.minY, width: max(0, l.downloadsButton.minX - x - 4), height: barHeight)
             drawText(volume.text, in: textRect, color: palette.chromeText, font: PanelFont.regular)
         }
+        drawDownloadsIcon(in: l.downloadsButton)
         for (rect, title) in [(l.homeButton, "~"), (l.rootButton, "\\")] {
             drawText(title, in: rect, color: palette.chromeText, font: PanelFont.regular, alignment: .center)
+        }
+    }
+
+    private static var cachedDownloadsIcon: [String: NSImage] = [:]
+
+    private func drawDownloadsIcon(in rect: NSRect) {
+        let iconSize: CGFloat = 14
+        let iconRect = NSRect(x: floor(rect.midX - iconSize / 2),
+                              y: floor(rect.midY - iconSize / 2),
+                              width: iconSize, height: iconSize)
+        let colorKey = RGBColor(palette.chromeText).hex
+        if let cached = Self.cachedDownloadsIcon[colorKey] {
+            cached.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            return
+        }
+        let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
+        if let symbol = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: "Downloads")?.withSymbolConfiguration(config) {
+            let tinted = NSImage(size: NSSize(width: iconSize, height: iconSize), flipped: false) { r in
+                symbol.draw(in: r)
+                self.palette.chromeText.set()
+                r.fill(using: .sourceAtop)
+                return true
+            }
+            Self.cachedDownloadsIcon[colorKey] = tinted
+            tinted.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        } else {
+            drawText("↓", in: rect, color: palette.chromeText, font: PanelFont.bold, alignment: .center)
         }
     }
 
@@ -233,9 +278,10 @@ public final class PanelView: NSView {
         let fg = isActive ? palette.activePathText : palette.inactivePathText
         bg.setFill()
         l.pathBar.fill()
+        let mask = model.showFilter.maskString
         var header = model.virtualTitle.map { "[\($0)]   (.. returns to \(model.directory.path))" }
-            ?? EntryFormatter.header(for: model.directory)
-        if let remote = remote { header = remote.address + EntryFormatter.header(for: model.directory) }
+            ?? EntryFormatter.header(for: model.directory, mask: mask)
+        if let remote = remote { header = remote.address + EntryFormatter.header(for: model.directory, mask: mask) }
         if let filter = model.quickFilter { header += "    [filter: \(filter)]" }
         if model.showsMarkedOnly { header += "    [selected only — Esc shows all]" }
         let textRect = NSRect(x: l.pathBar.minX + 6, y: l.pathBar.minY, width: max(0, l.hotlistButton.minX - l.pathBar.minX - 8),
@@ -386,12 +432,46 @@ public final class PanelView: NSView {
         return text
     }
 
+    private static let leftTruncatingTailStyle: NSParagraphStyle = {
+        let s = NSMutableParagraphStyle()
+        s.alignment = .left
+        s.lineBreakMode = .byTruncatingTail
+        return s.copy() as! NSParagraphStyle
+    }()
+
+    private static let rightTruncatingTailStyle: NSParagraphStyle = {
+        let s = NSMutableParagraphStyle()
+        s.alignment = .right
+        s.lineBreakMode = .byTruncatingTail
+        return s.copy() as! NSParagraphStyle
+    }()
+
+    private static let centerTruncatingTailStyle: NSParagraphStyle = {
+        let s = NSMutableParagraphStyle()
+        s.alignment = .center
+        s.lineBreakMode = .byTruncatingTail
+        return s.copy() as! NSParagraphStyle
+    }()
+
+    private static func sharedParagraphStyle(alignment: NSTextAlignment, truncation: NSLineBreakMode) -> NSParagraphStyle {
+        if truncation == .byTruncatingTail {
+            switch alignment {
+            case .left: return leftTruncatingTailStyle
+            case .right: return rightTruncatingTailStyle
+            case .center: return centerTruncatingTailStyle
+            default: break
+            }
+        }
+        let s = NSMutableParagraphStyle()
+        s.alignment = alignment
+        s.lineBreakMode = truncation
+        return s
+    }
+
     private func drawText(_ text: String, in rect: NSRect, color: NSColor, font: NSFont,
                           alignment: NSTextAlignment = .left, truncation: NSLineBreakMode = .byTruncatingTail) {
         guard rect.width > 0, !text.isEmpty else { return }
-        let style = NSMutableParagraphStyle()
-        style.alignment = alignment
-        style.lineBreakMode = truncation
+        let style = Self.sharedParagraphStyle(alignment: alignment, truncation: truncation)
         let lineHeight = ceil(font.ascender - font.descender)
         let textRect = NSRect(x: rect.minX, y: rect.minY + floor((rect.height - lineHeight) / 2),
                               width: rect.width, height: lineHeight)
@@ -435,6 +515,10 @@ public final class PanelView: NSView {
         let l = layoutInfo
         defer { needsDisplay = true }
 
+        if l.downloadsButton.contains(point) {
+            if let nav = onNavigate { nav(.goDownloads) } else if case .failed = model.goDownloads(visibleRows: visibleRows) { NSSound.beep() }
+            return
+        }
         if l.homeButton.contains(point) {
             if let nav = onNavigate { nav(.goHome) } else if case .failed = model.goHome(visibleRows: visibleRows) { NSSound.beep() }
             return
@@ -445,6 +529,12 @@ public final class PanelView: NSView {
         }
         if l.hotlistButton.contains(point) {
             onHotlist?()
+            return
+        }
+        if l.pathBar.contains(point) {
+            if event.clickCount == 2 {
+                beginEditPath()
+            }
             return
         }
         if l.driveBar.contains(point) {
@@ -475,31 +565,38 @@ public final class PanelView: NSView {
     /// true = the current right-drag marks rows, false = it unmarks them, nil = not decided yet.
     private var dragMarks: Bool?
     private var lastDragRow: Int?
+    private var pendingRightSelectionRow: Int?
 
     public override func rightMouseDown(with event: NSEvent) {
         onActivate?()
         let point = convert(event.locationInWindow, from: nil)
         guard let index = row(at: point) else { return }
-        beginRightSelection(atRow: index)
+        model.setCursor(index, visibleRows: visibleRows)
+        pendingRightSelectionRow = index
         startHold(row: index, at: point)
+        needsDisplay = true
     }
 
     public override func rightMouseDragged(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        if let held = holdRow, row(at: point) != held { cancelHold() }
+        if let row = pendingRightSelectionRow {
+            pendingRightSelectionRow = nil
+            beginRightSelection(atRow: row)
+        }
+        cancelHold()
         dragSelection(to: point)
     }
 
-    // MARK: Long right-click: context menu
+    // MARK: Long click: context menu
 
-    /// Seconds the right button is held on a row before its context menu is ready (Options → Operation).
+    /// Seconds the button is held on a row before its context menu is ready (Options → Operation).
     public var contextMenuHold: Double = 1
     /// Opens the context menu for the marked entries (or the row), at a point of this view.
     public var onContextMenu: ((NSPoint) -> Void)?
     /// The row being held and how full its bar is (0…1); nil when nothing is held.
     private(set) var holdRow: Int?
     private(set) var holdProgress: CGFloat = 0
-    /// The bar is full: letting go of the button opens the menu (so it stays open).
+    /// The bar is full: the menu opens immediately.
     private(set) var holdReady = false
     private var holdStart = Date()
     private var holdPoint = NSPoint.zero
@@ -510,27 +607,27 @@ public final class PanelView: NSView {
         holdRow = row
         holdPoint = point
         holdStart = Date()
+        holdReady = false
         let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.holdTick(now: Date()) }
         RunLoop.main.add(timer, forMode: .common)
         holdTimer = timer
     }
 
-    /// Fills the bar; once full it stays full until the button is released.
+    /// Fills the bar; when full (ended), the menu shows immediately (not after release).
     func holdTick(now: Date) {
         guard holdRow != nil, !holdReady else { return }
         holdProgress = CGFloat(min(1, now.timeIntervalSince(holdStart) / max(0.05, contextMenuHold)))
         needsDisplay = true
         guard holdProgress >= 1 else { return }
         holdReady = true
-        holdTimer?.invalidate()
-        holdTimer = nil
+        pendingRightSelectionRow = nil
+        let point = holdPoint
+        cancelHold()
+        onContextMenu?(point)
     }
 
-    /// The button was released: with a full bar, the context menu opens (and stays open).
     func releaseHold() {
-        let ready = holdReady, point = holdPoint
         cancelHold()
-        if ready { onContextMenu?(point) }
     }
 
     func cancelHold() {
@@ -539,15 +636,17 @@ public final class PanelView: NSView {
         if holdRow != nil { needsDisplay = true }
         holdRow = nil
         holdProgress = 0
-        holdReady = false
     }
 
     public override func mouseDragged(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         // Control-drag continues a control-click selection.
         if lastDragRow != nil {
-            if let held = holdRow, row(at: point) != held { cancelHold() }
+            cancelHold()
             return dragSelection(to: point)
+        }
+        if holdRow != nil, hypot(point.x - holdPoint.x, point.y - holdPoint.y) > 4 {
+            cancelHold()
         }
         // Otherwise dragging a row drags its files (once the mouse has moved a few points).
         guard let origin = dragOrigin, hypot(point.x - origin.point.x, point.y - origin.point.y) > 4 else { return }
@@ -559,14 +658,18 @@ public final class PanelView: NSView {
     }
 
     public override func rightMouseUp(with event: NSEvent) {
+        if let row = pendingRightSelectionRow {
+            pendingRightSelectionRow = nil
+            beginRightSelection(atRow: row)
+        }
         endRightSelection()
-        releaseHold()
+        cancelHold()
     }
 
     public override func mouseUp(with event: NSEvent) {
         dragOrigin = nil
         if lastDragRow != nil { endRightSelection() }
-        releaseHold()
+        cancelHold()
     }
 
     // MARK: Drag and drop
@@ -804,6 +907,154 @@ extension PanelView {
             ? (entry.name as NSString).length : (entry.name as NSString).length - (ext as NSString).length - 1
         field.currentEditor()?.selectedRange = NSRange(location: 0, length: max(0, length))
     }
+
+    // MARK: Path editing
+
+    /// Double-clicking on the path bar puts an in-place text field over it to type a path.
+    public func beginEditPath() {
+        pathField?.finish(nil)
+        let l = layoutInfo
+        let rect = NSRect(x: l.pathBar.minX + 2,
+                          y: l.pathBar.minY,
+                          width: max(100, l.hotlistButton.minX - l.pathBar.minX - 4),
+                          height: l.pathBar.height)
+        let field = PathField(frame: rect)
+        var currentText = model.virtualTitle != nil ? "" : EntryFormatter.header(for: model.directory, mask: model.showFilter.maskString)
+        if let remote = remote { currentText = remote.address + EntryFormatter.header(for: model.directory, mask: model.showFilter.maskString) }
+        field.stringValue = currentText
+        field.onDone = { [weak self, weak field] newPath in
+            field?.removeFromSuperview()
+            self?.pathField = nil
+            self?.needsDisplay = true
+            if let newPath = newPath {
+                self?.commitPath(newPath)
+            }
+        }
+        addSubview(field)
+        pathField = field
+        window?.makeFirstResponder(field)
+        field.currentEditor()?.selectAll(nil)
+    }
+
+    /// Parses typed path text into (directory, optional mask).
+    /// By default the mask is always *.* unless otherwise specified.
+    public static func parsePathAndMask(_ text: String, currentDirectory: String) -> (directory: String, mask: String?) {
+        var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return (currentDirectory, nil) }
+
+        if (trimmed.hasPrefix("\"") && trimmed.hasSuffix("\"")) || (trimmed.hasPrefix("'") && trimmed.hasSuffix("'")) {
+            trimmed = String(trimmed.dropFirst().dropLast())
+        }
+
+        if trimmed == "\\" { trimmed = "/" }
+        else if trimmed.contains("\\") && !trimmed.contains("/") {
+            trimmed = trimmed.replacingOccurrences(of: "\\", with: "/")
+        }
+
+        if trimmed.contains("*") || trimmed.contains("?") {
+            if let lastSlash = trimmed.range(of: "/", options: .backwards) {
+                let dirPart = String(trimmed[..<lastSlash.lowerBound])
+                let maskPart = String(trimmed[lastSlash.upperBound...])
+                let dir = dirPart.isEmpty ? "/" : dirPart
+                let resolvedDir = resolveDirectory(dir, currentDirectory: currentDirectory)
+                return (resolvedDir, maskPart.isEmpty ? "*.*" : maskPart)
+            } else {
+                return (currentDirectory, trimmed)
+            }
+        }
+
+        let resolved = resolveDirectory(trimmed, currentDirectory: currentDirectory)
+        return (resolved, nil)
+    }
+
+    private static func resolveDirectory(_ dir: String, currentDirectory: String) -> String {
+        let expanded = (dir as NSString).expandingTildeInPath
+        if expanded.hasPrefix("/") {
+            return URL(fileURLWithPath: expanded).standardized.path
+        }
+        let base = URL(fileURLWithPath: currentDirectory)
+        return URL(fileURLWithPath: expanded, relativeTo: base).standardized.path
+    }
+
+    public func commitPath(_ raw: String) {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        if let onNavigateToPath = onNavigateToPath, onNavigateToPath(trimmed) {
+            needsDisplay = true
+            return
+        }
+
+        let (dirStr, mask) = Self.parsePathAndMask(trimmed, currentDirectory: model.directory.path)
+        let expandedDir = (dirStr as NSString).expandingTildeInPath
+        let url = URL(fileURLWithPath: expandedDir).standardized
+
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) {
+            if isDir.boolValue {
+                let maskFilter: PanelShowFilter = (mask == nil || mask == "*.*" || mask == "*") ? .all : .mask(mask!)
+                model.setShowFilter(maskFilter, visibleRows: visibleRows)
+                let res = model.go(to: url, visibleRows: visibleRows)
+                if case .failed = res {
+                    NSSound.beep()
+                } else {
+                    invalidateVolumeInfo()
+                }
+            } else {
+                let parent = url.deletingLastPathComponent()
+                let fileName = url.lastPathComponent
+                model.setShowFilter(.all, visibleRows: visibleRows)
+                model.go(to: parent, visibleRows: visibleRows)
+                model.focus(name: fileName, visibleRows: visibleRows)
+                invalidateVolumeInfo()
+            }
+        } else {
+            NSSound.beep()
+            onShowHint?("“\(trimmed)” not found")
+        }
+        needsDisplay = true
+    }
+}
+
+/// The in-place path editor: Return navigates, Esc (or leaving it) cancels.
+final class PathField: NSTextField, NSTextFieldDelegate {
+    var onDone: ((String?) -> Void)?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        delegate = self
+        focusRingType = .none
+        lineBreakMode = .byClipping
+        cell?.isScrollable = true
+        font = PanelFont.regular
+        drawsBackground = true
+        backgroundColor = .textBackgroundColor
+        textColor = .textColor
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    func finish(_ path: String?) {
+        guard let done = onDone else { return }
+        onDone = nil
+        done(path)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        switch selector {
+        case #selector(NSResponder.insertNewline(_:)):
+            finish(stringValue)
+            return true
+        case #selector(NSResponder.cancelOperation(_:)):
+            finish(nil)
+            return true
+        default:
+            return false
+        }
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) { finish(nil) }
 }
 
 /// The in-place name editor: Return commits, Esc (or leaving it) cancels.

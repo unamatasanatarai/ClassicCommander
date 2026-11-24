@@ -379,11 +379,19 @@ public final class PanelModel {
         go(to: FileManager.default.homeDirectoryForCurrentUser, visibleRows: visibleRows)
     }
 
+    /// The downloads button: jump to the user's Downloads folder.
+    @discardableResult
+    public func goDownloads(visibleRows: Int) -> OpenResult {
+        let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")
+        return go(to: downloads, visibleRows: visibleRows)
+    }
+
     /// Jumps to any directory; does nothing if the panel is already there.
     @discardableResult
     public func go(to url: URL, visibleRows: Int) -> OpenResult {
         let target = url.normalizedLocation
-        guard target != directory else { return .none }
+        guard target != directory || virtualTitle != nil else { return .none }
         let result = load(target, focusing: nil)
         ensureCursorVisible(visibleRows: visibleRows)
         return result
@@ -580,6 +588,7 @@ public enum PanelShowFilter: Equatable {
     case mask(String)
 
     static let programExtensions: Set<String> = ["app", "command", "tool", "sh", "bash", "zsh", "py", "pl", "rb", "pkg", "jar"]
+    private static var cachedMask: (String, FileMask)?
 
     public func shows(_ entry: FileEntry) -> Bool {
         switch self {
@@ -587,7 +596,13 @@ public enum PanelShowFilter: Equatable {
         case .programs:
             if let p = entry.permissions, p & 0o111 != 0 { return true }
             return Self.programExtensions.contains((entry.name as NSString).pathExtension.lowercased())
-        case .mask(let text): return FileMask(text).matches(entry)
+        case .mask(let text):
+            if let (cachedText, mask) = Self.cachedMask, cachedText == text {
+                return mask.matches(entry)
+            }
+            let m = FileMask(text)
+            Self.cachedMask = (text, m)
+            return m.matches(entry)
         }
     }
 
@@ -595,6 +610,15 @@ public enum PanelShowFilter: Equatable {
     public var label: String? {
         switch self {
         case .all: return nil
+        case .programs: return "Programs"
+        case .mask(let text): return text
+        }
+    }
+
+    /// The mask string shown in the path bar, e.g. "*.*" or "*.txt".
+    public var maskString: String {
+        switch self {
+        case .all: return "*.*"
         case .programs: return "Programs"
         case .mask(let text): return text
         }

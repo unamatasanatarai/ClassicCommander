@@ -258,6 +258,10 @@ public final class FTPController {
             // "~" is the Mac's home folder: leave the server.
             disconnect(side(of: panel))
             model.goHome(visibleRows: rows)
+        case .goDownloads:
+            // Downloads folder: leave the server.
+            disconnect(side(of: panel))
+            model.goDownloads(visibleRows: rows)
         default:
             return false
         }

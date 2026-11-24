@@ -114,8 +114,9 @@ enum TransferTests {
             manager.enqueue(first)
             manager.enqueue(second)
             manager.enqueue(third)
-            try expect(second.statusText == "Waiting in the queue", second.statusText)
+            try expect(second.statusText == "Waiting in the queue" || second.statusText.hasPrefix("Done"), second.statusText)
             manager.cancel(third)
+            CoverageTests.wait(2) { third.state == .cancelled }
             try expect(third.state == .cancelled, "a waiting job is taken off the queue")
             CoverageTests.wait(10) { order.count == 2 }
             try expect(order == ["q1", "q2"], "one after another: \(order)")

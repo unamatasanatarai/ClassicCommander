@@ -15,7 +15,7 @@ enum SelectTests {
     /// A commander on two temporary folders, in a window, with dialogs answered by `prompts`.
     static func commander(_ left: URL, _ right: URL) -> (CommanderView, StubPrompts, NSWindow) {
         let view = CommanderView(model: CommanderModel(left: PanelModel(directory: left), right: PanelModel(directory: right)))
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 600), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.contentView = view
         view.frame = window.contentView!.bounds
         view.layout()
@@ -160,7 +160,7 @@ enum SelectTests {
             try expect(panel.model.marked.isEmpty, "identical folders")
         }
 
-        testRunner("Long right-click: the bar fills, letting go opens the menu (which stays); early release or moving cancels") {
+        testRunner("Long right-click: the bar fills, menu opens immediately without selecting; early release selects") {
             let left = try CoverageTests.tempDir("HoldLeft")
             defer { try? FileManager.default.removeItem(at: left) }
             try Data("x".utf8).write(to: left.appendingPathComponent("file.txt"))
@@ -175,46 +175,64 @@ enum SelectTests {
             let point = NSPoint(x: panel.layoutInfo.rows.minX + 40, y: y)
 
             panel.rightMouseDown(with: CoverageTests.mouse(.rightMouseDown, at: point, in: panel))
-            try expect(panel.holdRow == row && panel.model.marked == ["file.txt"], "held row, marked like a right click")
+            try expect(panel.holdRow == row && panel.model.marked.isEmpty, "held row, not marked yet on down")
             panel.contextMenuHold = 3
             panel.holdTick(now: Date().addingTimeInterval(1.5))
             try expect(panel.holdProgress > 0.4 && panel.holdProgress < 0.6 && menu == nil, "half full: \(panel.holdProgress)")
             panel.display()
             panel.rightMouseUp(with: CoverageTests.mouse(.rightMouseUp, at: point, in: panel))
-            try expect(panel.holdRow == nil && menu == nil, "released early: no menu")
+            try expect(panel.holdRow == nil && menu == nil && panel.model.marked == ["file.txt"], "released early: marked on release, no menu")
+            panel.model.clearMarks()
 
             panel.rightMouseDown(with: CoverageTests.mouse(.rightMouseDown, at: point, in: panel))
             panel.rightMouseDragged(with: CoverageTests.mouse(.rightMouseDragged, at: NSPoint(x: point.x, y: y + 40), in: panel))
             try expect(panel.holdRow == nil, "moving to another row cancels")
             panel.rightMouseUp(with: CoverageTests.mouse(.rightMouseUp, at: point, in: panel))
+            panel.model.clearMarks()
             panel.mouseDown(with: CoverageTests.mouse(.leftMouseDown, at: point, in: panel, flags: .control))
             panel.mouseDragged(with: CoverageTests.mouse(.leftMouseDragged, at: NSPoint(x: point.x, y: y + 40), in: panel))
             try expect(panel.holdRow == nil, "control-drag cancels too")
             panel.mouseUp(with: CoverageTests.mouse(.leftMouseUp, at: point, in: panel))
+            panel.model.clearMarks()
             panel.holdTick(now: Date())   // nothing held
 
-            // The real timer, with a short hold: full, then the menu opens on release.
+            // The real timer: full bar opens the menu immediately (without waiting for release) and never selects.
             var settings = view.settings
             settings.operation.contextMenuHold = 0.2
             view.settings = settings
             try expect(panel.contextMenuHold == 0.2, "setting reaches the panel")
             panel.rightMouseDown(with: CoverageTests.mouse(.rightMouseDown, at: point, in: panel))
             CoverageTests.wait(3) { panel.holdReady }
-            panel.holdTick(now: Date())   // full: stays full
-            try expect(panel.holdReady && panel.holdProgress == 1 && menu == nil, "full, menu not yet open")
+            try expect(panel.holdReady && menu != nil, "full: menu opened immediately without release")
+            try expect(panel.model.marked.isEmpty, "long right-click does not select file")
             panel.rightMouseUp(with: CoverageTests.mouse(.rightMouseUp, at: point, in: panel))
-            try expect(menu?.items.map(\.title).contains("Copy File Path") == true && panel.holdRow == nil, "menu opened on release")
+            try expect(panel.model.marked.isEmpty, "releasing after menu opened still leaves file unselected")
+            try expect(menu?.items.map(\.title).contains("Copy File Path") == true, "menu opened")
             var copied = ""
             Modal.copied = { copied = $0 }
             defer { Modal.copied = { _ in } }
             if let item = menu?.items.first(where: { $0.title == "Copy File Path" }) { view.contextCommand(item) }
             try expect(copied == left.appendingPathComponent("file.txt").path + "\n", "file path copied: \(copied)")
-            // Control-click held works the same way.
+
+            // Left-click does not start a hold or open context menu (only right-click / control-click does).
             menu = nil
+            panel.model.clearMarks()
+            panel.mouseDown(with: CoverageTests.mouse(.leftMouseDown, at: point, in: panel))
+            try expect(panel.holdRow == nil, "left-click does not hold")
+            panel.holdTick(now: Date().addingTimeInterval(5))
+            try expect(menu == nil, "long left-click does not open context menu")
+            panel.mouseUp(with: CoverageTests.mouse(.leftMouseUp, at: point, in: panel))
+            try expect(panel.model.marked.isEmpty, "still unselected on mouseUp")
+
+            // Control-click held works the same way: opens menu immediately, does not select.
+            menu = nil
+            panel.model.clearMarks()
             panel.mouseDown(with: CoverageTests.mouse(.leftMouseDown, at: point, in: panel, flags: .control))
             panel.holdTick(now: Date().addingTimeInterval(5))
+            try expect(menu != nil, "control-click held opens it immediately")
+            try expect(panel.model.marked.isEmpty, "control-click held does not select file")
             panel.mouseUp(with: CoverageTests.mouse(.leftMouseUp, at: point, in: panel))
-            try expect(menu != nil, "control-click held opens it too")
+            try expect(panel.model.marked.isEmpty, "still unselected on mouseUp")
 
             // Open With: the apps for the file (default first), and Other…
             guard let openWith = menu?.items.first(where: { $0.title == "Open With" })?.submenu else { throw Fail(description: "no Open With") }
@@ -397,7 +415,14 @@ enum SelectTests {
             view.settings = s
             view.keyDown(with: CoverageTests.key(4, "h"))
             try expect(view.quickSearch.isOpen && view.quickSearch.field.stringValue == "h", "letter searches")
+            try expect(view.quickSearch.mode == .filter, "defaults to filter mode")
             view.quickSearch.close(clearFilter: true)
+            s.quickSearch.filterByDefault = false
+            view.settings = s
+            view.keyDown(with: CoverageTests.key(4, "h"))
+            try expect(view.quickSearch.isOpen && view.quickSearch.mode == .search, "search mode when filterByDefault is false")
+            view.quickSearch.close(clearFilter: true)
+            s.quickSearch.filterByDefault = true
             try expect(!CommanderView.isPlainLetter(CoverageTests.key(4, "h", .control)) && !CommanderView.isPlainLetter(CoverageTests.key(19, "2")),
                        "not plain letters")
             s.quickSearch.activation = .controlOption
@@ -546,7 +571,7 @@ enum SelectTests {
             view.leftView.model.focus(name: "a.txt", visibleRows: 20)
             view.perform(.newTab)
             view.layout()
-            try expect(view.tabs[.left]?.count == 2 && !view.leftTabBar.isHidden && view.leftView.frame.minY == TabBarView.height, "bar appears")
+            try expect(view.tabs[.left]?.count == 2 && !view.leftTabBar.isHidden && view.leftView.tabHeight == TabBarView.height && view.leftTabBar.frame.minY == view.leftView.layoutInfo.driveBar.maxY, "bar appears between drive bar and path bar")
             view.jump(.left, to: two)
             try expect(view.tabs[.left]?.current.folder.path == two.path, "the active tab follows")
             // Click the first tab: back to its folder, cursor where it was.
@@ -576,11 +601,26 @@ enum SelectTests {
                 view.leftTabBar.otherMouseDown(with: center)
             }
             try expect(view.tabs[.left]?.count == 2, "not over a tab: nothing closed")
+            // Clicking "X" on the tab closes it
+            if let cr = view.leftTabBar.closeRect(for: 1) {
+                view.leftTabBar.mouseMoved(with: CoverageTests.mouse(.mouseMoved, at: NSPoint(x: cr.midX, y: cr.midY), in: view.leftTabBar))
+                try expect(view.leftTabBar.hoveredCloseTab == 1, "hovering close button")
+                view.leftTabBar.mouseDown(with: CoverageTests.mouse(.leftMouseDown, at: NSPoint(x: cr.midX, y: cr.midY), in: view.leftTabBar))
+                try expect(view.tabs[.left]?.count == 1, "clicking X closed the tab")
+            }
+            view.newTab(.left)
+            try expect(view.tabs[.left]?.count == 2, "re-added second tab")
             view.leftTabBar.middleClick(at: NSPoint(x: second.midX, y: second.midY))
             try expect(view.tabs[.left]?.count == 1, "middle-click closed it")
             try expect(view.leftTabBar.acceptsFirstMouse(for: nil), "first click works")
+            // ⌘W closes tab if several, or hides window if only one remains
+            var windowClosed = false
+            NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: nil) { _ in
+                windowClosed = true
+            }
             view.perform(.closeTab)
-            try expect(view.tabs[.left]?.count == 1, "the last tab stays")
+            try expect(view.tabs[.left]?.count == 1, "the last tab stays in the model")
+            try expect(windowClosed, "when no more tabs to close, ⌘W closes/hides the window")
             view.perform(.nextTab)   // one tab: beep
             // Double-click the empty bar: a new tab (the bar shows always with the option).
             var s = view.settings

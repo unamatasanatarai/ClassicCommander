@@ -125,7 +125,7 @@ public struct OperationOptions: Equatable, Codable {
     public static let standard = OperationOptions()
 }
 
-/// Options → Quick Search: which keys start Quick Search when typed with a letter.
+/// Options → Quick Search: which keys start Quick Search when typed with a letter, and whether it filters.
 public struct QuickSearchOptions: Equatable, Codable {
     public enum Activation: String, Codable, CaseIterable {
         case controlOption, option, lettersOnly, off
@@ -141,14 +141,18 @@ public struct QuickSearchOptions: Equatable, Codable {
     }
 
     public var activation: Activation
+    /// When true, quick search filters the list (hiding non-matching entries) instead of only jumping the cursor.
+    public var filterByDefault: Bool
 
-    public init(activation: Activation = .controlOption) {
+    public init(activation: Activation = .controlOption, filterByDefault: Bool = true) {
         self.activation = activation
+        self.filterByDefault = filterByDefault
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         activation = (try? c.decodeIfPresent(Activation.self, forKey: .activation)).flatMap { $0 } ?? .controlOption
+        filterByDefault = (try? c.decodeIfPresent(Bool.self, forKey: .filterByDefault)) ?? true
     }
 
     public static let standard = QuickSearchOptions()

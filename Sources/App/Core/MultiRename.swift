@@ -48,10 +48,22 @@ public enum MultiRename {
         public var changes: Bool { newName != entry.name }
     }
 
+    struct RenameContext {
+        let rules: RenameRules
+        let searchRegex: NSRegularExpression?
+    }
+
     /// The new name of each entry, with the problems that stop Start!.
     /// `existing`: names in the folder that are not being renamed (a new name may not take one).
     public static func preview(_ entries: [FileEntry], rules: RenameRules, existing: Set<String>) throws -> [Row] {
-        let names = try entries.enumerated().map { i, e in try newName(for: e, index: i, rules: rules) }
+        let searchRegex: NSRegularExpression?
+        if rules.regex && !rules.search.isEmpty {
+            searchRegex = try NSRegularExpression(pattern: rules.search, options: rules.caseSensitive ? [] : [.caseInsensitive])
+        } else {
+            searchRegex = nil
+        }
+        let ctx = RenameContext(rules: rules, searchRegex: searchRegex)
+        let names = try entries.enumerated().map { i, e in try newName(for: e, index: i, context: ctx) }
         // The Mac's disks usually ignore case: "A.txt" and "a.txt" are one name.
         var counts: [String: Int] = [:]
         for name in names { counts[name.lowercased(), default: 0] += 1 }
@@ -74,6 +86,15 @@ public enum MultiRename {
 
     /// One entry's new name (folders have no extension).
     public static func newName(for entry: FileEntry, index: Int, rules: RenameRules) throws -> String {
+        let searchRegex = rules.regex && !rules.search.isEmpty
+            ? try NSRegularExpression(pattern: rules.search, options: rules.caseSensitive ? [] : [.caseInsensitive])
+            : nil
+        let ctx = RenameContext(rules: rules, searchRegex: searchRegex)
+        return try newName(for: entry, index: index, context: ctx)
+    }
+
+    static func newName(for entry: FileEntry, index: Int, context: RenameContext) throws -> String {
+        let rules = context.rules
         let isFile = entry.kind == .file
         let ext = isFile ? (entry.name as NSString).pathExtension : ""
         let base = ext.isEmpty ? entry.name : (entry.name as NSString).deletingPathExtension
@@ -83,10 +104,10 @@ public enum MultiRename {
         let newExt = isFile ? expand(rules.extensionMask, values) : ""
         var result: String
         if !rules.search.isEmpty && !rules.includeExtension {
-            result = try replace(in: newBase, rules) + (newExt.isEmpty ? "" : "." + newExt)
+            result = try replace(in: newBase, context) + (newExt.isEmpty ? "" : "." + newExt)
         } else {
             result = newExt.isEmpty ? newBase : newBase + "." + newExt
-            if !rules.search.isEmpty { result = try replace(in: result, rules) }
+            if !rules.search.isEmpty { result = try replace(in: result, context) }
         }
         return changeCase(result, rules.letterCase)
     }
@@ -114,23 +135,31 @@ public enum MultiRename {
     }
 
     private static func value(of token: String, _ v: Values) -> String? {
-        let date = v.date ?? Date(timeIntervalSince1970: 0)
-        let c = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
-        func two(_ n: Int?) -> String { String(format: "%02d", n ?? 0) }
+        func dateParts() -> (year: String, month: String, day: String, hour: String, minute: String, second: String) {
+            let date = v.date ?? Date(timeIntervalSince1970: 0)
+            let c = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+            func two(_ n: Int?) -> String { String(format: "%02d", n ?? 0) }
+            return (String(format: "%04d", c.year ?? 0), two(c.month), two(c.day), two(c.hour), two(c.minute), two(c.second))
+        }
+
         switch token {
         case "N": return v.name
         case "E": return v.ext
         case "C":
             let n = String(abs(v.counter))
             return (v.counter < 0 ? "-" : "") + String(repeating: "0", count: max(0, v.digits - n.count)) + n
-        case "YMD": return String(format: "%04d", c.year ?? 0) + two(c.month) + two(c.day)
-        case "hms": return two(c.hour) + two(c.minute) + two(c.second)
-        case "Y": return String(format: "%04d", c.year ?? 0)
-        case "M": return two(c.month)
-        case "D": return two(c.day)
-        case "h": return two(c.hour)
-        case "m": return two(c.minute)
-        case "s": return two(c.second)
+        case "YMD":
+            let dp = dateParts()
+            return dp.year + dp.month + dp.day
+        case "hms":
+            let dp = dateParts()
+            return dp.hour + dp.minute + dp.second
+        case "Y": return dateParts().year
+        case "M": return dateParts().month
+        case "D": return dateParts().day
+        case "h": return dateParts().hour
+        case "m": return dateParts().minute
+        case "s": return dateParts().second
         default: break
         }
         // [N2-5], [N3-], [N4], [E1-2]: characters, counted from 1.
@@ -147,9 +176,12 @@ public enum MultiRename {
     }
 
     /// Search & replace (plain or regular expression, with $1 for groups).
-    static func replace(in text: String, _ rules: RenameRules) throws -> String {
+    static func replace(in text: String, _ context: RenameContext) throws -> String {
+        let rules = context.rules
         if rules.regex {
-            let re = try NSRegularExpression(pattern: rules.search, options: rules.caseSensitive ? [] : [.caseInsensitive])
+            guard let re = context.searchRegex ?? (try? NSRegularExpression(pattern: rules.search, options: rules.caseSensitive ? [] : [.caseInsensitive])) else {
+                return text
+            }
             let whole = NSRange(text.startIndex..., in: text)
             if rules.firstOnly {
                 guard let m = re.firstMatch(in: text, range: whole), let r = Range(m.range, in: text) else { return text }

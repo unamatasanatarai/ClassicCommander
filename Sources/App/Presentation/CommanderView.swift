@@ -76,20 +76,31 @@ public final class CommanderView: NSView {
         leftView = PanelView(model: model.left)
         rightView = PanelView(model: model.right)
         super.init(frame: .zero)
-        for (bar, side) in [(leftTabBar, CommanderModel.Side.left), (rightTabBar, .right)] {
-            tabs[side] = PanelTabs(folder: view(for: side).model.directory)
-            bar.tabs = tabs[side]!
-            bar.onSelect = { [weak self] i in self?.selectTab(i, side: side) }
-            bar.onClose = { [weak self] i in self?.closeTab(i, side: side) }
-            bar.onNew = { [weak self] in self?.newTab(side) }
-            addSubview(bar)
-        }
         for (view, side) in [(leftView, CommanderModel.Side.left), (rightView, .right)] {
             addSubview(view)
             view.onActivate = { [weak self] in self?.activate(side) }
             view.onOpen = { [weak self] in self?.openCurrent() }
             view.onLocationMenu = { [weak self] in self?.showLocationMenu(for: side) }
             view.onHotlist = { [weak self] in self?.showHotlist(for: side) }
+            view.onShowHint = { [weak self] hint in self?.showHint(hint, duration: 2.5) }
+            view.onNavigateToPath = { [weak self, weak view] path in
+                guard let self = self, let view = view else { return false }
+                if view.model.isRemote {
+                    if let session = self.ftp.session(for: view) {
+                        var p = path
+                        if let addr = self.ftp.displayAddress(of: view.model.directory), p.hasPrefix(addr) {
+                            p = String(p.dropFirst(addr.count))
+                        }
+                        let (dir, mask) = PanelView.parsePathAndMask(p, currentDirectory: view.model.directory.path)
+                        let maskFilter: PanelShowFilter = (mask == nil || mask == "*.*" || mask == "*") ? .all : .mask(mask!)
+                        view.model.setShowFilter(maskFilter, visibleRows: view.visibleRows)
+                        let remoteURL = session.url(for: dir)
+                        _ = self.ftp.reveal(remoteURL, in: view)
+                        return true
+                    }
+                }
+                return false
+            }
             // After the drop has finished (the copy dialog must not run inside the drag).
             view.onDrop = { [weak self] drop in
                 DispatchQueue.main.async { self?.drop(drop) }
@@ -111,6 +122,15 @@ public final class CommanderView: NSView {
                 self.tabsChanged(side)
                 self.onFolderChange?(side, view.model.directory)
             }
+        }
+        for (bar, side) in [(leftTabBar, CommanderModel.Side.left), (rightTabBar, .right)] {
+            let pView = view(for: side)
+            tabs[side] = PanelTabs(folder: pView.model.directory)
+            bar.tabs = tabs[side]!
+            bar.onSelect = { [weak self] i in self?.selectTab(i, side: side) }
+            bar.onClose = { [weak self] i in self?.closeTab(i, side: side) }
+            bar.onNew = { [weak self] in self?.newTab(side) }
+            pView.addSubview(bar)
         }
         watch(.left)
         watch(.right)
@@ -163,11 +183,13 @@ public final class CommanderView: NSView {
         functionBar.frame = NSRect(x: margin, y: bounds.height - barHeight, width: bounds.width - 2 * margin, height: barHeight)
         let height = max(0, bounds.height - margin - barHeight)
         for (side, x, w) in [(CommanderModel.Side.left, margin, left), (.right, margin + left + gap, width - left)] {
-            let bar = tabBar(for: side)
+            let pView = view(for: side)
             let tabHeight = showsTabs(side) ? TabBarView.height : 0
+            pView.tabHeight = tabHeight
+            pView.frame = NSRect(x: x, y: 0, width: w, height: height)
+            let bar = tabBar(for: side)
             bar.isHidden = tabHeight == 0
-            bar.frame = NSRect(x: x, y: 0, width: w, height: tabHeight)
-            view(for: side).frame = NSRect(x: x, y: tabHeight, width: w, height: max(0, height - tabHeight))
+            bar.frame = NSRect(x: 0, y: pView.layoutInfo.driveBar.maxY, width: w, height: tabHeight)
         }
     }
 
@@ -333,12 +355,13 @@ public final class CommanderView: NSView {
 
     public override func keyDown(with event: NSEvent) {
         // "Letters alone": a typed letter always starts Quick Search, before plain-letter shortcuts.
+        let quickMode: QuickSearchController.Mode = settings.quickSearch.filterByDefault ? .filter : .search
         if settings.quickSearch.activation == .lettersOnly, Self.isPlainLetter(event), let text = quickSearchStart(event) {
-            quickSearch.open(in: activeView, mode: .search, text: text)
+            quickSearch.open(in: activeView, mode: quickMode, text: text)
         } else if let action = settings.keys.action(for: KeyCombo(event)) {
             perform(action)
         } else if let text = quickSearchStart(event) {
-            quickSearch.open(in: activeView, mode: .search, text: text)
+            quickSearch.open(in: activeView, mode: quickMode, text: text)
         } else if event.keyCode == KeyCode.escape, activeView.model.quickFilter != nil || activeView.model.showsMarkedOnly {
             // Esc in the panel removes a kept quick filter and shows the entries a selection hid.
             activeView.model.setQuickFilter(nil, visibleRows: activeView.visibleRows)
@@ -418,7 +441,7 @@ public final class CommanderView: NSView {
         let panel = activeView
         let rows = panel.visibleRows
         // Remote panels: navigation needs the listing from the server first.
-        if panel.model.isRemote, [.open, .enterFolder, .parentFolder, .goRoot, .goHome].contains(action),
+        if panel.model.isRemote, [.open, .enterFolder, .parentFolder, .goRoot, .goHome, .goDownloads].contains(action),
            ftp.navigate(panel, action) {
             panel.needsDisplay = true
             return
@@ -451,6 +474,8 @@ public final class CommanderView: NSView {
         case .deselectByMask: markByMask(false, in: panel)
         case .goHome:
             if case .failed = panel.model.goHome(visibleRows: rows) { NSSound.beep() }
+        case .goDownloads:
+            if case .failed = panel.model.goDownloads(visibleRows: rows) { NSSound.beep() }
         case .goRoot:
             if case .failed = panel.model.goToRoot(visibleRows: rows) { NSSound.beep() }
         case .copy: fileCommands.copy()
@@ -1020,9 +1045,22 @@ public final class CommanderView: NSView {
         show(t.current, side: side)
     }
 
-    /// Middle-click (⌃W): closes a tab; the last one stays.
+    public func hasMultipleTabs(in side: CommanderModel.Side) -> Bool {
+        (tabs[side]?.count ?? 0) > 1
+    }
+
+    /// Middle-click or ⌘W / ⌃W: closes a tab; when only one tab remains, hides the window.
     public func closeTab(_ index: Int, side: CommanderModel.Side) {
-        guard var t = tabs[side], t.count > 1 else { return NSSound.beep() }
+        guard var t = tabs[side], t.count > 1 else {
+            if let win = window {
+                if win.styleMask.contains(.closable) {
+                    win.performClose(nil)
+                } else {
+                    win.close()
+                }
+            }
+            return
+        }
         let changed = t.close(index)
         tabs[side] = t
         if changed { show(t.current, side: side) } else { tabsChanged(side) }

@@ -70,6 +70,7 @@ public enum ThemeSlot: String, CaseIterable {
     case text, directoryText, background, background2
     case cursorBackground, cursorText
     case activePathBackground, activePathText, inactivePathBackground, inactivePathText
+    case activeTabBackground, activeTabText
     case headerBackground, headerText
     case chrome, chromeText, lines
     case markText
@@ -86,6 +87,8 @@ public enum ThemeSlot: String, CaseIterable {
         case .activePathText: return "Active path text"
         case .inactivePathBackground: return "Inactive path bar"
         case .inactivePathText: return "Inactive path text"
+        case .activeTabBackground: return "Active tab"
+        case .activeTabText: return "Active tab text"
         case .headerBackground: return "Column headers"
         case .headerText: return "Column header text"
         case .chrome: return "Window / status bars"
@@ -107,6 +110,8 @@ public struct Theme: Equatable {
     public var activePathText: RGBColor
     public var inactivePathBackground: RGBColor
     public var inactivePathText: RGBColor
+    public var activeTabBackground: RGBColor
+    public var activeTabText: RGBColor
     public var headerBackground: RGBColor
     public var headerText: RGBColor
     public var chrome: RGBColor
@@ -127,6 +132,8 @@ public struct Theme: Equatable {
             case .activePathText: return activePathText
             case .inactivePathBackground: return inactivePathBackground
             case .inactivePathText: return inactivePathText
+            case .activeTabBackground: return activeTabBackground
+            case .activeTabText: return activeTabText
             case .headerBackground: return headerBackground
             case .headerText: return headerText
             case .chrome: return chrome
@@ -147,6 +154,8 @@ public struct Theme: Equatable {
             case .activePathText: activePathText = newValue
             case .inactivePathBackground: inactivePathBackground = newValue
             case .inactivePathText: inactivePathText = newValue
+            case .activeTabBackground: activeTabBackground = newValue
+            case .activeTabText: activeTabText = newValue
             case .headerBackground: headerBackground = newValue
             case .headerText: headerText = newValue
             case .chrome: chrome = newValue
@@ -164,7 +173,9 @@ public struct Theme: Equatable {
                      background2: c(.background2), cursorBackground: c(.cursorBackground),
                      cursorText: c(.cursorText), activePathBackground: c(.activePathBackground),
                      activePathText: c(.activePathText), inactivePathBackground: c(.inactivePathBackground),
-                     inactivePathText: c(.inactivePathText), headerBackground: c(.headerBackground),
+                     inactivePathText: c(.inactivePathText),
+                     activeTabBackground: c(.activeTabBackground), activeTabText: c(.activeTabText),
+                     headerBackground: c(.headerBackground),
                      headerText: c(.headerText), chrome: c(.chrome), chromeText: c(.chromeText),
                      lines: c(.lines), markText: c(.markText))
     }
@@ -176,6 +187,7 @@ public struct Theme: Equatable {
         .cursorBackground: "#D6D7DC", .cursorText: "#071C95",
         .activePathBackground: "#C8C8C8", .activePathText: "#000000",
         .inactivePathBackground: "#FFFFFF", .inactivePathText: "#A8A8A8",
+        .activeTabBackground: "#FFFFFF", .activeTabText: "#000000",
         .headerBackground: "#EEF0F3", .headerText: "#000000",
         .chrome: "#E4E4EA", .chromeText: "#000000", .lines: "#AAABBC",
         .markText: "#FF0000",
@@ -189,6 +201,7 @@ public struct Theme: Equatable {
         .cursorBackground: "#FFFFFF", .cursorText: "#000000",
         .activePathBackground: "#00A8A8", .activePathText: "#000000",
         .inactivePathBackground: "#0000A8", .inactivePathText: "#FFFFFF",
+        .activeTabBackground: "#FFFFFF", .activeTabText: "#000000",
         // Total Commander keeps the Windows header control: light grey, black text, whatever the panel colours.
         .headerBackground: "#F4F4F4", .headerText: "#000000",
         .chrome: "#D4D0C8", .chromeText: "#000000", .lines: "#55FFFF",

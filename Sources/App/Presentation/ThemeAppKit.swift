@@ -19,6 +19,7 @@ struct Palette {
     let text, directoryText, background, background2: NSColor
     let cursorBackground, cursorText: NSColor
     let activePathBackground, activePathText, inactivePathBackground, inactivePathText: NSColor
+    let activeTabBackground, activeTabText: NSColor
     let headerBackground, headerText, chrome, chromeText, lines, markText: NSColor
     /// Marked text on the cursor bar: the mark colour, adjusted until it is readable on the bar.
     let markOnCursorText: NSColor
@@ -38,6 +39,8 @@ struct Palette {
         activePathText = t.activePathText.nsColor
         inactivePathBackground = t.inactivePathBackground.nsColor
         inactivePathText = t.inactivePathText.nsColor
+        activeTabBackground = t.activeTabBackground.nsColor
+        activeTabText = t.activeTabText.nsColor
         headerBackground = t.headerBackground.nsColor
         headerText = t.headerText.nsColor
         chrome = t.chrome.nsColor

@@ -84,7 +84,6 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
             (duplicateButton, #selector(duplicate)),
             (NSButton(title: "New folder…", target: nil, action: nil), #selector(newFolder)),
             (editButton, #selector(edit)), (deleteButton, #selector(deleteSelected)),
-            (NSButton(title: "Encrypt…", target: nil, action: nil), #selector(encryptInfo)),
         ]
         var views: [NSView] = []
         for (b, sel) in buttons {
@@ -363,17 +362,6 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
         guard Modal.run(alert) == .alertFirstButtonReturn else { return }
         if let folder = node.folder { repository.deleteFolder(folder) } else if let id = node.profileID { repository.delete(id) }
         reload()
-    }
-
-    @objc private func encryptInfo() {
-        let alert = NSAlert()
-        alert.messageText = "Password protection"
-        alert.informativeText = """
-            Saved FTP passwords are kept in the macOS Keychain (item “ClassicCommander FTP”), encrypted and \
-            protected by your login. They are never written to settings files or exports. \
-            Untick “Save password in Keychain” in a profile to be asked each time instead.
-            """
-        Modal.run(alert)
     }
 
     @objc private func showHelp() {

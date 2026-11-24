@@ -142,9 +142,9 @@ public struct EntryFormatter {
     }
 
     /// The path bar, e.g. "/Users/me/*.*".
-    public static func header(for directory: URL) -> String {
+    public static func header(for directory: URL, mask: String = "*.*") -> String {
         let path = directory.path
-        return (path.hasSuffix("/") ? path : path + "/") + "*.*"
+        return (path.hasSuffix("/") ? path : path + "/") + mask
     }
 }
 

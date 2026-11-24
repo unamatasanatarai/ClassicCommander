@@ -426,7 +426,6 @@ public enum CoverageTests {
             manager.outline.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
             send(manager, "deleteSelected")
             try expect(ftp.repository.folders.isEmpty, "folder deleted")
-            send(manager, "encryptInfo")
             send(manager, "showHelp")
             manager.close()
         }
@@ -651,6 +650,10 @@ public enum CoverageTests {
             panel.scrollWheel(with: pixels)
             panel.mouseDown(with: mouse(.leftMouseDown, at: row(0), in: panel, clicks: 2))
             panel.mouseDown(with: mouse(.leftMouseDown, at: center(l.hotlistButton), in: panel))
+            panel.mouseDown(with: mouse(.leftMouseDown, at: center(l.downloadsButton), in: panel))
+            let downloads = (FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+                ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")).standardizedFileURL
+            try expect(panel.model.directory == downloads, "downloads button")
             panel.mouseDown(with: mouse(.leftMouseDown, at: center(l.rootButton), in: panel))
             try expect(panel.model.directory.path == "/", "root button")
             panel.mouseDown(with: mouse(.leftMouseDown, at: center(l.homeButton), in: panel))
@@ -660,8 +663,47 @@ public enum CoverageTests {
             solo.frame = NSRect(x: 0, y: 0, width: 500, height: 400)
             let sl = solo.layoutInfo
             solo.mouseDown(with: mouse(.leftMouseDown, at: center(sl.hotlistButton), in: solo))
+            solo.mouseDown(with: mouse(.leftMouseDown, at: center(sl.downloadsButton), in: solo))
             solo.mouseDown(with: mouse(.leftMouseDown, at: center(sl.rootButton), in: solo))
             solo.mouseDown(with: mouse(.leftMouseDown, at: center(sl.homeButton), in: solo))
+
+            // Double-clicking path bar opens in-place path editor; typing path navigates with *.* by default
+            let pathCenter = NSPoint(x: l.pathBar.midX, y: l.pathBar.midY)
+            panel.mouseDown(with: mouse(.leftMouseDown, at: pathCenter, in: panel, clicks: 1))
+            try expect(panel.pathField == nil, "single click on path bar does not edit")
+            panel.mouseDown(with: mouse(.leftMouseDown, at: pathCenter, in: panel, clicks: 2))
+            try expect(panel.pathField != nil, "double-clicking path bar opens path editor")
+            try expect(panel.pathField?.stringValue.hasSuffix("*.*") == true, "shows *.* by default")
+
+            // Parsing paths and masks
+            let p1 = PanelView.parsePathAndMask("/tmp", currentDirectory: dir.path)
+            try expect(p1.directory == "/private/tmp" || p1.directory == "/tmp", "path without mask: \(p1.directory)")
+            try expect(p1.mask == nil, "default mask is nil (*.*)")
+            let p2 = PanelView.parsePathAndMask("/tmp/*.*", currentDirectory: dir.path)
+            try expect((p2.directory == "/private/tmp" || p2.directory == "/tmp") && p2.mask == "*.*", "path with *.*")
+            let p3 = PanelView.parsePathAndMask("/tmp/*.json", currentDirectory: dir.path)
+            try expect((p3.directory == "/private/tmp" || p3.directory == "/tmp") && p3.mask == "*.json", "path with *.json")
+            let p4 = PanelView.parsePathAndMask("*.swift", currentDirectory: dir.path)
+            try expect(p4.directory == dir.path && p4.mask == "*.swift", "mask alone")
+
+            // Commit path
+            panel.commitPath(dir.path)
+            try expect(panel.model.directory.resolvingSymlinksInPath() == dir.resolvingSymlinksInPath(), "navigated to dir")
+            try expect(panel.model.showFilter == .all, "default mask is *.*")
+            panel.commitPath("*.txt")
+            try expect(panel.model.showFilter == .mask("*.txt"), "custom mask specified")
+            try expect(panel.model.showFilter.maskString == "*.txt", "mask string matches")
+            panel.commitPath(dir.path)
+            try expect(panel.model.showFilter == .all, "navigating to dir resets to *.* default unless specified")
+            panel.commitPath(dir.path + "/*.txt")
+            try expect(panel.model.showFilter == .mask("*.txt"), "dir with mask")
+            let beforeDir = panel.model.directory
+            panel.commitPath("/nonexistent_directory_12345")
+            try expect(panel.model.directory == beforeDir, "nonexistent path refused")
+            panel.beginEditPath()
+            _ = panel.pathField?.control(panel.pathField!, textView: NSTextView(), doCommandBy: #selector(NSResponder.cancelOperation(_:)))
+            try expect(panel.pathField == nil, "Esc cancels path editing")
+
             // Drawing with search results shown (path bar names the results).
             panel.model.showSearchResults([dir.appendingPathComponent("f01.txt")], title: "found", visibleRows: 20)
             _ = view.bitmapImageRepForCachingDisplay(in: view.bounds).map { view.cacheDisplay(in: view.bounds, to: $0) }
@@ -767,6 +809,29 @@ public enum CoverageTests {
             let store = SettingsStore(defaults: defaults)
             let options = OptionsWindowController(store: store)
             options.present()
+            try expect(options.window?.initialFirstResponder === options.searchField, "searchField is initialFirstResponder")
+            let isSearchFocused = options.window?.firstResponder === options.searchField
+                || (options.window?.firstResponder as? NSTextView)?.delegate === options.searchField
+                || options.window?.firstResponder is NSTextView
+            try expect(isSearchFocused, "searchField is autofocused on present")
+            options.showPage(options.pageIndex(for: "Quick Search") ?? 2)
+            try expect(options.visiblePageTitle == "Quick Search", "on quick search")
+            try expect(store.settings.quickSearch.filterByDefault == true, "filterByDefault is true by default")
+            let filterBox = try CommanderTests.findView(NSButton.self, in: options.window!.contentView!, where: { $0.title.contains("Filter files by default") })
+            filterBox.state = .off
+            send(options, "quickSearchChanged")
+            try expect(store.settings.quickSearch.filterByDefault == false, "filterByDefault saved as false")
+            filterBox.state = .on
+            send(options, "quickSearchChanged")
+            try expect(store.settings.quickSearch.filterByDefault == true, "filterByDefault saved as true")
+
+            options.showPage(options.pageIndex(for: "FTP") ?? 3)
+            try expect(options.visiblePageTitle == "FTP", "on FTP page")
+            var ftpOpened = false
+            options.onOpenFTPManager = { ftpOpened = true }
+            options.openFTPManagerPressed()
+            try expect(ftpOpened, "open FTP manager pressed")
+
             send(options, "quickSearchChanged")
             options.terminalPopup.selectItem(withTitle: "Other…")
             Modal.answerPanel = { _ in [URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")] }
@@ -838,7 +903,7 @@ public enum CoverageTests {
             for p in previews(options.window!.contentView!) { _ = p.hitTest(NSPoint(x: 5, y: 5)) }
             // Shortcuts: filter typing, record a key through the monitor, remove.
             let page = options.shortcutsPage
-            options.showPage(4)
+            options.showPage(options.pageIndex(for: "Shortcuts") ?? 5)
             page.select(.refresh)
             page.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification))
             page.addPressed()

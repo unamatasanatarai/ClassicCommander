@@ -28,6 +28,7 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
     private let presetPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let previewActive: PanelView
     private let previewInactive: PanelView
+    private let previewPair: PreviewPair
     private let bracketsCheckbox = NSButton(checkboxWithTitle: "Show square brackets around directory names",
                                             target: nil, action: nil)
     private let functionBarCheckbox = NSButton(checkboxWithTitle: "Show function key buttons (Copy, Move, NewFolder, Delete)",
@@ -65,7 +66,10 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
     private let holdStepper = NSStepper()
     let shortcutsPage = ShortcutsPage()
     private let quickSearchPopup = NSPopUpButton()
-    private let pageList = OptionsPageList(pages: ["Display", "Operation", "Quick Search", "Color", "Shortcuts"])
+    private let filterByDefaultCheckbox = NSButton(checkboxWithTitle: "Filter files by default (hide non-matching names)",
+                                                   target: nil, action: nil)
+    private let pageList = OptionsPageList(pages: ["Display", "Operation", "Quick Search", "FTP", "Color", "Shortcuts"])
+    public var onOpenFTPManager: (() -> Void)?
     /// Searches every setting: the page list keeps the pages that mention it, matches are highlighted.
     let searchField = NSSearchField()
     private let noMatchLabel = NSTextField(wrappingLabelWithString: "No setting matches.")
@@ -78,11 +82,12 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         self.store = store
         working = store.settings
         original = store.settings
-        previewActive = PanelView(model: Self.previewModel(cursor: 4))
-        previewInactive = PanelView(model: Self.previewModel(cursor: 2))
+        previewActive = PanelView(model: Self.previewModel(cursor: 4, marked: ["header.jpg"]))
+        previewInactive = PanelView(model: Self.previewModel(cursor: 2, marked: ["menu.html"]))
+        previewPair = PreviewPair(active: previewActive, inactive: previewInactive)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 860, height: 640),
+            contentRect: NSRect(x: 0, y: 0, width: 860, height: 680),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: true
@@ -93,6 +98,7 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         super.init(window: window)
         window.delegate = self
         window.contentView = buildContent()
+        window.initialFirstResponder = searchField
         window.center()
         sync()
         isLive = true
@@ -121,6 +127,8 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         if let window = window { AppWindows.place(window) }
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
+        window?.makeFirstResponder(searchField)
+        searchField.selectText(nil)
     }
 
     // MARK: Building the UI
@@ -129,7 +137,7 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         let root = NSView()
 
         let sidebar = pageList
-        pages = [buildDisplayPage(), buildOperationPage(), buildQuickSearchPage(), buildColorPage(), shortcutsPage]
+        pages = [buildDisplayPage(), buildOperationPage(), buildQuickSearchPage(), buildFTPPage(), buildColorPage(), shortcutsPage]
         searchField.placeholderString = "Search settings"
         searchField.sendsSearchStringImmediately = true
         searchField.target = self
@@ -197,6 +205,10 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
             page.isHidden = i != index
         }
         pageList.select(index)
+    }
+
+    public func pageIndex(for title: String) -> Int? {
+        pageList.pages.firstIndex(of: title)
     }
 
     // MARK: Search
@@ -316,6 +328,78 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         autoRefreshPopup.target = self
         autoRefreshPopup.action = #selector(autoRefreshChosen)
         let refreshRow = NSStackView(views: [NSTextField(labelWithString: "Refresh automatically:"), autoRefreshPopup])
+        terminalPopup.target = self
+        terminalPopup.action = #selector(terminalChosen)
+        terminalArgumentsField.placeholderString = "empty: open the folder with the app"
+        terminalArgumentsField.target = self
+        terminalArgumentsField.action = #selector(terminalArgumentsChanged)
+        terminalArgumentsField.widthAnchor.constraint(equalToConstant: 260).isActive = true
+        let terminalGrid = NSGridView(views: [
+            [NSTextField(labelWithString: "Terminal:"), terminalPopup],
+            [NSTextField(labelWithString: "Arguments:"), terminalArgumentsField],
+        ])
+        terminalGrid.column(at: 0).xPlacement = .trailing
+        terminalGrid.rowSpacing = 6
+        let terminalHeading = NSTextField(labelWithString: "Open terminal here (⌃⇧T):")
+        let terminalHint = NSTextField(wrappingLabelWithString: "{dir} is replaced by the folder, e.g. Alacritty: --working-directory {dir}")
+        terminalHint.textColor = .secondaryLabelColor
+        terminalHint.font = .systemFont(ofSize: 11)
+        terminalHint.preferredMaxLayoutWidth = 380
+        let stack = NSStackView(views: [title, heading, sizeCheckbox, moveDownCheckbox, selectionHeading, maskFoldersCheckbox, hideOthersCheckbox, renameExtensionCheckbox, holdRow,
+                                        finderRow, refreshRow, terminalHeading, terminalGrid, terminalHint])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 12
+        stack.setCustomSpacing(6, after: heading)
+        stack.setCustomSpacing(8, after: sizeCheckbox)
+        stack.setCustomSpacing(24, after: moveDownCheckbox)
+        stack.setCustomSpacing(6, after: selectionHeading)
+        stack.setCustomSpacing(8, after: hideOthersCheckbox)
+        stack.setCustomSpacing(8, after: maskFoldersCheckbox)
+        stack.setCustomSpacing(8, after: renameExtensionCheckbox)
+        stack.setCustomSpacing(24, after: refreshRow)
+        stack.setCustomSpacing(6, after: terminalHeading)
+        stack.setCustomSpacing(6, after: terminalGrid)
+        return stack
+    }
+
+    private func buildQuickSearchPage() -> NSView {
+        let title = NSTextField(labelWithString: "Quick Search")
+        title.font = .boldSystemFont(ofSize: 15)
+        quickSearchPopup.addItems(withTitles: QuickSearchOptions.Activation.allCases.map(\.label))
+        quickSearchPopup.target = self
+        quickSearchPopup.action = #selector(quickSearchChanged)
+        let row = NSStackView(views: [NSTextField(labelWithString: "Start quick search with:"), quickSearchPopup])
+        row.spacing = 8
+
+        filterByDefaultCheckbox.target = self
+        filterByDefaultCheckbox.action = #selector(quickSearchChanged)
+
+        let help = NSTextField(wrappingLabelWithString: """
+            Typing searches for files matching the typed text (* and ? are wildcards).
+            When filtering, only matching names stay visible (Esc clears the filter).
+            In the box: ↓ or ⌃↩ next match, ↑ previous, ↩ open / keep filter, Esc close.
+            ⌃S in the box switches between filter and jump mode.
+            With “Letters alone”, keys that have a shortcut (h j k l, 5–8 …) keep their shortcut.
+            """)
+        help.textColor = .secondaryLabelColor
+        help.preferredMaxLayoutWidth = 560
+        let stack = NSStackView(views: [title, row, filterByDefaultCheckbox, help])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 12
+        return stack
+    }
+
+    @objc func quickSearchChanged() {
+        working.quickSearch.activation = QuickSearchOptions.Activation.allCases[max(0, quickSearchPopup.indexOfSelectedItem)]
+        working.quickSearch.filterByDefault = filterByDefaultCheckbox.state == .on
+    }
+
+    private func buildFTPPage() -> NSView {
+        let title = NSTextField(labelWithString: "FTP")
+        title.font = .boldSystemFont(ofSize: 15)
+
         let transfersHeading = NSTextField(labelWithString: "FTP / SFTP transfers at the same time:")
         var rows: [[NSView]] = []
         for (i, name) in ["Total open transfers:", "Max uploads:", "Max downloads:"].enumerated() {
@@ -344,69 +428,38 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         hint.textColor = .secondaryLabelColor
         hint.font = .systemFont(ofSize: 11)
         hint.preferredMaxLayoutWidth = 380
-        terminalPopup.target = self
-        terminalPopup.action = #selector(terminalChosen)
-        terminalArgumentsField.placeholderString = "empty: open the folder with the app"
-        terminalArgumentsField.target = self
-        terminalArgumentsField.action = #selector(terminalArgumentsChanged)
-        terminalArgumentsField.widthAnchor.constraint(equalToConstant: 260).isActive = true
-        let terminalGrid = NSGridView(views: [
-            [NSTextField(labelWithString: "Terminal:"), terminalPopup],
-            [NSTextField(labelWithString: "Arguments:"), terminalArgumentsField],
-        ])
-        terminalGrid.column(at: 0).xPlacement = .trailing
-        terminalGrid.rowSpacing = 6
-        let terminalHeading = NSTextField(labelWithString: "Open terminal here (⌃⇧T):")
-        let terminalHint = NSTextField(wrappingLabelWithString: "{dir} is replaced by the folder, e.g. Alacritty: --working-directory {dir}")
-        terminalHint.textColor = .secondaryLabelColor
-        terminalHint.font = .systemFont(ofSize: 11)
-        terminalHint.preferredMaxLayoutWidth = 380
-        let stack = NSStackView(views: [title, heading, sizeCheckbox, moveDownCheckbox, selectionHeading, maskFoldersCheckbox, hideOthersCheckbox, renameExtensionCheckbox, holdRow,
-                                        finderRow, refreshRow, transfersHeading, grid, hint, terminalHeading, terminalGrid, terminalHint])
+
+        let connectionHeading = NSTextField(labelWithString: "Connections & Security:")
+        let connectionInfo = NSTextField(wrappingLabelWithString: """
+            Saved FTP, FTPS, and SFTP connections are configured in the Connection Manager (⌃F).
+            Passwords and SSH passphrases are stored encrypted in the macOS Keychain.
+            Supported protocols: FTP (active/passive), FTPS (explicit AUTH TLS & implicit TLS), SFTP.
+            """)
+        connectionInfo.textColor = .secondaryLabelColor
+        connectionInfo.font = .systemFont(ofSize: 12)
+        connectionInfo.preferredMaxLayoutWidth = 460
+
+        let openManagerButton = button("Open FTP Connection Manager… (⌃F)", action: #selector(openFTPManagerPressed), key: "")
+
+        let stack = NSStackView(views: [title, transfersHeading, grid, hint, connectionHeading, connectionInfo, openManagerButton])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
-        stack.setCustomSpacing(6, after: heading)
-        stack.setCustomSpacing(8, after: sizeCheckbox)
-        stack.setCustomSpacing(24, after: moveDownCheckbox)
-        stack.setCustomSpacing(6, after: selectionHeading)
-        stack.setCustomSpacing(8, after: hideOthersCheckbox)
-        stack.setCustomSpacing(8, after: maskFoldersCheckbox)
-        stack.setCustomSpacing(8, after: renameExtensionCheckbox)
-        stack.setCustomSpacing(24, after: refreshRow)
         stack.setCustomSpacing(6, after: transfersHeading)
         stack.setCustomSpacing(6, after: grid)
-        stack.setCustomSpacing(24, after: hint)
-        stack.setCustomSpacing(6, after: terminalHeading)
-        stack.setCustomSpacing(6, after: terminalGrid)
+        stack.setCustomSpacing(20, after: hint)
+        stack.setCustomSpacing(6, after: connectionHeading)
+        stack.setCustomSpacing(10, after: connectionInfo)
         return stack
     }
 
-    private func buildQuickSearchPage() -> NSView {
-        let title = NSTextField(labelWithString: "Quick Search")
-        title.font = .boldSystemFont(ofSize: 15)
-        quickSearchPopup.addItems(withTitles: QuickSearchOptions.Activation.allCases.map(\.label))
-        quickSearchPopup.target = self
-        quickSearchPopup.action = #selector(quickSearchChanged)
-        let row = NSStackView(views: [NSTextField(labelWithString: "Start quick search with:"), quickSearchPopup])
-        row.spacing = 8
-        let help = NSTextField(wrappingLabelWithString: """
-            Typing jumps to the first name starting with the text (* and ? are wildcards).
-            In the box: ↓ or ⌃↩ next match, ↑ previous, ↩ open, Esc close.
-            ⌃S opens Quick Filter (only matching names stay visible); ⌃S in the box switches mode.
-            With “Letter alone”, keys that have a shortcut (h j k l, 5–8 …) keep their shortcut.
-            """)
-        help.textColor = .secondaryLabelColor
-        help.preferredMaxLayoutWidth = 560
-        let stack = NSStackView(views: [title, row, help])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 12
-        return stack
-    }
-
-    @objc private func quickSearchChanged() {
-        working.quickSearch.activation = QuickSearchOptions.Activation.allCases[max(0, quickSearchPopup.indexOfSelectedItem)]
+    @objc func openFTPManagerPressed() {
+        if let onOpenFTPManager = onOpenFTPManager {
+            onOpenFTPManager()
+        } else {
+            (NSApp.delegate as? AppDelegate)?.showWindow()
+            (NSApp.delegate as? AppDelegate)?.commanderView?.perform(.ftpConnect)
+        }
     }
 
     private func buildColorPage() -> NSView {
@@ -446,7 +499,7 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         for r in 0..<grid.numberOfRows { grid.row(at: r).yPlacement = .center }
 
         let previewLabel = NSTextField(labelWithString: "Preview:")
-        let preview = PreviewPair(active: previewActive, inactive: previewInactive)
+        let preview = previewPair
         preview.translatesAutoresizingMaskIntoConstraints = false
         preview.heightAnchor.constraint(equalToConstant: 240).isActive = true
 
@@ -478,6 +531,7 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         sizeFormatPopup.selectItem(at: SizeFormat.allCases.firstIndex(of: working.display.sizeFormat) ?? 0)
         tabBarPopup.selectItem(at: TabBarMode.allCases.firstIndex(of: working.display.tabBar) ?? 0)
         quickSearchPopup.selectItem(at: QuickSearchOptions.Activation.allCases.firstIndex(of: working.quickSearch.activation) ?? 0)
+        filterByDefaultCheckbox.state = working.quickSearch.filterByDefault ? .on : .off
         sizeCheckbox.state = working.operation.spaceCalculatesFolderSize ? .on : .off
         moveDownCheckbox.state = working.operation.spaceMovesCursorDown ? .on : .off
         hideOthersCheckbox.state = working.operation.selectionHidesOthers ? .on : .off
@@ -510,6 +564,8 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         }
         previewActive.theme = working.theme
         previewInactive.theme = working.theme
+        previewPair.activeTabBar.theme = working.theme
+        previewPair.inactiveTabBar.theme = working.theme
     }
 
     @objc private func wellChanged(_ sender: NSColorWell) {
@@ -523,6 +579,8 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         presetPopup.selectItem(withTitle: match?.name ?? Self.customTitle)
         previewActive.theme = working.theme
         previewInactive.theme = working.theme
+        previewPair.activeTabBar.theme = working.theme
+        previewPair.inactiveTabBar.theme = working.theme
     }
 
     @objc private func presetChosen() {
@@ -728,8 +786,11 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
 
     // MARK: Preview
 
-    private static func previewModel(cursor: Int) -> PanelModel {
+    private static func previewModel(cursor: Int, marked: [String] = []) -> PanelModel {
         let model = PanelModel(directory: URL(fileURLWithPath: "/Preview/dev"), lister: PreviewLister())
+        if !marked.isEmpty {
+            model.setMarks(Set(marked))
+        }
         model.setCursor(cursor, visibleRows: 20)
         return model
     }
@@ -757,15 +818,32 @@ private struct PreviewLister: DirectoryListing {
 
 /// Two preview panels side by side: the left one drawn active, the right one inactive.
 private final class PreviewPair: NSView {
-    private let active: PanelView
-    private let inactive: PanelView
+    let active: PanelView
+    let inactive: PanelView
+    let activeTabBar = TabBarView()
+    let inactiveTabBar = TabBarView()
 
     init(active: PanelView, inactive: PanelView) {
         self.active = active
         self.inactive = inactive
         super.init(frame: .zero)
-        for p in [active, inactive] {
-            p.showsVolumeInfo = false
+
+        var tabs1 = PanelTabs(folder: URL(fileURLWithPath: "/Preview/dev"))
+        tabs1.add(folder: URL(fileURLWithPath: "/Preview/src"), focus: nil)
+        tabs1.select(0)
+        activeTabBar.tabs = tabs1
+        activeTabBar.isActive = true
+
+        var tabs2 = PanelTabs(folder: URL(fileURLWithPath: "/Preview/dev"))
+        tabs2.add(folder: URL(fileURLWithPath: "/Preview/bin"), focus: nil)
+        tabs2.select(0)
+        inactiveTabBar.tabs = tabs2
+        inactiveTabBar.isActive = false
+
+        for (p, bar) in [(active, activeTabBar), (inactive, inactiveTabBar)] {
+            p.showsVolumeInfo = true
+            p.tabHeight = TabBarView.height
+            p.addSubview(bar)
             addSubview(p)
         }
         active.isActive = true
@@ -783,6 +861,9 @@ private final class PreviewPair: NSView {
         let half = floor((bounds.width - gap) / 2)
         active.frame = NSRect(x: 0, y: 0, width: half, height: bounds.height)
         inactive.frame = NSRect(x: half + gap, y: 0, width: bounds.width - half - gap, height: bounds.height)
+        for (p, bar) in [(active, activeTabBar), (inactive, inactiveTabBar)] {
+            bar.frame = NSRect(x: 0, y: p.layoutInfo.driveBar.maxY, width: p.bounds.width, height: TabBarView.height)
+        }
     }
 
     // The preview is for looking at, not clicking.

@@ -32,7 +32,7 @@ public struct KeyCombo: Hashable, Codable {
 
     /// Combos the app menu already uses; they cannot be reassigned to panel actions.
     public var isReservedByMenu: Bool {
-        modifiers == .command && [KeyCode.q, KeyCode.w, KeyCode.h, KeyCode.m, KeyCode.comma,
+        modifiers == .command && [KeyCode.q, KeyCode.h, KeyCode.m, KeyCode.comma,
                                   KeyCode.z, KeyCode.x, KeyCode.c, KeyCode.v, KeyCode.a].contains(keyCode)
     }
 }
@@ -85,7 +85,7 @@ public enum CommandAction: String, CaseIterable, Codable {
     case open, enterFolder, parentFolder, switchPanel
     case toggleSelection, invertSelection, selectByMask, deselectByMask
     case leftLocationMenu, rightLocationMenu
-    case goHome, goRoot
+    case goHome, goDownloads, goRoot
     case view, copy, move, newFolder, delete
     case findFiles
     case quickFilter, reopenQuickSearch
@@ -124,6 +124,7 @@ public enum CommandAction: String, CaseIterable, Codable {
         case .leftLocationMenu: return "Location menu, left panel"
         case .rightLocationMenu: return "Location menu, right panel"
         case .goHome: return "Go to home folder (~)"
+        case .goDownloads: return "Go to Downloads folder"
         case .goRoot: return "Go to root folder (\\)"
         case .view: return "View (F3, Lister)"
         case .copy: return "Copy (F5)"
@@ -220,6 +221,7 @@ public struct KeyBindings: Equatable, Codable {
         .leftLocationMenu: [KeyCombo(KeyCode.one, .option)],
         .rightLocationMenu: [KeyCombo(KeyCode.two, .option)],
         .goHome: [],
+        .goDownloads: [],
         .goRoot: [],
         .view: [KeyCombo(KeyCode.three), KeyCombo(KeyCode.f3)],
         .copy: [KeyCombo(KeyCode.five), KeyCombo(KeyCode.f5)],
@@ -255,9 +257,9 @@ public struct KeyBindings: Equatable, Codable {
         .multiRename: [KeyCombo(46, .control)],       // ⌃M
         .renameInPlace: [KeyCombo(KeyCode.six, .shift), KeyCombo(KeyCode.f6, .shift)],
         .deletePermanently: [KeyCombo(KeyCode.eight, .shift), KeyCombo(KeyCode.f8, .shift)],
-        // Total Commander: Ctrl+T new tab, Ctrl+W close, Ctrl+Tab / Ctrl+Shift+Tab switch.
+        // Total Commander: Ctrl+T new tab, Ctrl+W / ⌘W close, Ctrl+Tab / Ctrl+Shift+Tab switch.
         .newTab: [KeyCombo(17, .control)],
-        .closeTab: [KeyCombo(13, .control)],
+        .closeTab: [KeyCombo(13, .control), KeyCombo(KeyCode.w, .command)],
         .nextTab: [KeyCombo(KeyCode.tab, .control)],
         .previousTab: [KeyCombo(KeyCode.tab, [.control, .shift])],
         // Total Commander's Ctrl+F3…F7 (sort) and Ctrl+F10…F12 (show) without F keys:
