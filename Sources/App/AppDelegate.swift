@@ -160,15 +160,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         }
         netMenuItem.submenu = netMenu
 
-        // Configuration Menu (Total Commander's home of Options…)
-        let configMenuItem = NSMenuItem()
-        mainMenu.addItem(configMenuItem)
-        let configMenu = NSMenu(title: "Configuration")
-        let optionsItem = NSMenuItem(title: "Options…", action: #selector(showOptions), keyEquivalent: "")
-        optionsItem.target = self
-        configMenu.addItem(optionsItem)
-        configMenuItem.submenu = configMenu
-
         // Window Menu
         let windowMenuItem = NSMenuItem()
         mainMenu.addItem(windowMenuItem)
