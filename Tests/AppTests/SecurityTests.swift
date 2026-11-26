@@ -22,6 +22,7 @@ public enum SecurityTests {
         func deleteFile(_ path: String) throws {}
         func removeDirectory(_ path: String) throws {}
         func rename(_ from: String, to: String) throws {}
+        func chmod(_ mode: Int, of path: String) throws {}
         func setModificationDate(_ date: Date, of path: String) throws {}
         func close() {}
     }

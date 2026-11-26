@@ -25,7 +25,7 @@ final class MultiRenameWindowController: NSWindowController, NSWindowDelegate, N
     let statusLabel = NSTextField(labelWithString: "")
     let startButton = NSButton(title: "Start!", target: nil, action: nil)
     let undoButton = NSButton(title: "Undo", target: nil, action: nil)
-    private let closeButton = NSButton(title: "Close", target: nil, action: nil)
+    let closeButton = NSButton(title: "Close", target: nil, action: nil)
 
     /// What is being renamed (updated to the new names after Start!).
     private(set) var entries: [FileEntry] = []
@@ -53,6 +53,13 @@ final class MultiRenameWindowController: NSWindowController, NSWindowDelegate, N
         super.init(window: window)
         window.delegate = self
         window.contentView = build()
+        let loop: [NSView] = [
+            nameField, extField, searchField, replaceField,
+            caseBox, extensionBox, casePopup, regexBox, firstOnlyBox,
+            startField, stepField, digitsPopup,
+            startButton, undoButton, closeButton,
+        ]
+        AppWindows.setTabOrder(loop, in: window)
     }
 
     @available(*, unavailable)
@@ -76,6 +83,7 @@ final class MultiRenameWindowController: NSWindowController, NSWindowDelegate, N
         b.controlSize = .small
         b.identifier = NSUserInterfaceItemIdentifier(token)
         b.tag = field === extField ? 1 : 0
+        b.refusesFirstResponder = true
         return b
     }
 

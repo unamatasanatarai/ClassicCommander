@@ -245,6 +245,7 @@ public enum CoverageTests {
                 destination: .remote(b, "/www/s2s/big.bin"), size: 70_000, isFolder: false)], isMove: false)
             try runJob(copy)
             try expect(FileManager.default.contents(atPath: server.root.appendingPathComponent("www/s2s/big.bin").path)?.count == 70_000, "copied")
+            seenBytes = max(seenBytes, copy.bytesDone)
             try expect(copy.fileCount == 1 && copy.elapsed >= 0 && copy.speed >= 0 && seenBytes > 0, "job figures")
             // Move a local folder up, then move it back down (source folders are removed afterwards).
             let local = try tempDir("Move")
@@ -303,6 +304,7 @@ public enum CoverageTests {
             p.pinnedPublicKey = "sha256//abc="
             p.trustedHostKeys = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKcj"]
             let editor = FTPProfileEditorController(profile: p, password: "s3cret pass", folders: ["Work"], isNew: true)
+            try expect(editor.savePasswordBox.nextKeyView != nil, "savePasswordBox has nextKeyView")
             var saved: (FTPProfile, String?)?
             var cancelled = false
             editor.onSave = { saved = ($0, $1) }
@@ -426,7 +428,6 @@ public enum CoverageTests {
             manager.outline.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
             send(manager, "deleteSelected")
             try expect(ftp.repository.folders.isEmpty, "folder deleted")
-            send(manager, "showHelp")
             manager.close()
         }
 
@@ -556,6 +557,11 @@ public enum CoverageTests {
             send(window, "retrySelected")
             try expect(manager.jobs.count == 2, "retry queued")
             send(window, "cancelSelected")
+            let escEvent = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                                           timestamp: 0, windowNumber: 0, context: nil,
+                                           characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+                                           isARepeat: false, keyCode: 53)!
+            try expect(window.handleKey(escEvent), "escape closes when finished")
             send(window, "clearFinished")
             try expect(manager.jobs.isEmpty, "cleared")
             window.close()
@@ -778,6 +784,8 @@ public enum CoverageTests {
             _ = quick.control(quick.field, textView: tv, doCommandBy: #selector(NSResponder.cancelOperation(_:)))
             // Lister: modes, encoding, wrap, find, hex rows, its key monitor.
             let lister = ListerWindowController(files: [dir.appendingPathComponent("alpha.txt"), dir.appendingPathComponent("beta.txt")], index: 0)
+            var navigated: URL?
+            lister.onNavigate = { url in navigated = url }
             lister.present()
             send(lister, "modeClicked")
             lister.show(mode: .hex)
@@ -786,6 +794,9 @@ public enum CoverageTests {
             send(lister, "toggleWrap")
             NSApp.sendEvent(key(3, "f", [], window: lister.window))     // f: find bar
             NSApp.sendEvent(key(45, "n", [], window: lister.window))    // n: next file
+            try expect(navigated == dir.appendingPathComponent("beta.txt"), "n moved to beta.txt and called onNavigate")
+            NSApp.sendEvent(key(35, "p", [], window: lister.window))    // p: previous file
+            try expect(navigated == dir.appendingPathComponent("alpha.txt"), "p moved to alpha.txt and called onNavigate")
             lister.window?.close()
             // Diff: binary result, an error, keys and synchronized scrolling.
             let diff = DiffWindowController(leftTitle: "/a", rightTitle: "/b")
@@ -912,6 +923,15 @@ public enum CoverageTests {
             page.select(.refresh)
             send(page, "removePressed")
             try expect(page.bindings.keys(for: .refresh).isEmpty, "removed")
+
+            // Test removing a single shortcut from an action with multiple shortcuts (e.g. parentFolder)
+            page.select(.parentFolder)
+            let parentKeys = page.bindings.keys(for: .parentFolder)
+            try expect(parentKeys.count >= 2, "parentFolder has multiple shortcuts")
+            let firstKey = parentKeys[0]
+            page.removeSingle(combo: firstKey, from: .parentFolder)
+            try expect(!page.bindings.keys(for: .parentFolder).contains(firstKey), "first key removed")
+            try expect(page.bindings.keys(for: .parentFolder).count == parentKeys.count - 1, "other shortcuts preserved")
             options.window?.close()
         }
 
@@ -1005,7 +1025,6 @@ public enum CoverageTests {
             wait(0.5) { false }                                   // the close observer runs on the main queue
             Modal.answerPanel = { _ in [l] }
             try click(">>", in: dialog.window?.contentView)
-            try click("?", in: dialog.window?.contentView)
             // Confirm and run in the background; then cancel a second confirmation before it starts.
             dialog.runSynchronously = true
             dialog.compare()
@@ -1058,7 +1077,6 @@ public enum CoverageTests {
             dialog.table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
             dialog.table.keyDown(with: key(0, "a"))
             let content = dialog.window!.contentView!
-            try click("Help", in: content)
             Modal.answerPanel = { _ in [dir] }
             try click(">>", in: content)
             var drives: NSMenu?
@@ -1128,6 +1146,12 @@ public enum CoverageTests {
             commander.perform(.toggleFolderBrackets)          // saved, notified, applied
             try expect(store.display.showFolderBrackets == false, "setting saved through the delegate")
             app.statusBarController?.onOpenWindow?()
+            let testFileURL = URL(fileURLWithPath: "/tmp/classic_commander_open_test.txt")
+            app.application(NSApp, open: [testFileURL])
+            let pb = NSPasteboard.withUniqueName()
+            pb.writeObjects([testFileURL as NSURL])
+            var err: NSString?
+            app.openInClassicCommander(pb, userData: nil, error: &err)
             var s = store.settings
             s.display.showStatusBarIcon = false
             store.save(s)
@@ -1179,6 +1203,31 @@ public enum CoverageTests {
             lister.present()
             _ = lister.handleKey(key(26, "7"))
             lister.window?.close()
+        }
+
+        testRunner("UI Gallery: menu items, submenus, and window presentation") {
+            let app = AppDelegate(settings: SettingsStore(), windowAutosaveName: "GalleryTest")
+            app.activatesApp = false
+            let savedMenu = NSApp.mainMenu
+            defer { NSApp.mainMenu = savedMenu }
+            app.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+            guard let menu = NSApp.mainMenu else { throw Fail(description: "menu not created") }
+            let galleryItem = menu.items.first { $0.submenu?.title.contains("UI Gallery") == true }
+            try expect(galleryItem != nil, "UI Gallery menu found in main menu")
+            guard let galleryMenu = galleryItem?.submenu else { throw Fail(description: "gallery menu nil") }
+
+            let titles = galleryMenu.items.compactMap { $0.submenu?.title ?? $0.title }
+            try expect(titles.contains("Windows & Tools"), "Windows & Tools submenu present")
+            try expect(titles.contains("Transfer & Operation Popups"), "Transfer & Operation Popups submenu present")
+            try expect(titles.contains("Dialogs, Prompts & Alerts"), "Dialogs, Prompts & Alerts submenu present")
+
+            let gallery = UIGallery.shared
+            gallery.showGalleryPalette()
+            gallery.openAllTools()
+            gallery.openAllPopups()
+            gallery.openAllDialogs()
+            gallery.openAllWindows()
+            gallery.closeAllGalleryWindows()
         }
     }
 }

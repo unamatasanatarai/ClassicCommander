@@ -187,18 +187,72 @@ cat <<EOF >"${contents_dir}/Info.plist"
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
-            <!-- Finder's "Open With" lists ClassicCommander for every file and folder (never as the default app). -->
+            <!-- Finder's "Open With" lists ClassicCommander for every folder (never as the default app). -->
             <key>CFBundleTypeName</key>
-            <string>Folder or file</string>
+            <string>Folder</string>
             <key>CFBundleTypeRole</key>
             <string>Viewer</string>
             <key>LSHandlerRank</key>
             <string>Alternate</string>
+            <key>CFBundleTypeOSTypes</key>
+            <array>
+                <string>fold</string>
+            </array>
             <key>LSItemContentTypes</key>
             <array>
                 <string>public.folder</string>
                 <string>public.directory</string>
+                <string>com.apple.bundle</string>
+                <string>com.apple.package</string>
+                <string>com.apple.resolvable</string>
+            </array>
+        </dict>
+        <dict>
+            <!-- Finder's "Open With" lists ClassicCommander for every file (never as the default app). -->
+            <key>CFBundleTypeName</key>
+            <string>All Files</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>*</string>
+            </array>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.data</string>
+                <string>public.content</string>
                 <string>public.item</string>
+            </array>
+        </dict>
+    </array>
+    <key>NSServices</key>
+    <array>
+        <dict>
+            <key>NSMenuItem</key>
+            <dict>
+                <key>default</key>
+                <string>Open in ClassicCommander</string>
+            </dict>
+            <key>NSMessage</key>
+            <string>openInClassicCommander</string>
+            <key>NSPortName</key>
+            <string>${app_name_xml}</string>
+            <key>NSRequiredContext</key>
+            <dict>
+                <key>NSTextContent</key>
+                <string>FilePath</string>
+            </dict>
+            <key>NSSendFileTypes</key>
+            <array>
+                <string>public.item</string>
+            </array>
+            <key>NSSendTypes</key>
+            <array>
+                <string>NSFilenamesPboardType</string>
+                <string>public.file-url</string>
+                <string>public.plain-text</string>
             </array>
         </dict>
     </array>
@@ -232,12 +286,10 @@ if [[ "$signing_identity" == "-" ]]; then
     fi
 fi
 
-if [[ "${DEBUG:-0}" != "1" && "${FAST_BUILD:-0}" != "1" ]]; then
-    printf '%s\n' "Refreshing macOS LaunchServices cache..."
-    touch "$app_dir"
-    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f -R "$app_dir" >/dev/null 2>&1 || true
-    qlmanage -r cache >/dev/null 2>&1 || true
-fi
+printf '%s\n' "Refreshing macOS LaunchServices cache..."
+touch "$app_dir"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f -R "$app_dir" >/dev/null 2>&1 || true
+qlmanage -r cache >/dev/null 2>&1 || true
 
 printf '%s\n' "✅ Build complete:"
 printf '%s\n' "   - ${app_dir}"

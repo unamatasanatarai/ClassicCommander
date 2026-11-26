@@ -20,6 +20,7 @@ public protocol RemoteClient: AnyObject {
     func deleteFile(_ path: String) throws
     func removeDirectory(_ path: String) throws
     func rename(_ from: String, to: String) throws
+    func chmod(_ mode: Int, of path: String) throws
     /// Sets a file's modification date on the server (where supported; Synchronize keeps dates).
     func setModificationDate(_ date: Date, of path: String) throws
     /// Ends any connection kept open for the session.

@@ -1,7 +1,7 @@
 import AppKit
 
 /// "Connect to FTP server" (⌃F): saved profiles in folders, with Connect, New connection…, New URL…,
-/// Duplicate…, New folder…, Edit…, Delete, Encrypt…, Help and Cancel.
+/// Duplicate…, New folder…, Edit…, Delete, Encrypt… and Cancel.
 /// Double-click (or Return) connects. A failed connection leaves the dialog open with the profile selected.
 public final class FTPConnectionManagerController: NSWindowController, NSOutlineViewDataSource, NSOutlineViewDelegate {
     /// Weak: AppKit may still ask this window's outline for data after the controller is gone.
@@ -29,11 +29,11 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
 
     init(ftp: FTPController) {
         self.ftp = ftp
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 540), styleMask: [.titled, .closable, .resizable],
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 580, height: 280), styleMask: [.titled, .closable, .resizable],
                               backing: .buffered, defer: true)
         window.title = AppWindows.title("Connect to FTP server")
         AppWindows.style(window)
-        window.minSize = NSSize(width: 640, height: 500)
+        window.minSize = NSSize(width: 500, height: 250)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.contentView = build()
@@ -100,11 +100,10 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
         // All buttons always visible: the column must not be clipped by the stack layout.
         side.setClippingResistancePriority(.required, for: .vertical)
         side.setHuggingPriority(.required, for: .vertical)
-        let help = NSButton(title: "Help", target: self, action: #selector(showHelp))
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(close))
         cancel.keyEquivalent = "\u{1b}"
-        for b in [help, cancel] { b.bezelStyle = .rounded }
-        let bottom = NSStackView(views: [status, NSView(), help, cancel])
+        cancel.bezelStyle = .rounded
+        let bottom = NSStackView(views: [status, NSView(), cancel])
         status.textColor = .secondaryLabelColor
         status.preferredMaxLayoutWidth = 420
 
@@ -128,7 +127,7 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             main.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -28),
             bottom.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -28),
-            scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 300),
+            scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 160),
             scroll.heightAnchor.constraint(greaterThanOrEqualTo: side.heightAnchor),
         ])
         return root
@@ -364,18 +363,4 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
         reload()
     }
 
-    @objc private func showHelp() {
-        let alert = NSAlert()
-        alert.messageText = "FTP"
-        alert.informativeText = """
-            ⌃F opens this dialog, ⌃⇧F disconnects, ⌃R re-reads a remote folder.
-            In a connected panel the usual keys work: Enter / → open, 3 view, 5 copy (upload/download), \
-            6 move or — with just a new name — rename on the server, 7 new folder, 8 delete (permanently). \
-            Transfers run in the Transfers window (Net menu) with progress, Cancel and Retry.
-            Security: FTP sends everything unencrypted. FTPS explicit (AUTH TLS, port 21) and implicit (port 990) \
-            are encrypted; an encrypted connection is never downgraded. SFTP (choose it under Protocol) runs over SSH and \
-            logs in with a key file or a password; the server's host key is always checked.
-            """
-        Modal.run(alert)
-    }
 }

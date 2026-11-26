@@ -43,6 +43,7 @@ public final class FTPController {
     }
     public private(set) lazy var managerWindow = FTPConnectionManagerController(ftp: self)
     public private(set) lazy var transfersWindow = TransfersWindowController(manager: transfers)
+    public private(set) var progressWindows: [UUID: TransferProgressWindowController] = [:]
 
     init(commander: CommanderView, repository: FTPProfileRepository = FTPProfileRepository()) {
         self.commander = commander
@@ -50,7 +51,9 @@ public final class FTPController {
         Self.removeOldTemporaryCopies()
         transfers.onChange = { [weak self] job in
             self?.transfersWindow.refresh()
+            self?.progressWindows[job.id]?.update()
             if job.state == .finished || job.state == .cancelled {
+                self?.progressWindows.removeValue(forKey: job.id)?.close()
                 self?.commander?.reloadPanels()
                 // Problems are never silent: the queue opens on a job with failures.
                 if job.failedCount > 0 && self?.runSynchronously == false { self?.transfersWindow.present() }
@@ -64,13 +67,22 @@ public final class FTPController {
 
     /// Runs a copy or move job. The queue window opens for queued jobs, and for any job still
     /// running after a moment (quick renames and small copies don't flash it up).
-    func startJob(_ job: TransferJob, synchronously: Bool = false) {
+    func startJob(_ job: TransferJob, synchronously: Bool = false, existingProgressWindow: TransferProgressWindowController? = nil) {
         let sync = synchronously || runSynchronously
         transfers.enqueue(job, synchronously: sync)
         guard !sync else { return }
-        if job.waitsInQueue { return transfersWindow.present() }
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.queueWindowDelay) { [weak self] in
-            self?.showQueueIfRunning(job)
+        if job.waitsInQueue {
+            existingProgressWindow?.close()
+            transfersWindow.present()
+        } else if let pw = existingProgressWindow {
+            progressWindows[job.id] = pw
+            pw.startActive(job: job)
+        } else {
+            let controller = TransferProgressWindowController(job: job) { [weak self] in
+                self?.transfersWindow.present()
+            }
+            progressWindows[job.id] = controller
+            controller.present()
         }
     }
 
@@ -455,21 +467,41 @@ public final class FTPController {
             TransferPlanner.Source(location: location(for: $0, in: source), isFolder: $0.kind == .directory,
                                    size: $0.size ?? 0, modified: $0.modified)
         }
-        commander.showHint("Preparing \(verb.lowercased())…", duration: 30)
-        background({ try TransferPlanner.plan(sources, into: destination, move: move, mask: answer.fileMask) }) { [weak self] result in
+        let cancelFlag = CancelFlag()
+        var progressWindow: TransferProgressWindowController?
+        if !runSynchronously && !answer.queue {
+            let fromDesc = sources.first?.location.displayPath ?? ""
+            let pw = TransferProgressWindowController(title: verb, from: fromDesc, to: destination.displayPath,
+                                                      cancelFlag: cancelFlag, onCancel: nil) { [weak self] in
+                self?.transfersWindow.present()
+            }
+            progressWindow = pw
+            pw.present()
+        } else {
+            commander.showHint("Preparing \(verb.lowercased())…", duration: 30)
+        }
+
+        background({ try TransferPlanner.plan(sources, into: destination, move: move, mask: answer.fileMask, cancel: cancelFlag) }) { [weak self] result in
             guard let self = self else { return }
             commander.showHint("", duration: 0.01)
             switch result {
             case .failure(let e):
-                self.report(e, title: "\(verb) failed")
+                progressWindow?.close()
+                if !(e is FTPError && (e as? FTPError) == .cancelled) {
+                    self.report(e, title: "\(verb) failed")
+                }
             case .success(let plan):
+                if cancelFlag.isCancelled {
+                    progressWindow?.close()
+                    return
+                }
                 // Existing targets are asked about while copying ("target file exists").
                 let job = TransferJob(title: "\(verb) \(what): \(sources.first?.location.displayPath ?? "") → \(destination.displayPath)",
                                       items: plan.items, isMove: move, sourceFoldersToRemove: move ? plan.foldersToRemove : [])
                 job.verify = answer.verify
                 job.waitsInQueue = answer.queue
                 source?.model.clearMarks()
-                self.startJob(job)
+                self.startJob(job, existingProgressWindow: progressWindow)
             }
         }
         return true

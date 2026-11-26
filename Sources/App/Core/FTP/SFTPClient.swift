@@ -355,7 +355,12 @@ public final class SFTPClient: RemoteClient {
     /// The size in an "ls -l" line ("-rw-r--r--  ? 501  0  1234 Nov 22 18:21 /path").
     static func sizeField(_ line: String) -> Int64? {
         let fields = line.split(separator: " ", omittingEmptySubsequences: true)
-        return fields.count > 4 ? Int64(fields[4]) : nil
+        if fields.count > 4, let s = Int64(fields[4]) { return s }
+        if fields.count > 3, let s = Int64(fields[3]) { return s }
+        for i in 3..<min(fields.count, 6) {
+            if let s = Int64(fields[i]) { return s }
+        }
+        return nil
     }
 
     /// Creates a folder and any missing parents; the folder itself must not exist yet.
@@ -372,6 +377,12 @@ public final class SFTPClient: RemoteClient {
     }
     public func deleteFile(_ path: String) throws { try simple("rm", path) }
     public func removeDirectory(_ path: String) throws { try simple("rmdir", path) }
+
+    public func chmod(_ mode: Int, of path: String) throws {
+        let octal = String(mode & 0o777, radix: 8)
+        let quoted = try Self.quote(path)
+        try check(try run(["chmod \(octal) \(quoted)"]), path: path)
+    }
 
     public func rename(_ from: String, to: String) throws {
         try check(try run(["rename \(try Self.quote(from)) \(try Self.quote(to))"]), path: from)

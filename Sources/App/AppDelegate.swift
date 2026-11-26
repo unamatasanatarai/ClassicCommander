@@ -29,6 +29,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         // No "Show Tab Bar / Show All Tabs" (macOS adds them to a menu named View).
         NSWindow.allowsAutomaticWindowTabbing = false
         ComboHover.install()
+        NSApp.servicesProvider = self
+        UIGallery.shared.appDelegate = self
         setupMainMenu()
 
         updateStatusBarIcon()
@@ -134,7 +136,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         mainMenu.addItem(commandsMenuItem)
         let commandsMenu = NSMenu(title: "Commands")
         commandsMenu.delegate = self
-        for action in [CommandAction.findFiles, .synchronizeDirs, .multiRename, .packFiles, .unpackFiles, nil, .openTerminal, .openInFinder, .swapPanels] {
+        for action in [CommandAction.findFiles, .synchronizeDirs, .multiRename, .changeAttributes, .packFiles, .unpackFiles, nil, .openTerminal, .openInFinder, .swapPanels] {
             guard let action = action else { commandsMenu.addItem(.separator()); continue }
             let item = NSMenuItem(title: Self.menuTitles[action] ?? action.label, action: #selector(netCommand(_:)), keyEquivalent: "")
             item.target = self
@@ -159,6 +161,109 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
             if action == .ftpDisconnect { netMenu.addItem(.separator()) }
         }
         netMenuItem.submenu = netMenu
+
+        // Debug (UI Gallery) Menu
+        let galleryMenuItem = NSMenuItem()
+        mainMenu.addItem(galleryMenuItem)
+        let galleryMenu = NSMenu(title: "Debug (UI Gallery)")
+
+        let openAllItem = NSMenuItem(title: "Open All UI Debug Windows at Once", action: #selector(UIGallery.openAllWindows), keyEquivalent: "u")
+        openAllItem.keyEquivalentModifierMask = [.command, .option, .shift]
+        openAllItem.target = UIGallery.shared
+        galleryMenu.addItem(openAllItem)
+
+        let paletteItem = NSMenuItem(title: "Show UI Debug Control Palette…", action: #selector(UIGallery.showGalleryPalette), keyEquivalent: "")
+        paletteItem.target = UIGallery.shared
+        galleryMenu.addItem(paletteItem)
+
+        let closeAllTopItem = NSMenuItem(title: "Close All Gallery Windows", action: #selector(UIGallery.closeAllGalleryWindows), keyEquivalent: "w")
+        closeAllTopItem.keyEquivalentModifierMask = [.command, .option, .shift]
+        closeAllTopItem.target = UIGallery.shared
+        galleryMenu.addItem(closeAllTopItem)
+
+        galleryMenu.addItem(.separator())
+
+        // 1. Windows & Tools submenu
+        let toolsItem = NSMenuItem(title: "Windows & Tools", action: nil, keyEquivalent: "")
+        let toolsMenu = NSMenu(title: "Windows & Tools")
+        let openAllToolsItem = NSMenuItem(title: "Open All Windows & Tools", action: #selector(UIGallery.openAllTools), keyEquivalent: "")
+        openAllToolsItem.target = UIGallery.shared
+        toolsMenu.addItem(openAllToolsItem)
+        toolsMenu.addItem(.separator())
+        for (title, sel) in [
+            ("Find Files (⌃7 / ⌥F7)…", #selector(UIGallery.showFindFiles)),
+            ("Synchronize Directories (⌥F2)…", #selector(UIGallery.showSynchronize)),
+            ("Multi-Rename Tool (⌃M / ⇧F6)…", #selector(UIGallery.showMultiRename)),
+            ("Change Attributes / Permissions (File)…", #selector(UIGallery.showChmodFile)),
+            ("Change Attributes / Permissions (Folder + Recursive)…", #selector(UIGallery.showChmodFolder)),
+            ("Lister / File Viewer (F3)…", #selector(UIGallery.showLister)),
+            ("File Compare / Diff…", #selector(UIGallery.showDiff)),
+            ("Preferences / Options (⌘,)…", #selector(UIGallery.showOptions)),
+            ("FTP Connection Manager (⌃F)…", #selector(UIGallery.showFTPConnectionManager)),
+            ("FTP Connection Settings / Editor (⌃N)…", #selector(UIGallery.showFTPProfileEditor)),
+            ("Transfer Queue (⌃2)…", #selector(UIGallery.showQueue)),
+        ] {
+            let item = NSMenuItem(title: title, action: sel, keyEquivalent: "")
+            item.target = UIGallery.shared
+            toolsMenu.addItem(item)
+        }
+        toolsItem.submenu = toolsMenu
+        galleryMenu.addItem(toolsItem)
+
+        // 2. Transfer & Operation Popups submenu
+        let popupsItem = NSMenuItem(title: "Transfer & Operation Popups", action: nil, keyEquivalent: "")
+        let popupsMenu = NSMenu(title: "Transfer & Operation Popups")
+        let openAllPopupsItem = NSMenuItem(title: "Open All Transfer Popups", action: #selector(UIGallery.openAllPopups), keyEquivalent: "")
+        openAllPopupsItem.target = UIGallery.shared
+        popupsMenu.addItem(openAllPopupsItem)
+        popupsMenu.addItem(.separator())
+        for (title, sel) in [
+            ("Copy Dialog (F5)…", #selector(UIGallery.showCopyDialog)),
+            ("Move Dialog (F6)…", #selector(UIGallery.showMoveDialog)),
+            ("Target File Exists (Conflict Dialog)…", #selector(UIGallery.showConflictDialog)),
+            ("Transfer Progress: Copying… (Active)", #selector(UIGallery.showTransferProgressActive)),
+            ("Transfer Progress: Preparing… (Scanning)", #selector(UIGallery.showTransferProgressPreparing)),
+            ("Pack Files Progress (Zip)", #selector(UIGallery.showPackFilesProgress)),
+            ("Synchronize Confirmation & Plan…", #selector(UIGallery.showSyncConfirmation)),
+        ] {
+            let item = NSMenuItem(title: title, action: sel, keyEquivalent: "")
+            item.target = UIGallery.shared
+            popupsMenu.addItem(item)
+        }
+        popupsItem.submenu = popupsMenu
+        galleryMenu.addItem(popupsItem)
+
+        // 3. Dialogs, Prompts & Alerts submenu
+        let dialogsItem = NSMenuItem(title: "Dialogs, Prompts & Alerts", action: nil, keyEquivalent: "")
+        let dialogsMenu = NSMenu(title: "Dialogs, Prompts & Alerts")
+        let openAllDialogsItem = NSMenuItem(title: "Open All Dialogs & Alerts", action: #selector(UIGallery.openAllDialogs), keyEquivalent: "")
+        openAllDialogsItem.target = UIGallery.shared
+        dialogsMenu.addItem(openAllDialogsItem)
+        dialogsMenu.addItem(.separator())
+        for (title, sel) in [
+            ("New Folder Prompt (F7)…", #selector(UIGallery.showNewFolderPrompt)),
+            ("Select by Mask Prompt (+)…", #selector(UIGallery.showSelectMaskPrompt)),
+            ("Deselect by Mask Prompt (-)…", #selector(UIGallery.showDeselectMaskPrompt)),
+            ("Delete to Trash Confirmation (F8)…", #selector(UIGallery.showDeleteTrashConfirm)),
+            ("Permanent Delete Confirmation (⇧F8)…", #selector(UIGallery.showDeletePermanentConfirm)),
+            ("Operation Problems / Error Report…", #selector(UIGallery.showOperationProblems)),
+            ("SSL/TLS Certificate Trust Alert…", #selector(UIGallery.showCertTrustAlert)),
+            ("SSH Host Key Verification Alert…", #selector(UIGallery.showHostKeyAlert)),
+            ("About ClassicCommander Panel…", #selector(UIGallery.showAboutPanel)),
+        ] {
+            let item = NSMenuItem(title: title, action: sel, keyEquivalent: "")
+            item.target = UIGallery.shared
+            dialogsMenu.addItem(item)
+        }
+        dialogsItem.submenu = dialogsMenu
+        galleryMenu.addItem(dialogsItem)
+
+        galleryMenu.addItem(.separator())
+        let closeAllItem = NSMenuItem(title: "Close All Gallery Windows", action: #selector(UIGallery.closeAllGalleryWindows), keyEquivalent: "")
+        closeAllItem.target = UIGallery.shared
+        galleryMenu.addItem(closeAllItem)
+
+        galleryMenuItem.submenu = galleryMenu
 
         // Window Menu
         let windowMenuItem = NSMenuItem()
@@ -204,7 +309,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
     }
 
     static let menuTitles: [CommandAction: String] = [
-        .findFiles: "Find Files…", .synchronizeDirs: "Synchronize Directories…", .openTerminal: "Open Terminal Here", .openInFinder: "Open in Finder", .multiRename: "Multi-Rename Tool…", .packFiles: "Pack…", .unpackFiles: "Unpack…",
+        .findFiles: "Find Files…", .synchronizeDirs: "Synchronize Directories…", .openTerminal: "Open Terminal Here", .openInFinder: "Open in Finder", .multiRename: "Multi-Rename Tool…", .packFiles: "Pack…", .unpackFiles: "Unpack…", .changeAttributes: "Change Attributes…",
         .ftpConnect: "FTP Connect…", .ftpNewConnection: "FTP New Connection…", .ftpDisconnect: "FTP Disconnect", .ftpTransfers: "Queue…",
         .sortByName: "Sort by Name", .sortByExtension: "Sort by Extension", .sortByDate: "Sort by Date/Time",
         .sortBySize: "Sort by Size", .sortUnsorted: "Unsorted", .reverseOrder: "Reverse Order",
@@ -231,7 +336,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
                 item.title = hasTabs ? "Close Tab" : "Close Window"
             }
         }
-        guard let keys = commanderView?.settings.keys else { return }
+        let keys = commanderView?.settings.keys ?? settings.settings.keys
         for item in menu.items {
             guard let raw = item.representedObject as? String, let action = CommandAction(rawValue: raw) else { continue }
             item.title = Self.menuTitles[action] ?? action.label
@@ -245,8 +350,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         }
     }
 
+    public func menuWillOpen(_ menu: NSMenu) {
+        menuNeedsUpdate(menu)
+    }
+
     public func menuDidClose(_ menu: NSMenu) {
-        // Shortcuts are kept intact; `menuHasKeyEquivalent` returns false so closed menus never intercept keys.
+        for item in menu.items where item.representedObject is String {
+            item.keyEquivalent = ""
+            item.keyEquivalentModifierMask = []
+        }
     }
 
     /// Key presses never consult these menus (and never trigger menuNeedsUpdate).
@@ -311,7 +423,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         commanderView?.perform(action)
     }
 
-    @objc private func showOptions() {
+    @objc func showOptions() {
         optionsController.onOpenFTPManager = { [weak self] in
             self?.showWindow()
             self?.commanderView?.perform(.ftpConnect)
@@ -367,6 +479,23 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         win.center()
         if !windowAutosaveName.isEmpty { win.setFrameAutosaveName(windowAutosaveName) }
 
+        // Titlebar button accessory for instant UI debugging
+        let debugAccessory = NSTitlebarAccessoryViewController()
+        debugAccessory.layoutAttribute = .trailing
+        let accessoryStack = NSStackView()
+        accessoryStack.orientation = .horizontal
+        accessoryStack.spacing = 6
+        let openAllBtn = NSButton(title: "🐞 Open All UI Debug Windows", target: UIGallery.shared, action: #selector(UIGallery.openAllWindows))
+        openAllBtn.bezelStyle = .texturedRounded
+        openAllBtn.controlSize = .small
+        let closeAllBtn = NSButton(title: "✕ Close All", target: UIGallery.shared, action: #selector(UIGallery.closeAllGalleryWindows))
+        closeAllBtn.bezelStyle = .texturedRounded
+        closeAllBtn.controlSize = .small
+        accessoryStack.addView(openAllBtn, in: .trailing)
+        accessoryStack.addView(closeAllBtn, in: .trailing)
+        debugAccessory.view = accessoryStack
+        win.addTitlebarAccessoryViewController(debugAccessory)
+
         let home = FileManager.default.homeDirectoryForCurrentUser
         // Both panels open where they were when the app was last used.
         let model = CommanderModel(
@@ -402,6 +531,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
     /// Finder's "Open With → ClassicCommander" (and files dropped on the Dock icon): shown in the
     /// panel chosen in Options → Operation.
     public func application(_ sender: NSApplication, open urls: [URL]) {
+        showWindow()
+        commanderView?.show(urls, in: settings.operation.finderOpensIn == .left ? .left : .right)
+    }
+
+    /// Finder context menu / Quick Actions / Services: "Open in ClassicCommander".
+    @objc public func openInClassicCommander(_ pboard: NSPasteboard, userData: String?, error: AutoreleasingUnsafeMutablePointer<NSString?>) {
+        let urls: [URL] = (pboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL]) ?? []
+        guard !urls.isEmpty else { return }
         showWindow()
         commanderView?.show(urls, in: settings.operation.finderOpensIn == .left ? .left : .right)
     }

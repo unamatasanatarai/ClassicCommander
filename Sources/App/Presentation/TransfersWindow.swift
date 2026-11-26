@@ -4,7 +4,7 @@ import AppKit
 /// and each file as pending, copying, copied, skipped or failed. Cancel stops a job (nothing
 /// unfinished is reported as done); Retry re-runs the failed files, resuming partial ones where
 /// the server allows. "Remove completed" takes finished files and jobs off the lists at once.
-public final class TransfersWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
+public final class TransfersWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSSplitViewDelegate {
     private let manager: TransferManager
     let table = NSTableView()
     /// The files of the selected job.
@@ -15,21 +15,48 @@ public final class TransfersWindowController: NSWindowController, NSTableViewDat
     var sizeFormat: SizeFormat = .readable { didSet { refresh() } }
     /// Rows of `files`: indexes into the selected job's items (completed ones left out when removing them).
     private(set) var fileRows: [Int] = []
+    private let allDoneBadge = NSTextField(labelWithString: "")
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let retryButton = NSButton(title: "Retry failed", target: nil, action: nil)
     private let clearButton = NSButton(title: "Clear finished", target: nil, action: nil)
+    private var monitor: Any?
 
     init(manager: TransferManager, defaults: UserDefaults = .standard) {
         self.manager = manager
         self.defaults = defaults
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 520), styleMask: [.titled, .closable, .resizable, .miniaturizable],
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 320), styleMask: [.titled, .closable, .resizable, .miniaturizable],
                               backing: .buffered, defer: true)
         window.title = AppWindows.title("Queue")
         AppWindows.style(window)
+        window.minSize = NSSize(width: 580, height: 240)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.contentView = build()
         window.setFrameAutosaveName("Transfers")
+        setupKeyMonitor()
+    }
+
+    deinit {
+        if let monitor = monitor { NSEvent.removeMonitor(monitor) }
+    }
+
+    private func setupKeyMonitor() {
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self, let win = self.window, win.isKeyWindow else { return event }
+            if self.handleKey(event) { return nil }
+            return event
+        }
+    }
+
+    func handleKey(_ event: NSEvent) -> Bool {
+        if event.keyCode == 53 { // Escape
+            let active = manager.jobs.contains { TransferManager.isUnfinished($0) }
+            if !active {
+                close()
+                return true
+            }
+        }
+        return false
     }
 
     @available(*, unavailable)
@@ -58,7 +85,7 @@ public final class TransfersWindowController: NSWindowController, NSTableViewDat
         scroll.hasVerticalScroller = true
         scroll.borderType = .bezelBorder
 
-        for (id, title, width) in [("state", "Status", 140), ("file", "File", 560), ("size", "Size", 110)] {
+        for (id, title, width) in [("state", "Status", 175), ("file", "File", 530), ("size", "Size", 110)] {
             let c = NSTableColumn(identifier: .init(id))
             c.title = title
             c.width = CGFloat(width)
@@ -76,36 +103,101 @@ public final class TransfersWindowController: NSWindowController, NSTableViewDat
         removeCompletedBox.action = #selector(removeCompletedToggled)
         removeCompletedBox.state = defaults.bool(forKey: "queue.removeCompleted") ? .on : .off
 
+        allDoneBadge.font = .systemFont(ofSize: 11, weight: .semibold)
+        allDoneBadge.textColor = .systemGreen
+        allDoneBadge.alignment = .left
+
         for (b, sel) in [(cancelButton, #selector(cancelSelected)), (retryButton, #selector(retrySelected)), (clearButton, #selector(clearFinished))] {
             b.bezelStyle = .rounded
             b.target = self
             b.action = sel
         }
-        let buttons = NSStackView(views: [cancelButton, retryButton, NSView(), removeCompletedBox, clearButton])
-        let stack = NSStackView(views: [scroll, NSTextField(labelWithString: "Files of the selected job:"), detailScroll, buttons])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 6
-        stack.edgeInsets = NSEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
-        stack.translatesAutoresizingMaskIntoConstraints = false
+        let buttons = NSStackView(views: [cancelButton, retryButton, allDoneBadge, NSView(), removeCompletedBox, clearButton])
+
+        let topContainer = NSView()
+        topContainer.addSubview(scroll)
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+
+        let detailLabel = NSTextField(labelWithString: "Files of the selected job:")
+        detailLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        detailLabel.textColor = .secondaryLabelColor
+
+        let bottomContainer = NSView()
+        let bottomStack = NSStackView(views: [detailLabel, detailScroll])
+        bottomStack.orientation = .vertical
+        bottomStack.alignment = .leading
+        bottomStack.spacing = 4
+        bottomStack.translatesAutoresizingMaskIntoConstraints = false
+        bottomContainer.addSubview(bottomStack)
+
+        let splitView = NSSplitView()
+        splitView.isVertical = false
+        splitView.dividerStyle = .thin
+        splitView.delegate = self
+        splitView.autosaveName = NSSplitView.AutosaveName("QueueSplitView")
+        splitView.translatesAutoresizingMaskIntoConstraints = false
+        splitView.addSubview(topContainer)
+        splitView.addSubview(bottomContainer)
+        splitView.setHoldingPriority(.defaultLow - 1, forSubviewAt: 0)
+        splitView.setHoldingPriority(.defaultLow, forSubviewAt: 1)
+
         let root = NSView()
-        root.addSubview(stack)
+        buttons.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(splitView)
+        root.addSubview(buttons)
+
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: root.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            scroll.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -20),
-            detailScroll.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -20),
-            buttons.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -20),
-            scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 150),
-            detailScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 180),
+            scroll.leadingAnchor.constraint(equalTo: topContainer.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: topContainer.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: topContainer.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: topContainer.bottomAnchor),
+
+            bottomStack.leadingAnchor.constraint(equalTo: bottomContainer.leadingAnchor),
+            bottomStack.trailingAnchor.constraint(equalTo: bottomContainer.trailingAnchor),
+            bottomStack.topAnchor.constraint(equalTo: bottomContainer.topAnchor, constant: 4),
+            bottomStack.bottomAnchor.constraint(equalTo: bottomContainer.bottomAnchor),
+            detailLabel.widthAnchor.constraint(equalTo: bottomStack.widthAnchor),
+            detailScroll.widthAnchor.constraint(equalTo: bottomStack.widthAnchor),
+
+            splitView.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
+            splitView.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
+            splitView.topAnchor.constraint(equalTo: root.topAnchor, constant: 10),
+            splitView.bottomAnchor.constraint(equalTo: buttons.topAnchor, constant: -8),
+
+            buttons.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
+            buttons.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
+            buttons.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10),
+            buttons.heightAnchor.constraint(equalToConstant: 24),
+
+            topContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 60),
+            bottomContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 60),
         ])
         return root
     }
 
+    // MARK: NSSplitViewDelegate
+
+    public func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+        return 60
+    }
+
+    public func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+        return max(60, splitView.bounds.height - 70)
+    }
+
+    public func splitView(_ splitView: NSSplitView, effectiveRect proposedEffectiveRect: NSRect, forDrawnRect drawnRect: NSRect, ofDividerAt dividerIndex: Int) -> NSRect {
+        return drawnRect.insetBy(dx: 0, dy: -4)
+    }
+
+    public func splitView(_ splitView: NSSplitView, resizeSubviewsWithOldSize oldSize: NSSize) {
+        splitView.adjustSubviews()
+    }
+
     var selectedJob: TransferJob? {
-        manager.jobs.indices.contains(table.selectedRow) ? manager.jobs[table.selectedRow] : manager.jobs.last
+        if manager.jobs.indices.contains(table.selectedRow) {
+            return manager.jobs[table.selectedRow]
+        }
+        return manager.jobs.first { TransferManager.isUnfinished($0) } ?? manager.jobs.last
     }
 
     /// Redraws rows and the details of the selected job (called on every progress update).
@@ -115,6 +207,9 @@ public final class TransfersWindowController: NSWindowController, NSTableViewDat
         table.reloadData()
         if selected >= 0 && selected < manager.jobs.count {
             table.selectRowIndexes(IndexSet(integer: selected), byExtendingSelection: false)
+        } else if !manager.jobs.isEmpty {
+            let defaultIdx = manager.jobs.firstIndex(where: { TransferManager.isUnfinished($0) }) ?? (manager.jobs.count - 1)
+            table.selectRowIndexes(IndexSet(integer: defaultIdx), byExtendingSelection: false)
         }
         showDetails()
     }
@@ -124,14 +219,40 @@ public final class TransfersWindowController: NSWindowController, NSTableViewDat
             fileRows = []
             files.reloadData()
             cancelButton.isEnabled = false
+            cancelButton.title = "Cancel"
             retryButton.isEnabled = false
+            updateAllDoneStatus()
             return
         }
         let hideDone = removeCompletedBox.state == .on
         fileRows = job.items.indices.filter { !(hideDone && job.results[$0] == .done) }
         files.reloadData()
-        cancelButton.isEnabled = TransferManager.isUnfinished(job)
+        let isCancelling = job.cancelFlag.isCancelled && job.state != .cancelled
+        cancelButton.isEnabled = TransferManager.isUnfinished(job) && !isCancelling
+        cancelButton.title = isCancelling ? "Cancelling…" : "Cancel"
         retryButton.isEnabled = (job.state == .finished || job.state == .cancelled) && job.failedCount > 0
+
+        updateAllDoneStatus()
+    }
+
+    private func updateAllDoneStatus() {
+        if manager.jobs.isEmpty {
+            allDoneBadge.stringValue = ""
+            return
+        }
+        let hasUnfinished = manager.jobs.contains { TransferManager.isUnfinished($0) }
+        if !hasUnfinished {
+            let totalFailed = manager.jobs.reduce(0) { $0 + $1.failedCount }
+            if totalFailed > 0 {
+                allDoneBadge.textColor = .systemOrange
+                allDoneBadge.stringValue = "● Finished (\(totalFailed) failed) — Press Esc to close"
+            } else {
+                allDoneBadge.textColor = .systemGreen
+                allDoneBadge.stringValue = "● All transfers done — Press Esc to close"
+            }
+        } else {
+            allDoneBadge.stringValue = ""
+        }
     }
 
     /// "Pending", "Copying 45 %", "Copied", "Moved", "Skipped: …", "Failed: …", "Not done".
@@ -139,11 +260,14 @@ public final class TransfersWindowController: NSWindowController, NSTableViewDat
         switch job.results[index] {
         case .pending:
             if job.active.contains(index) {
+                if job.cancelFlag.isCancelled {
+                    return ("Cancelling…", .systemOrange)
+                }
                 let size = job.items[index].size
                 let percent = size > 0 ? " \(Int(100 * Double(job.partial[index] ?? 0) / Double(size))) %" : "…"
                 return ((job.isMove ? "Moving" : "Copying") + percent, .systemBlue)
             }
-            return job.state == .cancelled ? ("Not done", .secondaryLabelColor) : ("Pending", .secondaryLabelColor)
+            return (job.cancelFlag.isCancelled || job.state == .cancelled) ? ("Not done", .secondaryLabelColor) : ("Pending", .secondaryLabelColor)
         case .done: return (job.items[index].isFolder ? "Created" : (job.isMove ? "Moved" : "Copied"), .systemGreen)
         case .skipped(let why): return ("Skipped: \(why)", .systemOrange)
         case .failed(let why): return ("Failed: \(why)", .systemRed)
@@ -158,6 +282,7 @@ public final class TransfersWindowController: NSWindowController, NSTableViewDat
     @objc private func cancelSelected() {
         guard let job = selectedJob else { return }
         manager.cancel(job)
+        refresh()
     }
 
     @objc private func retrySelected() {
@@ -189,7 +314,7 @@ public final class TransfersWindowController: NSWindowController, NSTableViewDat
             bar.isIndeterminate = false
             bar.minValue = 0
             bar.maxValue = Double(max(1, job.bytesTotal))
-            bar.doubleValue = job.state == .finished && job.failedCount == 0 ? bar.maxValue : Double(job.bytesDone)
+            bar.doubleValue = job.state == .finished && job.failedCount == 0 ? bar.maxValue : Double(job.bytesProcessed)
             bar.controlSize = .small
             return bar
         case "status":
@@ -201,7 +326,7 @@ public final class TransfersWindowController: NSWindowController, NSTableViewDat
             let text = job.state == .queued ? "" : "\(f.compact(Int64(job.speed)))/s · \(time / 60):\(String(format: "%02d", time % 60))"
             return NSTextField(labelWithString: text)
         default:
-            let label = NSTextField(labelWithString: "\(job.title)   (\(f.size(job.bytesDone, as: sizeFormat)) of \(f.size(job.bytesTotal, as: sizeFormat)))")
+            let label = NSTextField(labelWithString: "\(job.title)   (\(f.size(job.bytesProcessed, as: sizeFormat)) of \(f.size(job.bytesTotal, as: sizeFormat)))")
             label.lineBreakMode = .byTruncatingMiddle
             return label
         }

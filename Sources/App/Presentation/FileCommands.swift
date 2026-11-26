@@ -256,24 +256,50 @@ public final class FileCommands {
         guard !planned.isEmpty else { return }
         source?.model.clearMarks()   // Select → Restore Selection brings them back
         let title = "\(verb) \(Self.describe(items)) → \(create?.path ?? pairs.first?.1.deletingLastPathComponent().path ?? "")"
+        let cancelFlag = CancelFlag()
+        var progressWindow: TransferProgressWindowController?
+        if runInBackground && !answer.queue {
+            let fromDesc = items.first?.name ?? ""
+            let toDesc = create?.path ?? pairs.first?.1.deletingLastPathComponent().path ?? ""
+            let pw = TransferProgressWindowController(title: verb, from: fromDesc, to: toDesc,
+                                                      cancelFlag: cancelFlag, onCancel: nil) { [weak self] in
+                self?.commander?.ftp.transfersWindow.present()
+            }
+            progressWindow = pw
+            pw.present()
+        }
+
         let work = { [weak self] in
-            let result = Result { try TransferPlanner.plan(planned, move: move, mask: answer.fileMask) }
-            let finish: () -> Void = { self?.enqueue(result, title: title, create: create, move: move, answer: answer) }
+            let result = Result { try TransferPlanner.plan(planned, move: move, mask: answer.fileMask, cancel: cancelFlag) }
+            let finish: () -> Void = { self?.enqueue(result, title: title, create: create, move: move, answer: answer,
+                                                     existingProgressWindow: progressWindow, cancelFlag: cancelFlag) }
             if self?.runInBackground == true { DispatchQueue.main.async(execute: finish) } else { finish() }
         }
         if runInBackground { planning.async(execute: work) } else { work() }
     }
 
     /// Hands a planned copy or move to the queue (the queue window shows it if it takes a while).
-    private func enqueue(_ result: Result<TransferPlanner.Plan, Error>, title: String, create: URL?, move: Bool, answer: TransferAnswer) {
-        guard let commander = commander else { return }
+    private func enqueue(_ result: Result<TransferPlanner.Plan, Error>, title: String, create: URL?, move: Bool, answer: TransferAnswer,
+                         existingProgressWindow: TransferProgressWindowController? = nil, cancelFlag: CancelFlag? = nil) {
+        guard let commander = commander else {
+            existingProgressWindow?.close()
+            return
+        }
+        if cancelFlag?.isCancelled == true {
+            existingProgressWindow?.close()
+            return
+        }
         switch result {
         case .failure(let error):
-            var report = OperationReport()
-            report.errors = [error.localizedDescription]
-            prompts.showProblems(title: "\(move ? "Move" : "Copy") problems", report: report)
+            existingProgressWindow?.close()
+            if !(error is FTPError && (error as? FTPError) == .cancelled) {
+                var report = OperationReport()
+                report.errors = [error.localizedDescription]
+                prompts.showProblems(title: "\(move ? "Move" : "Copy") problems", report: report)
+            }
         case .success(let plan):
             guard !plan.items.isEmpty else {
+                existingProgressWindow?.close()
                 commander.showHint("No files match “\(answer.mask)”", duration: 2)
                 return NSSound.beep()
             }
@@ -284,7 +310,7 @@ public final class FileCommands {
             let job = TransferJob(title: title, items: items, isMove: move, sourceFoldersToRemove: move ? plan.foldersToRemove : [])
             job.verify = answer.verify
             job.waitsInQueue = answer.queue
-            commander.ftp.startJob(job, synchronously: !runInBackground)
+            commander.ftp.startJob(job, synchronously: !runInBackground, existingProgressWindow: existingProgressWindow)
         }
     }
 

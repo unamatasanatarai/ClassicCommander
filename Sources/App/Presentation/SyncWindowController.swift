@@ -21,7 +21,6 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
     let maskField = NSComboBox()
     private let leftBrowse = NSButton(title: ">>", target: nil, action: nil)
     private let rightBrowse = NSButton(title: ">>", target: nil, action: nil)
-    private let maskHelp = NSButton(title: "?", target: nil, action: nil)
     let compareButton = NSButton(title: "Compare", target: nil, action: nil)
     let onlySelectedBox = NSButton(checkboxWithTitle: "Only selected\n(in main window)", target: nil, action: nil)
     let asymmetricBox = NSButton(checkboxWithTitle: "Asymmetric", target: nil, action: nil)
@@ -104,14 +103,13 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
     // MARK: Building
 
     private func buildContent() -> NSView {
-        let buttons = [leftBrowse, rightBrowse, maskHelp, compareButton, synchronizeButton, closeButton]
+        let buttons = [leftBrowse, rightBrowse, compareButton, synchronizeButton, closeButton]
         for b in buttons {
             b.bezelStyle = .rounded
             b.target = self
             b.action = #selector(buttonPressed(_:))
         }
-        for b in [leftBrowse, rightBrowse, maskHelp] { b.widthAnchor.constraint(equalToConstant: 40).isActive = true }
-        compareButton.keyEquivalent = "\r"
+        for b in [leftBrowse, rightBrowse] { b.widthAnchor.constraint(equalToConstant: 40).isActive = true }
         closeButton.keyEquivalent = "\u{1b}"
         for f in [leftPath, rightPath] { f.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true }
         maskField.widthAnchor.constraint(equalToConstant: 150).isActive = true
@@ -139,18 +137,19 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         ]
         for (b, color, tip) in toggles {
             b.setButtonType(.pushOnPushOff)
-            b.bezelStyle = .regularSquare
+            b.bezelStyle = .recessed
+            b.showsBorderOnlyWhileMouseInside = false
             b.state = .on
             b.toolTip = tip
             b.target = self
             b.action = #selector(filterChanged)
             if b.title.count == 1 {
                 b.attributedTitle = NSAttributedString(string: b.title, attributes: [
-                    .foregroundColor: color, .font: NSFont.boldSystemFont(ofSize: 16),
+                    .foregroundColor: color, .font: NSFont.boldSystemFont(ofSize: 15),
                 ])
                 b.widthAnchor.constraint(equalToConstant: 34).isActive = true
             } else {
-                b.font = .boldSystemFont(ofSize: 12)
+                b.font = .systemFont(ofSize: 11, weight: .medium)
                 b.widthAnchor.constraint(equalToConstant: 96).isActive = true
             }
         }
@@ -199,7 +198,7 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
 
-        let pathsRow = NSStackView(views: [leftPath, leftBrowse, maskField, maskHelp, rightPath, rightBrowse])
+        let pathsRow = NSStackView(views: [leftPath, leftBrowse, maskField, rightPath, rightBrowse])
         pathsRow.spacing = 6
         let controlsRow = NSStackView(views: [compareColumn, options, showBox, spinner, NSView(), actions])
         controlsRow.alignment = .top
@@ -618,7 +617,6 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         case closeButton: window?.performClose(nil)
         case leftBrowse: browse(into: leftPath)
         case rightBrowse: browse(into: rightPath)
-        case maskHelp: showMaskHelp()
         default: break
         }
     }
@@ -658,16 +656,6 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         }
     }
 
-    private func showMaskHelp() {
-        let alert = NSAlert()
-        alert.messageText = "File filter"
-        alert.informativeText = """
-            Which files are compared:  *.*  (all),  *.txt;*.doc  (several masks),  \
-            * | *.tmp;*.bak  (all except the masks after |). Folders are always walked.
-            """
-        Modal.sheet(alert, for: window)
-    }
-
     public func windowWillClose(_ notification: Notification) {
         cancelFlag?.cancel()
         saveOptions()
@@ -695,7 +683,12 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         case .leftName: text = r.left == nil ? "" : EntryFormatter.visible(r.path)
         case .leftSize: text = size(r.left); alignment = .right
         case .leftDate: text = date(r.left)
-        case .action: text = r.symbol; alignment = .center
+        case .action:
+            if r.action == .deleteLeft || r.action == .deleteRight {
+                return makeDeleteActionView(for: r.action, row: r)
+            }
+            text = r.symbol
+            alignment = .center
         case .rightDate: text = date(r.right)
         case .rightSize: text = size(r.right); alignment = .right
         case .rightName: text = r.right == nil ? "" : EntryFormatter.visible(r.path)
@@ -706,6 +699,34 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         label.textColor = Self.color(for: r)
         if id == .action { label.font = .boldSystemFont(ofSize: 15) }
         return label
+    }
+
+    private func makeDeleteActionView(for action: SyncAction, row: SyncRow) -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        let iconView = NSImageView()
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        if let baseImg = NSImage(systemSymbolName: "trash", accessibilityDescription: "Delete")
+            ?? NSImage(systemSymbolName: "trash.fill", accessibilityDescription: "Delete") {
+            let conf = NSImage.SymbolConfiguration(pointSize: 11, weight: .bold)
+            iconView.image = baseImg.withSymbolConfiguration(conf) ?? baseImg
+            iconView.contentTintColor = .systemRed
+        }
+        iconView.toolTip = action == .deleteLeft
+            ? "Delete left file: \(row.path)"
+            : "Delete right file: \(row.path)"
+        container.addSubview(iconView)
+
+        NSLayoutConstraint.activate([
+            iconView.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 14),
+            iconView.heightAnchor.constraint(equalToConstant: 14),
+            action == .deleteLeft
+                ? iconView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 5)
+                : iconView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -5),
+        ])
+        return container
     }
 
     /// Row colours like Total Commander: → green, ← blue, ≠ and deletions red, = normal.
@@ -936,6 +957,26 @@ final class SyncConfirmationController: NSWindowController, NSTableViewDataSourc
         let text: String
         switch column?.identifier.rawValue {
         case "op":
+            if op.kind == .delete {
+                let stack = NSStackView()
+                stack.orientation = .horizontal
+                stack.spacing = 4
+                stack.alignment = .centerY
+                if let img = NSImage(systemSymbolName: "trash", accessibilityDescription: "Delete")
+                    ?? NSImage(systemSymbolName: "trash.fill", accessibilityDescription: "Delete") {
+                    let conf = NSImage.SymbolConfiguration(pointSize: 10, weight: .bold)
+                    let icon = NSImageView(image: img.withSymbolConfiguration(conf) ?? img)
+                    icon.contentTintColor = .systemRed
+                    icon.translatesAutoresizingMaskIntoConstraints = false
+                    icon.widthAnchor.constraint(equalToConstant: 12).isActive = true
+                    icon.heightAnchor.constraint(equalToConstant: 12).isActive = true
+                    stack.addArrangedSubview(icon)
+                }
+                let lbl = NSTextField(labelWithString: "Delete")
+                lbl.textColor = .systemRed
+                stack.addArrangedSubview(lbl)
+                return stack
+            }
             switch op.kind {
             case .copy: text = op.overwrites ? "Overwrite" : "Copy"
             case .makeDirectory: text = "Create dir"

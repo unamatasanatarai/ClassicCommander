@@ -17,12 +17,72 @@ enum Modal {
     @discardableResult
     static func run(_ alert: NSAlert) -> NSApplication.ModalResponse {
         if let answer = answerAlert { return answer(alert) }
+        style(alert)
         return alert.runModal()
     }
 
     /// Tests: the button code a modal window (Copy / Move dialog, "target file exists") ends with;
     /// the window is passed in so its fields can be filled first.
     static var answerWindow: ((NSWindow) -> NSApplication.ModalResponse)?
+
+    /// Alerts get the app's buttons (AppWindows.styleButtons), not the grey ones. An alert draws on
+    /// a translucent background that turns its buttons grey; a button with its own appearance is
+    /// drawn as a plain push button (the alert's own appearance, so light or dark still follows the theme).
+    static func style(_ alert: NSAlert) {
+        alert.layout()
+        AppWindows.styleButtons(in: alert.window)
+        let name = alert.window.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) ?? .aqua
+        for button in alert.buttons { button.appearance = NSAppearance(named: name) }
+
+        // Disable text selection on static label text fields inside the alert window
+        // to prevent unwanted selection highlights when opening.
+        func deselectLabels(in view: NSView) {
+            if let tf = view as? NSTextField, !tf.isEditable {
+                tf.isSelectable = false
+            }
+            view.subviews.forEach(deselectLabels(in:))
+        }
+        if let content = alert.window.contentView {
+            deselectLabels(in: content)
+        }
+
+        // Configure visual tab navigation order
+        var tabViews: [NSView] = []
+        if let acc = alert.accessoryView {
+            var accControls: [NSView] = []
+            func findControls(in v: NSView) {
+                if (v is NSControl) || v.canBecomeKeyView {
+                    accControls.append(v)
+                } else {
+                    v.subviews.forEach(findControls(in:))
+                }
+            }
+            findControls(in: acc)
+            tabViews.append(contentsOf: accControls.isEmpty ? [acc] : accControls)
+        }
+
+        // Sort buttons by visual reading order:
+        // If vertical layout (different Y positions): top-to-bottom (descending Y)
+        // If horizontal layout: left-to-right (ascending X)
+        let sortedButtons = alert.buttons.sorted { b1, b2 in
+            let f1 = b1.convert(b1.bounds, to: nil)
+            let f2 = b2.convert(b2.bounds, to: nil)
+            if abs(f1.origin.y - f2.origin.y) > 5 {
+                return f1.origin.y > f2.origin.y
+            }
+            return f1.origin.x < f2.origin.x
+        }
+        tabViews.append(contentsOf: sortedButtons)
+
+        if !tabViews.isEmpty {
+            AppWindows.setTabOrder(tabViews, in: alert.window)
+            if alert.accessoryView != nil {
+                alert.window.initialFirstResponder = tabViews.first
+            } else if let firstBtn = sortedButtons.first {
+                alert.window.initialFirstResponder = firstBtn
+            }
+        }
+    }
 
     /// Shows a window modally until one of its buttons stops it.
     static func runWindow(_ window: NSWindow) -> NSApplication.ModalResponse {
@@ -33,6 +93,7 @@ enum Modal {
     /// Shows an alert as a sheet on `window` (modally without one) and reports the button pressed.
     static func sheet(_ alert: NSAlert, for window: NSWindow?, completion: ((NSApplication.ModalResponse) -> Void)? = nil) {
         if let answer = answerAlert { completion?(answer(alert)); return }
+        style(alert)
         if let window = window {
             alert.beginSheetModal(for: window, completionHandler: completion)
         } else {
@@ -124,6 +185,15 @@ enum Modal {
     static func popUp(_ menu: NSMenu, at point: NSPoint, in view: NSView, selecting item: NSMenuItem? = nil) {
         if let poppedUp = poppedUp { poppedUp(menu); return }
         menu.popUp(positioning: item, at: point, in: view)
+    }
+
+    /// Shows a context menu that opens while the mouse button is still held (long right click) and
+    /// stays open when it is released (an NSMenu would close: see HeldMenu).
+    static func popUpHeld(_ menu: NSMenu, at point: NSPoint, in view: NSView) {
+        if let poppedUp = poppedUp { poppedUp(menu); return }
+        guard let window = view.window else { return }
+        let screenPoint = window.convertPoint(toScreen: view.convert(point, to: nil))
+        HeldMenu(menu, at: screenPoint, appearance: view.effectiveAppearance).run()
     }
 
     /// Tests: the items of a drag that would have started.

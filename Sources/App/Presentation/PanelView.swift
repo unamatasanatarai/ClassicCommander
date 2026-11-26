@@ -612,7 +612,7 @@ public final class PanelView: NSView {
         holdTimer = timer
     }
 
-    /// Fills the bar; when full (ended), marks `holdReady` so releasing opens the menu.
+    /// Fills the bar; when full (ended), the menu shows immediately (not after release).
     func holdTick(now: Date) {
         guard holdRow != nil, !holdReady else { return }
         holdProgress = CGFloat(min(1, now.timeIntervalSince(holdStart) / max(0.05, contextMenuHold)))
@@ -620,12 +620,9 @@ public final class PanelView: NSView {
         guard holdProgress >= 1 else { return }
         holdReady = true
         pendingRightSelectionRow = nil
-        holdTimer?.invalidate()
-        holdTimer = nil
-    }
-
-    func releaseHold() {
+        let point = holdPoint
         cancelHold()
+        onContextMenu?(point)
     }
 
     func cancelHold() {
@@ -656,14 +653,6 @@ public final class PanelView: NSView {
     }
 
     public override func rightMouseUp(with event: NSEvent) {
-        if holdReady {
-            let point = holdPoint
-            holdReady = false
-            pendingRightSelectionRow = nil
-            cancelHold()
-            onContextMenu?(point)
-            return
-        }
         if let row = pendingRightSelectionRow {
             pendingRightSelectionRow = nil
             beginRightSelection(atRow: row)

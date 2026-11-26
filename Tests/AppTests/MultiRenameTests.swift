@@ -147,6 +147,13 @@ enum MultiRenameTests {
             let defaults = UserDefaults(suiteName: suite)!
             defer { defaults.removePersistentDomain(forName: suite) }
             let tool = MultiRenameWindowController(commander: view, defaults: defaults)
+            try expect(tool.nameField.nextKeyView === tool.extField, "name -> ext")
+            try expect(tool.extField.nextKeyView === tool.searchField, "ext -> search")
+            try expect(tool.searchField.nextKeyView === tool.replaceField, "search -> replace")
+            try expect(tool.digitsPopup.nextKeyView === tool.startButton, "digits -> start")
+            try expect(tool.startButton.nextKeyView === tool.undoButton, "start -> undo")
+            try expect(tool.undoButton.nextKeyView === tool.closeButton, "undo -> close")
+            try expect(tool.closeButton.nextKeyView === tool.nameField, "close -> name")
             let panel = view.leftView
             panel.model.setMarks(["one.txt", "two.txt"])
             tool.present(for: panel)

@@ -10,6 +10,7 @@ public final class ListerWindowController: NSWindowController, NSWindowDelegate,
     private let files: [URL]
     private(set) var index: Int
     var onClose: ((ListerWindowController) -> Void)?
+    public var onNavigate: ((URL) -> Void)?
 
     public private(set) var mode: ListerMode = .text
     public private(set) var encoding: ListerEncoding = .auto
@@ -247,6 +248,7 @@ public final class ListerWindowController: NSWindowController, NSWindowDelegate,
         guard files.indices.contains(next) else { return NSSound.beep() }
         index = next
         load()
+        onNavigate?(url)
     }
 
     // MARK: Keys

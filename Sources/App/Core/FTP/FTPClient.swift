@@ -379,6 +379,11 @@ public final class FTPClient: RemoteClient {
     public func removeDirectory(_ path: String) throws { try quote(["RMD \(path)"], in: parent(path)) }
     public func rename(_ from: String, to: String) throws { try quote(["RNFR \(from)", "RNTO \(to)"], in: parent(from)) }
 
+    public func chmod(_ mode: Int, of path: String) throws {
+        let octal = String(mode & 0o777, radix: 8)
+        try quote(["SITE CHMOD \(octal) \(path)"], in: parent(path))
+    }
+
     func parent(_ path: String) -> String {
         let p = (path as NSString).deletingLastPathComponent
         return p.isEmpty ? "/" : p

@@ -255,6 +255,231 @@ enum SelectTests {
             try expect(remoteless.items.contains { $0.title == "Open in Finder" }, "local folder: Finder and Terminal offered")
         }
 
+        testRunner("One button style everywhere: push buttons only, groups share a width, tabs, key windows, alerts") {
+            func push(_ t: String) -> NSButton { NSButton(title: t, target: nil, action: nil) }
+            let small = push("A"), wide = push("A much longer title")
+            small.controlSize = .small
+            small.bezelStyle = .texturedRounded
+            wide.font = .boldSystemFont(ofSize: 15)
+            let check = NSButton(checkboxWithTitle: "Check", target: nil, action: nil)
+            let popUp = NSPopUpButton()
+            let stack = NSStackView(views: [small, wide, check, popUp])
+            let g1 = push("x"), g2 = push("Column mate")
+            let grid = NSGridView(views: [[g1], [g2]])
+            let coloured = push("→")
+            coloured.attributedTitle = NSAttributedString(string: "→", attributes: [.foregroundColor: NSColor.systemGreen,
+                                                                                   .font: NSFont.boldSystemFont(ofSize: 16)])
+            let tabs = NSTabView()
+            let shown = NSTabViewItem(identifier: "a"), hidden = NSTabViewItem(identifier: "b")
+            shown.view = NSView()
+            let onHiddenTab = push("On another tab")
+            let page = NSView()
+            page.addSubview(onHiddenTab)
+            hidden.view = page
+            tabs.addTabViewItem(shown)
+            tabs.addTabViewItem(hidden)
+            let root = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+            for v in [stack, grid, coloured, tabs] { root.addSubview(v) }
+
+            AppWindows.styleButtons(in: root)
+            AppWindows.styleButtons(in: root)   // again: nothing doubles
+            try expect(small.bezelStyle == .rounded && small.controlSize == .regular, "small textured button made regular")
+            try expect(wide.font == .systemFont(ofSize: NSFont.systemFontSize), "bold title made regular")
+            try expect(check.bezelStyle != .rounded && !(AppWindows.isPushButton(check)) && !AppWindows.isPushButton(popUp), "checkbox and pop-up left alone")
+            let widths = { (b: NSButton) in b.constraints.filter { $0.identifier == AppWindows.equalWidthID } }
+            try expect(widths(small).count == 1 && widths(small)[0].constant == wide.intrinsicContentSize.width, "stack mates as wide as the widest")
+            try expect(widths(g1).count == 1 && widths(g1)[0].constant == g2.intrinsicContentSize.width, "grid column mates too")
+            try expect(widths(coloured).isEmpty && AppWindows.groupKey(of: coloured) == nil, "a lone button keeps its width")
+            try expect(coloured.attributedTitle.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor == .systemGreen,
+                       "coloured title kept")
+            try expect(onHiddenTab.bezelStyle == .rounded, "buttons on other tabs too")
+
+            // A window becoming key gets the style (windows built anywhere, buttons added later).
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100), styleMask: [.titled], backing: .buffered, defer: false)
+            defer { window.close() }
+            let later = push("Later")
+            later.controlSize = .mini
+            window.contentView?.addSubview(later)
+            AppWindows.styleButtonsWhenShown()
+            AppWindows.styleButtonsWhenShown()
+            NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+            try expect(later.controlSize == .regular, "styled when the window became key")
+
+            // Alerts: the same buttons, drawn as plain push buttons on the alert's background.
+            let alert = NSAlert()
+            alert.addButton(withTitle: "Delete")
+            alert.addButton(withTitle: "Cancel")
+            Modal.style(alert)
+            try expect(alert.buttons.allSatisfy { $0.appearance != nil && $0.bezelStyle == .rounded }, "alert buttons styled")
+        }
+
+        testRunner("Held context menu: stays open on release, hover, submenus, keys, pick on release over an item") {
+            final class Target: NSObject {
+                var picked: [String] = []
+                @objc func pick(_ sender: NSMenuItem) { picked.append(sender.title) }
+            }
+            let target = Target()
+            func item(_ title: String) -> NSMenuItem {
+                let item = NSMenuItem(title: title, action: #selector(Target.pick(_:)), keyEquivalent: "")
+                item.target = target
+                return item
+            }
+            func move(_ type: NSEvent.EventType, _ p: NSPoint) -> NSEvent {
+                NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: 0, windowNumber: 0,
+                                   context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+            }
+            func key(_ code: UInt16, _ chars: String = "") -> NSEvent {
+                NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
+                                 characters: chars, charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code)!
+            }
+            func center(_ r: NSRect) -> NSPoint { NSPoint(x: r.midX, y: r.midY) }
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+            menu.addItem(item("Open"))
+            let off = item("Disabled")
+            off.isEnabled = false
+            off.image = NSImage(named: NSImage.folderName)
+            menu.addItem(off)
+            menu.addItem(.separator())
+            let sub = NSMenu()
+            sub.autoenablesItems = false
+            let app = item("App")
+            app.image = NSImage(named: NSImage.folderName)
+            sub.addItem(app)
+            sub.addItem(item("Other"))
+            let with = NSMenuItem(title: "Open With", action: nil, keyEquivalent: "")
+            with.submenu = sub
+            menu.addItem(with)
+            menu.addItem(item("Copy"))
+            let hidden = item("Hidden")
+            hidden.isHidden = true
+            menu.addItem(hidden)
+
+            let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1400, height: 900)
+            let start = NSPoint(x: screen.minX + 100, y: screen.maxY - 100)
+            let held = HeldMenu(menu, at: start)
+            let root = held.levels[0]
+            try expect(root.items.map(\.title) == ["Open", "Disabled", "", "Open With", "Copy"], "hidden left out: \(root.items.map(\.title))")
+            try expect(abs(root.window.frame.minX - start.x) < 1 && abs(root.window.frame.maxY - start.y) < 1, "top-left at the mouse")
+
+            // The release that ends the long click, and a release over an item the mouse never moved onto: still open.
+            held.handle(move(.rightMouseUp, start))
+            held.handle(move(.rightMouseUp, center(root.screenRect(ofRow: 0))))
+            try expect(!held.done && held.chosen == nil, "release does not close the menu")
+
+            // Hover: disabled and separator rows do not light up; a submenu row opens its submenu.
+            held.handle(move(.mouseMoved, center(root.screenRect(ofRow: 1))))
+            try expect(root.highlighted == nil, "disabled not highlighted")
+            held.handle(move(.rightMouseDragged, center(root.screenRect(ofRow: 0))))
+            try expect(root.highlighted == 0, "dragging onto Open highlights it")
+            held.handle(move(.mouseMoved, center(root.screenRect(ofRow: 3))))
+            held.handle(move(.mouseMoved, center(root.screenRect(ofRow: 3))))
+            try expect(held.levels.count == 2 && root.highlighted == 3, "submenu opened once")
+            let child = held.levels[1]
+            try expect(child.window.frame.minX >= root.window.frame.maxX, "submenu to the right")
+            held.handle(move(.mouseMoved, center(child.screenRect(ofRow: 0))))
+            try expect(child.highlighted == 0 && held.levels.count == 2, "submenu item highlighted, submenu stays")
+            held.handle(move(.mouseMoved, NSPoint(x: screen.maxX + 5000, y: screen.maxY + 5000)))
+            try expect(child.highlighted == nil && root.highlighted == 3, "outside: the submenu item loses its highlight")
+            held.handle(move(.mouseMoved, center(root.screenRect(ofRow: 0))))
+            try expect(held.levels.count == 1 && root.highlighted == 0, "back on Open: submenu closed")
+
+            // Keys.
+            held.handle(key(125))
+            try expect(root.highlighted == 3, "↓ skips disabled and separator")
+            held.handle(key(124))
+            try expect(held.levels.count == 2 && held.levels[1].highlighted == 0, "→ enters the submenu")
+            held.handle(key(123))
+            try expect(held.levels.count == 1, "← leaves it")
+            held.handle(key(126))
+            held.handle(key(126))
+            try expect(root.highlighted == 0, "↑ stops at the first")
+            held.handle(key(124))
+            try expect(held.levels.count == 1, "→ without a submenu does nothing")
+            held.handle(key(125))
+            held.handle(key(36))
+            try expect(held.levels.count == 2, "Return on a submenu item opens it")
+            held.handle(key(0, "o"))
+            try expect(held.levels.count == 2 && held.levels[1].highlighted == 1, "typing selects in the submenu: Other")
+            held.handle(key(123))
+            held.handle(key(0, "c"))
+            try expect(held.levels.count == 1 && root.highlighted == 4, "typing selects Copy")
+            held.handle(key(0, "z"))
+            held.handle(key(0, ""))
+            try expect(root.highlighted == 4, "no match: unchanged")
+            held.handle(NSEvent.keyEvent(with: .keyUp, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
+                                         characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 0)!)
+            held.handle(NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0,
+                                           context: nil, subtype: 0, data1: 0, data2: 0)!)
+            try expect(!held.done, "other events keep it open")
+
+            // Drawing (highlighted, disabled with image, separator, submenu arrow).
+            root.view.highlighted = 3
+            for view in [root.view, child.view] {
+                if let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) { view.cacheDisplay(in: view.bounds, to: rep) }
+            }
+
+            // Click on Copy: press highlights, release picks; the action is sent after closing.
+            let copy = center(root.screenRect(ofRow: 4))
+            held.handle(move(.leftMouseDown, copy))
+            held.handle(move(.leftMouseUp, copy))
+            try expect(held.done && held.chosen?.title == "Copy", "clicked Copy")
+            held.close()
+            held.perform()
+            try expect(target.picked == ["Copy"] && held.levels.isEmpty, "Copy performed")
+
+            // Return picks; Space with nothing highlighted does nothing; ↑ from nothing goes to the last.
+            let keys = HeldMenu(menu, at: start)
+            keys.handle(key(49))
+            keys.handle(key(126))
+            try expect(keys.levels[0].highlighted == 4 && !keys.done, "↑ from nothing: last")
+            keys.handle(key(36))
+            keys.run()   // already done: closes and performs
+            try expect(target.picked == ["Copy", "Copy"], "Return picked Copy")
+
+            // Dismissing: Esc, a click outside, the app deactivating; nothing is performed.
+            let esc = HeldMenu(menu, at: start)
+            esc.handle(key(53))
+            let outside = HeldMenu(menu, at: start)
+            outside.handle(move(.rightMouseDown, NSPoint(x: screen.maxX + 5000, y: 0)))
+            let away = HeldMenu(menu, at: start)
+            away.handle(NSEvent.otherEvent(with: .appKitDefined, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
+                                           subtype: NSEvent.EventSubtype.applicationDeactivated.rawValue, data1: 0, data2: 0)!)
+            try expect(esc.done && outside.done && away.done, "dismissed")
+            esc.perform()
+            try expect(target.picked.count == 2, "nothing performed")
+
+            // Near the bottom-right corner: kept on the screen; the submenu opens to the left.
+            let corner = HeldMenu(menu, at: NSPoint(x: screen.maxX - 10, y: screen.minY + 10))
+            let frame = corner.levels[0].window.frame
+            try expect(screen.contains(frame), "on the screen: \(frame) in \(screen)")
+            corner.handle(move(.mouseMoved, center(corner.levels[0].screenRect(ofRow: 3))))
+            try expect(corner.levels.count == 2 && corner.levels[1].window.frame.maxX <= frame.minX, "submenu to the left")
+            corner.close()
+
+            // The real loop: ends on a queued Esc, and when the app is not frontmost.
+            let loop = HeldMenu(menu, at: start)
+            loop.isActive = { true }
+            NSApp.postEvent(key(53, "\u{1b}"), atStart: true)
+            loop.run()
+            try expect(loop.done && loop.levels.isEmpty, "Esc ended the loop")
+            let inactive = HeldMenu(menu, at: start)
+            inactive.isActive = { false }
+            inactive.run()
+            try expect(inactive.done, "inactive app: closed")
+
+            // Modal: the hook, no window, and the real menu (closed by a queued Esc).
+            let saved = Modal.poppedUp
+            defer { Modal.poppedUp = saved }
+            Modal.poppedUp = nil
+            Modal.popUpHeld(menu, at: .zero, in: NSView())
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 200), styleMask: [.titled], backing: .buffered, defer: false)
+            defer { window.close() }
+            NSApp.postEvent(key(53, "\u{1b}"), atStart: true)
+            Modal.popUpHeld(menu, at: NSPoint(x: 10, y: 10), in: window.contentView!)
+            try expect(target.picked.count == 2, "real menu dismissed")
+        }
+
         testRunner("Quick locations: ▼ / ⌃D menu, save current location, go there, rename, remove") {
             let left = try CoverageTests.tempDir("HotLeft"), right = try CoverageTests.tempDir("HotRight")
             defer { try? FileManager.default.removeItem(at: left); try? FileManager.default.removeItem(at: right) }

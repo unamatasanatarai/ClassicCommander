@@ -1,7 +1,7 @@
 import AppKit
 
 /// Find Files (⌥7), laid out like Total Commander's dialog:
-///   tabs General / Advanced, Start search / Cancel / Help on the right,
+///   tabs General / Advanced, Start search / Cancel on the right,
 ///   "Search results:" list (first line is the summary), View / New search / Go to file /
 ///   Feed to listbox under it, and a status line at the bottom.
 /// Searches run in the background and results appear as they are found; Cancel stops a running
@@ -84,7 +84,6 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
     let tabs = NSTabView()
     let startButton = NSButton(title: "Start search", target: nil, action: nil)
     let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
-    private let helpButton = NSButton(title: "Help", target: nil, action: nil)
     let table = ResultsTableView()
     let statusLabel = NSTextField(labelWithString: "")
     let viewButton = NSButton(title: "View", target: nil, action: nil)
@@ -177,6 +176,9 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
     }
 
     private func buildContent() -> NSView {
+        tabs.drawsBackground = false
+        tabs.tabViewBorderType = .none
+
         for (title, view) in [("General", buildGeneral()), ("Advanced", buildAdvanced())] {
             let item = NSTabViewItem(identifier: title)
             item.label = title
@@ -193,16 +195,16 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
             tabs.addTabViewItem(item)
         }
 
-        let allButtons = [startButton, cancelButton, helpButton, viewButton, newSearchButton, goToButton, feedButton,
+        let allButtons = [startButton, cancelButton, viewButton, newSearchButton, goToButton, feedButton,
                           browseButton, drivesButton]
         wire(allButtons, #selector(buttonPressed(_:)))
-        for b in allButtons { b.bezelStyle = .rounded }
+        for b in allButtons { b.bezelStyle = .regularSquare }
         startButton.keyEquivalent = "\r"
         cancelButton.keyEquivalent = "\u{1b}"
-        let side = NSStackView(views: [startButton, cancelButton, helpButton])
+        let side = NSStackView(views: [startButton, cancelButton])
         side.orientation = .vertical
         side.spacing = 6
-        for b in [startButton, cancelButton, helpButton] { b.widthAnchor.constraint(equalToConstant: 128).isActive = true }
+        for b in [startButton, cancelButton] { b.widthAnchor.constraint(equalToConstant: 128).isActive = true }
 
         // Results: one column of paths, the summary as the first line (as in Total Commander).
         let column = NSTableColumn(identifier: .init("path"))
@@ -334,7 +336,7 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
             p.datePickerStyle = .textField
             p.datePickerElements = .yearMonthDay
             p.dateValue = Date()
-            b.bezelStyle = .rounded
+            b.bezelStyle = .regularSquare
             b.target = self
             b.action = #selector(showCalendar(_:))
         }
@@ -552,7 +554,6 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
         switch sender {
         case startButton: startSearch()
         case cancelButton: cancelPressed()
-        case helpButton: showHelp()
         case viewButton: viewFile()
         case newSearchButton: newSearch()
         case goToButton: goToFile()
@@ -739,7 +740,13 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
         }
         let files = rows.filter { !$0.item.isDirectory && !$0.item.url.isRemoteLocation }.map(\.item.url)
         let index = files.firstIndex(of: row.item.url) ?? 0
-        return commander.openLister(files: files, index: index)
+        return commander.openLister(files: files, index: index, onNavigate: { [weak self] url in
+            guard let self = self else { return }
+            if let idx = self.rows.firstIndex(where: { $0.item.url == url }) {
+                self.table.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
+                self.table.scrollRowToVisible(idx)
+            }
+        })
     }
 
     /// Keys in the results list: the View shortcut opens Lister, Return goes to the file.
@@ -800,27 +807,6 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
 
     @objc private func calendarPicked() {
         calendarTarget?.dateValue = calendar.dateValue
-    }
-
-    private func showHelp() {
-        let alert = NSAlert()
-        alert.messageText = "Find Files"
-        alert.informativeText = """
-            Search for: masks like *.txt;*.jpg. Text without * or ? finds names containing it. \
-            Masks after | exclude (*.log | old*). With RegEx ticked the text is a regular expression.
-
-            Search in: one or more folders separated by ;. “>>” picks folders, “Drives” a volume (⌥ adds it).
-
-            Find text: searches file contents in the ticked charsets. Hex takes bytes like 4D 5A 90. \
-            Office xml looks inside docx, xlsx, pptx, odt, ods and odp.
-
-            Advanced: all ticked conditions must hold. Attribute boxes: – ignore, ✓ must have, empty must not have. \
-            Duplicates are grouped; “same contents” compares the bytes.
-
-            Results: double-click or Go to file jumps there; Feed to listbox shows all results in the panel; \
-            View opens Quick Look.
-            """
-        Modal.sheet(alert, for: window)
     }
 
     private func show(_ error: SearchValidationError) {

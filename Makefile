@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help setup build run kill test coverage dmg release revoke clean
+.PHONY: help setup build run kill test coverage crap crap-baseline dmg release revoke clean
 
 APP_NAME  ?= $(shell bash -c 'source ./scripts/config.sh && echo "$$APP_NAME"')
 BUNDLE_ID ?= $(shell bash -c 'source ./scripts/config.sh && echo "$$BUNDLE_ID"')
@@ -42,6 +42,14 @@ test:
 ## coverage: Run the tests with code coverage; fails unless every function and closure is called
 coverage:
 	@./scripts/coverage.sh --check
+
+## crap: Calculate CRAP risk scores for all methods and report high-risk functions
+crap:
+	@./tools/crap/run.sh
+
+## crap-baseline: Calculate CRAP scores and save tools/crap/baseline.json and baseline.html
+crap-baseline:
+	@./tools/crap/run.sh --baseline
 
 ## dmg: Build styled DMG distribution package
 dmg:

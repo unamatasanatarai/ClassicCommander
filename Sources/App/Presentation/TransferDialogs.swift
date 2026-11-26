@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 /// The Copy / Move dialog (5 / 6, and drops): target, "only files of type" with what that adds up
 /// to, Verify, and OK (Return) to start now, Queue (⌃2) to line it up, or Cancel (Esc).
@@ -13,6 +14,9 @@ final class TransferDialogController: NSWindowController, NSComboBoxDelegate {
     let maskField = NSComboBox()
     let statsLabel = NSTextField(labelWithString: "Counting…")
     let verifyBox = NSButton(checkboxWithTitle: "Verify (read each copy back and compare)", target: nil, action: nil)
+    let okButton = NSButton(title: "OK", target: nil, action: nil)
+    let queueButton = NSButton(title: "Queue (⌃2)", target: nil, action: nil)
+    let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private var counting: CancelFlag?
     /// The newest stats shown (tests wait for them).
     private(set) var stats: TransferStats?
@@ -33,7 +37,7 @@ final class TransferDialogController: NSWindowController, NSComboBoxDelegate {
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.contentView = build()
-        window.initialFirstResponder = targetField
+        AppWindows.setTabOrder([targetField, maskField, verifyBox, okButton, queueButton, cancelButton], in: window)
         recount()
     }
 
@@ -53,13 +57,16 @@ final class TransferDialogController: NSWindowController, NSComboBoxDelegate {
         statsLabel.textColor = .secondaryLabelColor
         statsLabel.alignment = .right
 
-        let okButton = NSButton(title: "OK", target: self, action: #selector(okPressed))
+        okButton.target = self
+        okButton.action = #selector(okPressed)
         okButton.keyEquivalent = "\r"
-        let queueButton = NSButton(title: "Queue (⌃2)", target: self, action: #selector(queuePressed))
+        queueButton.target = self
+        queueButton.action = #selector(queuePressed)
         queueButton.keyEquivalent = "2"
         queueButton.keyEquivalentModifierMask = .control
         queueButton.toolTip = "Add to the queue: runs after the queued jobs before it"
-        let cancelButton = NSButton(title: "Cancel", target: self, action: #selector(cancelPressed))
+        cancelButton.target = self
+        cancelButton.action = #selector(cancelPressed)
         cancelButton.keyEquivalent = "\u{1b}"
         for b in [okButton, queueButton, cancelButton] {
             b.bezelStyle = .rounded
@@ -172,12 +179,13 @@ final class ConflictDialogController: NSWindowController {
     init(conflict: TransferConflict, sizeFormat: SizeFormat) {
         self.conflict = conflict
         self.sizeFormat = sizeFormat
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 220), styleMask: [.titled], backing: .buffered, defer: true)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 260), styleMask: [.titled], backing: .buffered, defer: true)
         window.title = AppWindows.title("Target file exists")
         AppWindows.style(window)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.contentView = build()
+        AppWindows.setTabOrder(buttons, in: window)
     }
 
     @available(*, unavailable)
@@ -199,42 +207,96 @@ final class ConflictDialogController: NSWindowController {
 
     private func build() -> NSView {
         let title = NSTextField(labelWithString: "The target file exists")
-        title.font = .boldSystemFont(ofSize: 14)
+        title.font = .systemFont(ofSize: 14, weight: .bold)
+
         func block(_ heading: String, _ path: String, _ details: String) -> NSView {
+            let ext = (path as NSString).pathExtension.lowercased()
+            let type = UTType(filenameExtension: ext) ?? .data
+            let icon = NSWorkspace.shared.icon(for: ext.isEmpty ? .data : type)
+            icon.size = NSSize(width: 32, height: 32)
+            let iconView = NSImageView(image: icon)
+            iconView.translatesAutoresizingMaskIntoConstraints = false
+            iconView.widthAnchor.constraint(equalToConstant: 32).isActive = true
+            iconView.heightAnchor.constraint(equalToConstant: 32).isActive = true
+
             let h = NSTextField(labelWithString: heading)
             h.textColor = .secondaryLabelColor
+            h.font = .systemFont(ofSize: 11, weight: .bold)
+
             let p = NSTextField(labelWithString: path)
             p.lineBreakMode = .byTruncatingMiddle
-            p.font = .systemFont(ofSize: 13, weight: .medium)
+            p.font = .systemFont(ofSize: 12, weight: .medium)
             p.toolTip = path
+
             let d = NSTextField(labelWithString: details)
-            let stack = NSStackView(views: [h, p, d])
-            stack.orientation = .vertical
-            stack.alignment = .leading
-            stack.spacing = 2
-            return stack
+            d.textColor = .secondaryLabelColor
+            d.font = .systemFont(ofSize: 11)
+
+            let textStack = NSStackView(views: [h, p, d])
+            textStack.orientation = .vertical
+            textStack.alignment = .leading
+            textStack.spacing = 2
+
+            let row = NSStackView(views: [iconView, textStack])
+            row.alignment = NSLayoutConstraint.Attribute.centerY
+            row.spacing = 10
+            return row
         }
+
         let replace = block("Replace:", conflict.target.displayPath,
                             Self.describe(conflict.targetSize, conflict.targetDate, format: sizeFormat))
         let with = block("With:", conflict.source.displayPath,
                          Self.describe(conflict.sourceSize, conflict.sourceDate, format: sizeFormat))
+
         buttons = Self.buttons.enumerated().map { i, entry in
             let b = NSButton(title: entry.0, target: self, action: #selector(pressed(_:)))
-            b.bezelStyle = .rounded
+            b.bezelStyle = .regularSquare
             b.tag = 1000 + i
             return b
         }
         buttons[0].keyEquivalent = "\r"
-        buttons[buttons.count - 1].keyEquivalent = "\u{1b}"
-        let row1 = NSStackView(views: [buttons[0], buttons[1], buttons[4]])
-        row1.spacing = 8
-        let row2 = NSStackView(views: [buttons[2], buttons[3], buttons[5], buttons[6]])
-        row2.spacing = 8
-        let buttonStack = NSStackView(views: [row1, row2])
-        buttonStack.orientation = .vertical
-        buttonStack.alignment = .leading
-        buttonStack.spacing = 8
-        let stack = NSStackView(views: [title, replace, with, buttonStack])
+        buttons[1].keyEquivalent = "a"
+        buttons[1].keyEquivalentModifierMask = []
+        buttons[2].keyEquivalent = "s"
+        buttons[2].keyEquivalentModifierMask = []
+        buttons[3].keyEquivalent = "k"
+        buttons[3].keyEquivalentModifierMask = []
+        buttons[4].keyEquivalent = "o"
+        buttons[4].keyEquivalentModifierMask = []
+        buttons[5].keyEquivalent = "n"
+        buttons[5].keyEquivalentModifierMask = []
+        buttons[6].keyEquivalent = "\u{1b}"
+        buttons[6].keyEquivalentModifierMask = []
+
+        buttons[0].toolTip = "Replace (Return or R)"
+        buttons[1].toolTip = "Replace All (A)"
+        buttons[2].toolTip = "Skip (S)"
+        buttons[3].toolTip = "Skip All (K)"
+        buttons[4].toolTip = "Replace All Older (O)"
+        buttons[5].toolTip = "Rename (N)"
+        buttons[6].toolTip = "Cancel (Esc)"
+
+        // Total Commander-style 3-column button layout:
+        // Col 1 (Overwrite): Replace, Replace All, Replace All Older
+        // Col 2 (Skip / Alt): Skip, Skip All, Rename…
+        // Col 3 (Dismiss): Cancel
+        for b in [buttons[0], buttons[1], buttons[4]] {
+            b.widthAnchor.constraint(equalToConstant: 140).isActive = true
+        }
+        for b in [buttons[2], buttons[3], buttons[5]] {
+            b.widthAnchor.constraint(equalToConstant: 110).isActive = true
+        }
+        buttons[6].widthAnchor.constraint(equalToConstant: 90).isActive = true
+
+        let grid = NSGridView(views: [
+            [buttons[0], buttons[2], buttons[6]],
+            [buttons[1], buttons[3], NSGridCell.emptyContentView],
+            [buttons[4], buttons[5], NSGridCell.emptyContentView],
+        ])
+        grid.rowSpacing = 8
+        grid.columnSpacing = 10
+
+        let stack = NSStackView(views: [title, replace, with, grid])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12

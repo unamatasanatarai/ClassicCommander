@@ -197,6 +197,12 @@ public final class PanelModel {
         }
     }
 
+    public func focus(url: URL, visibleRows: Int) {
+        if let index = entries.firstIndex(where: { $0.url == url || $0.name == url.lastPathComponent }) {
+            setCursor(index, visibleRows: visibleRows)
+        }
+    }
+
     /// Marks or unmarks the entry at `index` (used by right-click and right-drag selection).
     public func setMark(_ mark: Bool, at index: Int) {
         guard entries.indices.contains(index), entries[index].kind != .parent else { return }

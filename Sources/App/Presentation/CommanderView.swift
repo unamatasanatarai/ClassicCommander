@@ -108,7 +108,7 @@ public final class CommanderView: NSView {
             view.onFilesChanged = { [weak self] in self?.reloadPanels() }
             view.onContextMenu = { [weak self, weak view] point in
                 guard let self = self, let view = view else { return }
-                Modal.popUp(self.contextMenu(for: view), at: point, in: view)
+                Modal.popUpHeld(self.contextMenu(for: view), at: point, in: view)
             }
             view.onNavigate = { [weak self] action in
                 self?.activate(side)
@@ -522,6 +522,8 @@ public final class CommanderView: NSView {
             fileCommands.pack()
         case .unpackFiles:
             fileCommands.unpack()
+        case .changeAttributes:
+            changeAttributes(for: panel)
         case .multiRename:
             if panel.model.entries.contains(where: { $0.kind != .parent }) { multiRename.present(for: panel) } else { NSSound.beep() }
         case .sortByName: panel.model.sort(by: .name, visibleRows: rows)
@@ -557,6 +559,84 @@ public final class CommanderView: NSView {
             return
         }
         panel.needsDisplay = true
+    }
+
+    public private(set) var chmodDialog: ChmodDialogController?
+
+    public func changeAttributes(for panel: PanelView) {
+        let targets = panel.model.operationTargets.filter { $0.kind != .parent }
+        guard !targets.isEmpty else { NSSound.beep(); return }
+
+        let dialog = ChmodDialogController(targets: targets) { [weak self, weak panel] state in
+            guard let self = self, let panel = panel else { return }
+            self.applyChmod(state: state, targets: targets, panel: panel)
+        }
+        self.chmodDialog = dialog
+        dialog.present()
+    }
+
+    private func applyChmod(state: ChmodDialogController.PermissionState, targets: [FileEntry], panel: PanelView) {
+        let mode = state.mode
+        let recursive = state.recursive
+        let fm = FileManager.default
+
+        if panel.model.isRemote {
+            guard let session = ftp.session(for: panel) else { return }
+            ftp.commander?.showHint("Applying permissions…", duration: 10)
+            DispatchQueue.global(qos: .userInitiated).async { [weak self, weak panel] in
+                var count = 0
+                func applyRemote(path: String, isFolder: Bool) {
+                    do {
+                        try session.client.chmod(mode, of: path)
+                        count += 1
+                        if recursive && isFolder {
+                            if let walked = try? session.walk(path) {
+                                for f in walked.files { try? session.client.chmod(mode, of: f.path); count += 1 }
+                                for d in walked.folders { try? session.client.chmod(mode, of: d); count += 1 }
+                            }
+                        }
+                    } catch {
+                        // ignore individual item failures
+                    }
+                }
+                for target in targets {
+                    let path = RemoteSession.path(of: target.url)
+                    applyRemote(path: path, isFolder: target.kind == .directory)
+                }
+                DispatchQueue.main.async {
+                    self?.ftp.commander?.showHint("Changed permissions on \(count) item\(count == 1 ? "" : "s")", duration: 1.5)
+                    if let panel = panel { self?.ftp.refresh(panel) }
+                }
+            }
+        } else {
+            DispatchQueue.global(qos: .userInitiated).async { [weak self, weak panel] in
+                var count = 0
+                func applyLocal(url: URL, isFolder: Bool) {
+                    do {
+                        try fm.setAttributes([.posixPermissions: mode], ofItemAtPath: url.path)
+                        count += 1
+                        if recursive && isFolder {
+                            let keys: [URLResourceKey] = [.isDirectoryKey]
+                            let walker = fm.enumerator(at: url, includingPropertiesForKeys: keys)
+                            while let item = walker?.nextObject() as? URL {
+                                try? fm.setAttributes([.posixPermissions: mode], ofItemAtPath: item.path)
+                                count += 1
+                            }
+                        }
+                    } catch {
+                        // ignore individual item failures
+                    }
+                }
+                for target in targets {
+                    applyLocal(url: target.url, isFolder: target.kind == .directory)
+                }
+                DispatchQueue.main.async {
+                    self?.showHint("Changed permissions on \(count) item\(count == 1 ? "" : "s")", duration: 1.5)
+                    panel?.model.reload(visibleRows: panel?.visibleRows ?? 20)
+                    panel?.needsDisplay = true
+                }
+            }
+        }
     }
 
     /// Applies a settings change made here and has it saved (Options shows it too).
@@ -603,6 +683,7 @@ public final class CommanderView: NSView {
         let groups: [[(String, CommandAction)]] = [
             [("Open", .open), ("View", .view)],
             [("Copy…", .copy), ("Move / Rename…", .move), ("Delete", .delete), ("New Folder…", .newFolder)],
+            [("Change Attributes…", .changeAttributes)],
             [("Copy File Path", .copyPaths), ("Copy Name", .copyNames),
              ("Copy Names with Details", .copyNamesWithDetails), ("Copy Paths with Details", .copyPathsWithDetails)],
             local ? [("Open in Finder", .openInFinder), ("Open Terminal Here", .openTerminal)] : [],
@@ -819,13 +900,18 @@ public final class CommanderView: NSView {
         }
         let files = panel.model.entries.filter { $0.kind == .file }
         let index = files.firstIndex { $0.url == entry.url } ?? 0
-        return openLister(files: files.map(\.url), index: index)
+        return openLister(files: files.map(\.url), index: index, onNavigate: { [weak panel] url in
+            guard let panel = panel else { return }
+            panel.model.focus(url: url, visibleRows: panel.visibleRows)
+            panel.needsDisplay = true
+        })
     }
 
     /// Opens Lister on `files[index]`; n / p step through `files`. Used by the panels and Find Files.
     @discardableResult
-    public func openLister(files: [URL], index: Int) -> ListerWindowController {
+    public func openLister(files: [URL], index: Int, onNavigate: ((URL) -> Void)? = nil) -> ListerWindowController {
         let lister = ListerWindowController(files: files, index: index)
+        lister.onNavigate = onNavigate
         lister.onClose = { [weak self] closed in self?.listers.removeAll { $0 === closed } }
         listers.append(lister)
         lister.present()

@@ -1,7 +1,7 @@
 import AppKit
 
 /// The connection settings dialog: General and Advanced tabs, Test connection, OK, Cancel.
-final class FTPProfileEditorController: NSWindowController {
+final class FTPProfileEditorController: NSWindowController, NSTabViewDelegate {
     private(set) var profile: FTPProfile
     private let initialPassword: String?
     private let isNew: Bool
@@ -41,6 +41,11 @@ final class FTPProfileEditorController: NSWindowController {
     private let forgetPin = NSButton(title: "Forget trusted key", target: nil, action: nil)
     let testResult = NSTextField(wrappingLabelWithString: "")
 
+    private let testButton = NSButton(title: "Test connection", target: nil, action: nil)
+    private let okButton = NSButton(title: "OK", target: nil, action: nil)
+    private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
+    private let tabs = NSTabView()
+
     init(profile: FTPProfile, password: String?, folders: [String], isNew: Bool) {
         self.profile = profile
         self.initialPassword = password
@@ -51,6 +56,7 @@ final class FTPProfileEditorController: NSWindowController {
         super.init(window: window)
         window.contentView = build(folders: folders)
         load()
+        updateTabOrder()
     }
 
     @available(*, unavailable)
@@ -152,7 +158,8 @@ final class FTPProfileEditorController: NSWindowController {
         advanced.column(at: 0).xPlacement = .trailing
         self.advanced = advanced
 
-        let tabs = NSTabView()
+        let tabs = self.tabs
+        tabs.delegate = self
         for (title, view) in [("General", general), ("Advanced", advanced)] {
             let item = NSTabViewItem(identifier: title)
             item.label = title
@@ -168,15 +175,18 @@ final class FTPProfileEditorController: NSWindowController {
             tabs.addTabViewItem(item)
         }
 
-        let test = NSButton(title: "Test connection", target: self, action: #selector(testConnection))
-        let ok = NSButton(title: "OK", target: self, action: #selector(okPressed))
-        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelPressed))
-        for b in [test, ok, cancel] { b.bezelStyle = .rounded }
-        ok.keyEquivalent = "\r"
-        cancel.keyEquivalent = "\u{1b}"
+        testButton.target = self
+        testButton.action = #selector(testConnection)
+        okButton.target = self
+        okButton.action = #selector(okPressed)
+        cancelButton.target = self
+        cancelButton.action = #selector(cancelPressed)
+        for b in [testButton, okButton, cancelButton] { b.bezelStyle = .rounded }
+        okButton.keyEquivalent = "\r"
+        cancelButton.keyEquivalent = "\u{1b}"
         testResult.preferredMaxLayoutWidth = 560
         testResult.textColor = .secondaryLabelColor
-        let buttons = NSStackView(views: [test, NSView(), cancel, ok])
+        let buttons = NSStackView(views: [testButton, NSView(), cancelButton, okButton])
 
         let stack = NSStackView(views: [tabs, testResult, buttons])
         stack.orientation = .vertical
@@ -253,6 +263,7 @@ final class FTPProfileEditorController: NSWindowController {
         commandsView.textColor = sftp ? .disabledControlTextColor : .controlTextColor
         updateSecurityWarning()
         updatePin()
+        updateTabOrder()
     }
 
     @objc private func protocolChanged() {
@@ -369,6 +380,7 @@ final class FTPProfileEditorController: NSWindowController {
         }
         plainPasswordField.isHidden = showPassword.state != .on
         passwordField.isHidden = showPassword.state == .on
+        updateTabOrder()
     }
 
     /// Logs in with the values as entered, without saving them.
@@ -421,5 +433,54 @@ final class FTPProfileEditorController: NSWindowController {
         guard let window = window else { return }
         window.sheetParent?.endSheet(window)
         window.orderOut(nil)
+    }
+
+    func updateTabOrder() {
+        guard let window = window else { return }
+        let isGeneral = (tabs.selectedTabViewItem?.identifier as? String) != "Advanced"
+        let controls: [NSView]
+        if isGeneral {
+            let activePassword: NSView = plainPasswordField.isHidden ? passwordField : plainPasswordField
+            controls = [
+                nameField,
+                protocolPopup,
+                hostField,
+                securityPopup,
+                authPopup,
+                keyFileField,
+                chooseKeyButton,
+                userField,
+                activePassword,
+                showPassword,
+                remoteDirField,
+                localDirField,
+                folderPopup,
+                anonymousBox,
+                passiveBox,
+                savePasswordBox,
+                testButton,
+                cancelButton,
+                okButton,
+            ].filter { !$0.isHidden }
+        } else {
+            controls = [
+                serverTypePopup,
+                transferPopup,
+                commandsView,
+                cacheBox,
+                proxyPopup,
+                proxyHostField,
+                proxyUserField,
+                forgetPin,
+                testButton,
+                cancelButton,
+                okButton,
+            ].filter { !$0.isHidden }
+        }
+        AppWindows.setTabOrder(controls, in: window)
+    }
+
+    func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
+        updateTabOrder()
     }
 }

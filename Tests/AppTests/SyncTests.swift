@@ -256,11 +256,11 @@ public enum SyncTests {
             try expect(key(20, "3"), "3 handled")
             let diffWindows = NSApp.windows.filter { $0.title.hasSuffix("Compare: text.txt") }
             guard let viewer = diffWindows.last?.windowController as? DiffWindowController else { throw Fail(description: "no diff window") }
-            try expect(viewer.diff?.blocks.count == 2 && viewer.statusLabel.stringValue == "Difference 1 of 2", "diff: \(viewer.statusLabel.stringValue)")
+            try expect(viewer.diff?.blocks.count == 2 && viewer.statusLabel.stringValue == "1/2", "diff: \(viewer.statusLabel.stringValue)")
             viewer.nextDifference()
-            try expect(viewer.statusLabel.stringValue == "Difference 2 of 2", "next")
+            try expect(viewer.statusLabel.stringValue == "2/2", "next")
             viewer.previousDifference()
-            try expect(viewer.statusLabel.stringValue == "Difference 1 of 2", "previous")
+            try expect(viewer.statusLabel.stringValue == "1/2", "previous")
             try expect(viewer.leftText.string.contains("two") && viewer.rightText.string.contains("five"), "side by side text")
             viewer.window?.close()
             select("same.txt")

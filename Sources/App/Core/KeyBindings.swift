@@ -101,6 +101,7 @@ public enum CommandAction: String, CaseIterable, Codable {
     case multiRename
     case packFiles
     case unpackFiles
+    case changeAttributes
     case renameInPlace, deletePermanently
     case newTab, closeTab, nextTab, previousTab
     case sortByName, sortByExtension, sortByDate, sortBySize, sortUnsorted, reverseOrder
@@ -171,6 +172,7 @@ public enum CommandAction: String, CaseIterable, Codable {
         case .multiRename: return "Multi-Rename Tool (Ctrl+M)"
         case .packFiles: return "Pack files…"
         case .unpackFiles: return "Unpack files…"
+        case .changeAttributes: return "Change attributes / permissions (chmod)…"
         case .renameInPlace: return "Rename in place (Shift+F6)"
         case .deletePermanently: return "Delete permanently, without the Trash (Shift+F8)"
         case .newTab: return "New tab (same folder)"

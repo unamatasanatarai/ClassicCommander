@@ -66,6 +66,8 @@ public struct OperationOptions: Equatable, Codable {
     /// …of which uploads and downloads (0 = no separate limit: the total applies).
     public var maxUploads: Int
     public var maxDownloads: Int
+    /// Local-to-local disk transfers at the same time (default: 1, strictly sequential).
+    public var maxLocals: Int = 1
     /// "Open terminal here": the terminal app, and its arguments with {dir} (empty: open the folder with it).
     public var terminalApp: String
     public var terminalArguments: String
@@ -86,7 +88,7 @@ public struct OperationOptions: Equatable, Codable {
     public static let contextMenuHoldRange: ClosedRange<Double> = 0.2...10
 
     public init(spaceCalculatesFolderSize: Bool = true, spaceMovesCursorDown: Bool = true,
-                maxTransfers: Int = 3, maxUploads: Int = 0, maxDownloads: Int = 0,
+                maxTransfers: Int = 3, maxUploads: Int = 0, maxDownloads: Int = 0, maxLocals: Int = 1,
                 terminalApp: String = TerminalLauncher.defaultApp, terminalArguments: String = "",
                 selectionHidesOthers: Bool = false, contextMenuHold: Double = 1) {
         self.selectionHidesOthers = selectionHidesOthers
@@ -98,10 +100,11 @@ public struct OperationOptions: Equatable, Codable {
         self.maxTransfers = maxTransfers
         self.maxUploads = maxUploads
         self.maxDownloads = maxDownloads
+        self.maxLocals = maxLocals
     }
 
     public var transferLimits: TransferLimits {
-        TransferLimits(total: maxTransfers, uploads: maxUploads, downloads: maxDownloads)
+        TransferLimits(total: maxTransfers, uploads: maxUploads, downloads: maxDownloads, locals: maxLocals)
     }
 
     public init(from decoder: Decoder) throws {
@@ -111,6 +114,7 @@ public struct OperationOptions: Equatable, Codable {
         maxTransfers = min(32, max(1, (try? c.decodeIfPresent(Int.self, forKey: .maxTransfers)) ?? 3))
         maxUploads = min(32, max(0, (try? c.decodeIfPresent(Int.self, forKey: .maxUploads)) ?? 0))
         maxDownloads = min(32, max(0, (try? c.decodeIfPresent(Int.self, forKey: .maxDownloads)) ?? 0))
+        maxLocals = min(32, max(1, (try? c.decodeIfPresent(Int.self, forKey: .maxLocals)) ?? 1))
         terminalApp = (try? c.decodeIfPresent(String.self, forKey: .terminalApp)) ?? TerminalLauncher.defaultApp
         terminalArguments = (try? c.decodeIfPresent(String.self, forKey: .terminalArguments)) ?? ""
         selectionHidesOthers = (try? c.decodeIfPresent(Bool.self, forKey: .selectionHidesOthers)) ?? false

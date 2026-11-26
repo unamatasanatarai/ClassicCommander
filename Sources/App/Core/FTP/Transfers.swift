@@ -88,27 +88,103 @@ public final class TransferJob {
     public var verify = false
     /// Added with "Queue": runs after the queued jobs before it, one at a time.
     public var waitsInQueue = false
-    /// Files being copied right now.
-    public internal(set) var active: Set<Int> = []
-    /// Held back in the queue until the queued job before it is done.
-    var isHeld = false
-    /// "Replace all", "Skip all" or "Replace all older", once answered for this job.
-    var conflictRule: ConflictDecision?
-    public internal(set) var items: [TransferItem]
-    public internal(set) var results: [TransferItemResult]
+    /// The files and folders of the job (fixed once the job is made).
+    public let items: [TransferItem]
     /// Folders to remove after a successful move (deepest first).
     let sourceFoldersToRemove: [TransferLocation]
     /// Resume partially transferred files (used by Retry).
     let resume: Bool
-    public internal(set) var state: State = .queued
+
+    // MARK: Live state
+    //
+    // Transfer threads change these while the windows read them on the main thread (many times a
+    // second during a large copy). Unsynchronized, a read of a dictionary or set in the middle of a
+    // write crashes the app, so every one goes through `liveLock`: reads take a copy, and changes in
+    // place (`job.partial[i] = n`, `job.running -= 1`, `job.active.insert(i)`) are atomic.
+
+    private struct Live {
+        var active: Set<Int> = []
+        var isHeld = false
+        var conflictRule: ConflictDecision?
+        var results: [TransferItemResult]
+        var isPaused = false
+        var state: State = .queued
+        var running = 0
+        var completedBytes: Int64 = 0
+        var skippedBytes: Int64 = 0
+        var partial: [Int: Int64] = [:]
+        var started: Date?
+        var finished: Date?
+    }
+    private var live: Live
+    /// Recursive: a getter used inside a change (`job.x = job.y + 1`) never waits on itself.
+    private let liveLock = NSRecursiveLock()
+
+    private func read<T>(_ body: (Live) -> T) -> T {
+        liveLock.lock(); defer { liveLock.unlock() }
+        return body(live)
+    }
+
+    /// Files being copied right now.
+    public internal(set) var active: Set<Int> {
+        get { read(\.active) }
+        _modify { liveLock.lock(); defer { liveLock.unlock() }; yield &live.active }
+    }
+    /// Held back in the queue until the queued job before it is done.
+    var isHeld: Bool {
+        get { read(\.isHeld) }
+        _modify { liveLock.lock(); defer { liveLock.unlock() }; yield &live.isHeld }
+    }
+    /// "Replace all", "Skip all" or "Replace all older", once answered for this job.
+    var conflictRule: ConflictDecision? {
+        get { read(\.conflictRule) }
+        _modify { liveLock.lock(); defer { liveLock.unlock() }; yield &live.conflictRule }
+    }
+    public internal(set) var results: [TransferItemResult] {
+        get { read(\.results) }
+        _modify { liveLock.lock(); defer { liveLock.unlock() }; yield &live.results }
+    }
+    public var isPaused: Bool {
+        get { read(\.isPaused) }
+        _modify { liveLock.lock(); defer { liveLock.unlock() }; yield &live.isPaused }
+    }
+    public internal(set) var state: State {
+        get { read(\.state) }
+        _modify { liveLock.lock(); defer { liveLock.unlock() }; yield &live.state }
+    }
     /// Files of this job transferring right now.
-    public internal(set) var running = 0
-    /// Bytes of finished files, and of the files in progress.
-    var completedBytes: Int64 = 0
-    var partial: [Int: Int64] = [:]
-    public var bytesDone: Int64 { partial.values.reduce(completedBytes) { $0.addingSaturated($1) } }
-    public internal(set) var started: Date?
-    public internal(set) var finished: Date?
+    public internal(set) var running: Int {
+        get { read(\.running) }
+        _modify { liveLock.lock(); defer { liveLock.unlock() }; yield &live.running }
+    }
+    /// Bytes of finished files.
+    var completedBytes: Int64 {
+        get { read(\.completedBytes) }
+        _modify { liveLock.lock(); defer { liveLock.unlock() }; yield &live.completedBytes }
+    }
+    /// Bytes of files skipped during transfer.
+    public internal(set) var skippedBytes: Int64 {
+        get { read(\.skippedBytes) }
+        _modify { liveLock.lock(); defer { liveLock.unlock() }; yield &live.skippedBytes }
+    }
+    /// Bytes so far of each file in progress (by item index).
+    var partial: [Int: Int64] {
+        get { read(\.partial) }
+        _modify { liveLock.lock(); defer { liveLock.unlock() }; yield &live.partial }
+    }
+    public internal(set) var started: Date? {
+        get { read(\.started) }
+        _modify { liveLock.lock(); defer { liveLock.unlock() }; yield &live.started }
+    }
+    public internal(set) var finished: Date? {
+        get { read(\.finished) }
+        _modify { liveLock.lock(); defer { liveLock.unlock() }; yield &live.finished }
+    }
+
+    /// Bytes of finished files and of the files in progress (one consistent reading).
+    public var bytesDone: Int64 { read { $0.partial.values.reduce($0.completedBytes) { $0.addingSaturated($1) } } }
+    /// Total bytes accounted for (transferred + in-progress + skipped).
+    public var bytesProcessed: Int64 { read { l in l.partial.values.reduce(l.completedBytes) { $0.addingSaturated($1) }.addingSaturated(l.skippedBytes) } }
     let cancelFlag = CancelFlag()
 
     public init(title: String, items: [TransferItem], isMove: Bool, sourceFoldersToRemove: [TransferLocation] = [], resume: Bool = false) {
@@ -117,12 +193,14 @@ public final class TransferJob {
         self.isMove = isMove
         self.sourceFoldersToRemove = sourceFoldersToRemove
         self.resume = resume
-        results = Array(repeating: .pending, count: items.count)
+        live = Live(results: Array(repeating: .pending, count: items.count))
     }
 
     public var bytesTotal: Int64 { items.reduce(0) { $0.addingSaturated($1.size) } }
     public var failedCount: Int { results.filter { if case .failed = $0 { return true } else { return false } }.count }
     public var doneCount: Int { results.filter { $0 == .done }.count }
+    public var skippedCount: Int { results.filter { if case .skipped = $0 { return true } else { return false } }.count }
+    public var processedCount: Int { results.filter { $0 != .pending }.count }
     public var fileCount: Int { items.filter { !$0.isFolder }.count }
 
     public var elapsed: TimeInterval { (finished ?? Date()).timeIntervalSince(started ?? Date()) }
@@ -134,9 +212,21 @@ public final class TransferJob {
         switch state {
         case .queued: return waitsInQueue ? "Waiting in the queue" : "Queued"
         case .running, .finishing:
-            return "Copying \(running) at once · \(doneCount) of \(items.count) done"
-        case .cancelled: return "Cancelled (\(doneCount) done)"
-        case .finished: return failedCount == 0 ? "Done (\(doneCount) of \(items.count))" : "\(failedCount) failed, \(doneCount) done"
+            if cancelFlag.isCancelled {
+                return "Cancelling…"
+            }
+            let skipped = skippedCount > 0 ? " · \(skippedCount) skipped" : ""
+            return "Copying \(running) at once · \(processedCount) of \(items.count) done\(skipped)"
+        case .cancelled:
+            let skipped = skippedCount > 0 ? ", \(skippedCount) skipped" : ""
+            return "Cancelled (\(doneCount) done\(skipped))"
+        case .finished:
+            let skipped = skippedCount > 0 ? " · \(skippedCount) skipped" : ""
+            if failedCount == 0 {
+                return "Done (\(processedCount) of \(items.count)\(skipped))"
+            } else {
+                return "\(failedCount) failed, \(doneCount) done\(skipped)"
+            }
         }
     }
 
@@ -152,33 +242,39 @@ public final class TransferJob {
 
 /// How many files may transfer at the same time (Options → Operation).
 /// 0 for uploads or downloads means "no separate limit": the total applies.
+/// locals: maximum concurrent local-to-local disk transfers (default: 1, strictly sequential).
 public struct TransferLimits: Equatable {
     public var total: Int
     public var uploads: Int
     public var downloads: Int
+    public var locals: Int
 
-    public init(total: Int = 3, uploads: Int = 0, downloads: Int = 0) {
+    public init(total: Int = 3, uploads: Int = 0, downloads: Int = 0, locals: Int = 1) {
         self.total = max(1, total)
         self.uploads = max(0, uploads)
         self.downloads = max(0, downloads)
+        self.locals = max(1, locals)
     }
 
     public var effectiveUploads: Int { uploads == 0 ? total : min(uploads, total) }
     public var effectiveDownloads: Int { downloads == 0 ? total : min(downloads, total) }
+    public var effectiveLocals: Int { min(locals, total) }
 
     /// Whether one more transfer of this kind may start next to the running ones.
-    func allows(_ kind: TransferKind, running: (total: Int, up: Int, down: Int)) -> Bool {
+    func allows(_ kind: TransferKind, running: (total: Int, up: Int, down: Int, local: Int)) -> Bool {
         guard running.total < total else { return false }
+        if kind.isLocal && running.local >= effectiveLocals { return false }
         if kind.isUpload && running.up >= effectiveUploads { return false }
         if kind.isDownload && running.down >= effectiveDownloads { return false }
         return true
     }
 }
 
-/// What a file transfer does on the network (server to server is both).
+/// What a file transfer does on the network or locally (server to server is both).
 struct TransferKind {
     let isUpload: Bool
     let isDownload: Bool
+    let isLocal: Bool
 
     init(_ item: TransferItem) {
         var up = false, down = false
@@ -186,6 +282,7 @@ struct TransferKind {
         if case .remote = item.destination { up = true }
         isUpload = up
         isDownload = down
+        isLocal = !up && !down
     }
 }
 
@@ -210,11 +307,12 @@ public final class TransferManager {
     private let workers = DispatchQueue(label: "ClassicCommander.transfers", attributes: .concurrent)
     /// Files waiting to start: (job, item index), in queue order.
     private var waiting: [(TransferJob, Int)] = []
-    private var running: (total: Int, up: Int, down: Int) = (0, 0, 0)
+    private var running: (total: Int, up: Int, down: Int, local: Int) = (0, 0, 0, 0)
     /// Highest number of files that ran at once (for tests and diagnostics).
     public private(set) var peakConcurrency = 0
     public private(set) var peakUploads = 0
     public private(set) var peakDownloads = 0
+    public private(set) var peakLocals = 0
 
     public init() {}
 
@@ -308,9 +406,11 @@ public final class TransferManager {
                 running.total += 1
                 if kind.isUpload { running.up += 1 }
                 if kind.isDownload { running.down += 1 }
+                if kind.isLocal { running.local += 1 }
                 peakConcurrency = max(peakConcurrency, running.total)
                 peakUploads = max(peakUploads, running.up)
                 peakDownloads = max(peakDownloads, running.down)
+                peakLocals = max(peakLocals, running.local)
                 job.running += 1
                 starting.append((job, index))
             } else {
@@ -343,6 +443,7 @@ public final class TransferManager {
         }
         schedule()
         finishIfDone(job)
+        notify(job)
     }
 
     /// Transfers one file on a worker thread, then lets the next waiting files start.
@@ -354,6 +455,9 @@ public final class TransferManager {
         if job.cancelFlag.isCancelled {
             result = .pending
         } else {
+            while job.isPaused && !job.cancelFlag.isCancelled {
+                Thread.sleep(forTimeInterval: 0.1)
+            }
             lock.lock(); job.active.insert(index); lock.unlock()
             notify(job)
             do {
@@ -376,11 +480,16 @@ public final class TransferManager {
         job.active.remove(index)
         job.partial[index] = nil
         job.results[index] = result
-        if result == .done { job.completedBytes = job.completedBytes.addingSaturated(item.size) }
+        if result == .done {
+            job.completedBytes = job.completedBytes.addingSaturated(item.size)
+        } else if case .skipped = result {
+            job.skippedBytes = job.skippedBytes.addingSaturated(item.size)
+        }
         job.running -= 1
         running.total -= 1
         if kind.isUpload { running.up -= 1 }
         if kind.isDownload { running.down -= 1 }
+        if kind.isLocal { running.local -= 1 }
         lock.unlock()
         notify(job)
         schedule()
@@ -431,7 +540,11 @@ public final class TransferManager {
             } catch FTPError.cancelled {
                 break
             } catch {
-                job.results[i] = Self.result(for: error)
+                let res = Self.result(for: error)
+                job.results[i] = res
+                if case .skipped = res {
+                    job.skippedBytes = job.skippedBytes.addingSaturated(item.size)
+                }
             }
             job.partial[i] = nil
         }
@@ -475,6 +588,13 @@ public final class TransferManager {
         case let (.remote(session, path), .local(url)):
             try session.client.download(path, to: url, expectedSize: item.size, resume: job.resume, cancel: cancel, progress: progress)
         case let (.remote(from, path), .remote(to, target)):
+            if from.id == to.id && job.isMove {
+                try to.client.rename(path, to: target)
+                to.invalidate((target as NSString).deletingLastPathComponent)
+                from.invalidate((path as NSString).deletingLastPathComponent)
+                progress(item.size)
+                return
+            }
             // Server to server goes through a temporary file on this Mac.
             let temp = fm.temporaryDirectory.appendingPathComponent("cc-ftp-\(UUID().uuidString)")
             defer { try? fm.removeItem(at: temp) }
@@ -482,32 +602,94 @@ public final class TransferManager {
             try to.client.upload(temp, to: target, resume: false, cancel: cancel) { progress(item.size / 2 + $0 / 2) }
             to.invalidate((target as NSString).deletingLastPathComponent)
         case let (.local(src), .local(dst)):
-            if job.isMove && (item.isWholeFolder || !job.verify) {
-                // A rename on the same disk; macOS copies and deletes across disks.
-                if Self.exists(dst) { try fm.removeItem(at: dst) }
-                try fm.moveItem(at: src, to: dst)
-                progress(item.size)
-                return
+            let sameVolume: Bool = {
+                let r1 = try? src.resourceValues(forKeys: [.volumeIdentifierKey])
+                let r2 = try? dst.deletingLastPathComponent().resourceValues(forKeys: [.volumeIdentifierKey])
+                if let v1 = r1?.volumeIdentifier, let v2 = r2?.volumeIdentifier {
+                    return (v1 as AnyObject).isEqual(v2)
+                }
+                return false
+            }()
+            if job.isMove && (item.isWholeFolder || (!job.verify && sameVolume)) {
+                do {
+                    if Self.exists(dst) { try fm.removeItem(at: dst) }
+                    try fm.moveItem(at: src, to: dst)
+                    progress(item.size)
+                    return
+                } catch {
+                    if item.isWholeFolder { throw error }
+                }
             }
-            try Self.copyLocal(src, to: dst)
+            try Self.copyLocalChunked(from: src, to: dst, cancel: cancel, job: job, progress: progress)
             progress(item.size)
         }
         if job.verify { try verify(item, at: destination) }
         if job.isMove { try deleteSource(item.source) }
     }
 
-    /// Copies a file, replacing what is there only once the copy is complete.
-    static func copyLocal(_ src: URL, to dst: URL) throws {
+    /// Copies a file in chunks, providing granular progress, pause and cancel support,
+    /// and replacing destination atomically on completion.
+    static func copyLocalChunked(from src: URL, to dst: URL, cancel: CancelFlag?, job: TransferJob?, progress: ((Int64) -> Void)?) throws {
         let fm = FileManager.default
-        guard exists(dst) else { return try fm.copyItem(at: src, to: dst) }
-        let temp = dst.deletingLastPathComponent().appendingPathComponent(".cc-copy-\(UUID().uuidString)")
+        let parent = dst.deletingLastPathComponent()
+        try fm.createDirectory(at: parent, withIntermediateDirectories: true)
+        let temp = parent.appendingPathComponent(".cc-copy-\(UUID().uuidString)")
+
         do {
-            try fm.copyItem(at: src, to: temp)
-            _ = try fm.replaceItemAt(dst, withItemAt: temp)
+            let srcHandle = try FileHandle(forReadingFrom: src)
+            defer { try? srcHandle.close() }
+
+            guard fm.createFile(atPath: temp.path, contents: nil) else {
+                throw FTPError.localDiskFull
+            }
+            let dstHandle = try FileHandle(forWritingTo: temp)
+            defer { try? dstHandle.close() }
+
+            var copied: Int64 = 0
+            let bufferSize = 1024 * 1024  // 1 MB buffer for prompt cancellation response
+
+            while true {
+                if cancel?.isCancelled == true {
+                    throw FTPError.cancelled
+                }
+                while job?.isPaused == true && cancel?.isCancelled != true {
+                    Thread.sleep(forTimeInterval: 0.1)
+                }
+
+                let chunk: Data = try autoreleasepool {
+                    return try srcHandle.read(upToCount: bufferSize) ?? Data()
+                }
+                if cancel?.isCancelled == true {
+                    throw FTPError.cancelled
+                }
+                if chunk.isEmpty { break }
+                try dstHandle.write(contentsOf: chunk)
+                copied += Int64(chunk.count)
+                progress?(copied)
+            }
+
+            try dstHandle.synchronize()
+            try dstHandle.close()
+            try srcHandle.close()
+
+            if let attrs = try? fm.attributesOfItem(atPath: src.path) {
+                try? fm.setAttributes(attrs, ofItemAtPath: temp.path)
+            }
+
+            if exists(dst) {
+                try? fm.removeItem(at: dst)
+            }
+            try fm.moveItem(at: temp, to: dst)
+            progress?(copied)
         } catch {
             try? fm.removeItem(at: temp)
             throw error
         }
+    }
+
+    /// Copies a file, replacing what is there only once the copy is complete.
+    static func copyLocal(_ src: URL, to dst: URL) throws {
+        try copyLocalChunked(from: src, to: dst, cancel: nil, job: nil, progress: nil)
     }
 
     static func exists(_ url: URL) -> Bool {
@@ -577,6 +759,10 @@ public final class TransferManager {
         switch (item.source, destination) {
         case let (.local(src), .local(dst)):
             do {
+                guard Self.exists(src) else {
+                    ok = Self.exists(dst) && (try? FileComparison.fileSize(dst)) == item.size
+                    break
+                }
                 ok = try FileComparison.fileSize(src) == FileComparison.fileSize(dst) && FileComparison.firstDifference(src, dst) == nil
             } catch {
                 ok = false
@@ -591,7 +777,13 @@ public final class TransferManager {
 
     private func deleteSource(_ location: TransferLocation) throws {
         switch location {
-        case .local(let url): try FileManager.default.removeItem(at: url)
+        case .local(let url):
+            guard Self.exists(url) else { return }
+            do {
+                try FileManager.default.removeItem(at: url)
+            } catch {
+                throw FTPError.invalid("File was copied, but original could not be deleted: \(url.lastPathComponent) (\(error.localizedDescription))")
+            }
         case let .remote(session, path):
             try session.client.deleteFile(path)
             session.invalidate((path as NSString).deletingLastPathComponent)

@@ -24,6 +24,7 @@ enum AppWindows {
     static func apply(_ theme: Theme) {
         chrome = theme.chrome.nsColor
         NSApp.appearance = appearance(for: theme)
+        styleButtonsWhenShown()
         for window in NSApp.windows where window.title.hasPrefix(appTitle) {
             style(window)
         }
@@ -36,6 +37,7 @@ enum AppWindows {
     /// to fit on that screen. Windows already on screen stay where they are.
     static func place(_ window: NSWindow) {
         guard !window.isVisible else { return }
+        styleButtons(in: window)
         let main = mainWindow?.isVisible == true ? mainWindow : nil
         let screen = (main?.screen ?? NSScreen.main)?.visibleFrame
         guard let anchor = main?.frame ?? screen else { return }
@@ -56,5 +58,110 @@ enum AppWindows {
     /// Gives a window the theme's window colour.
     static func style(_ window: NSWindow) {
         window.backgroundColor = chrome
+    }
+
+    // MARK: Buttons
+
+    private static var keyObserver: NSObjectProtocol?
+
+    /// Every window's buttons get the one button style (`styleButtons`) when the window becomes key,
+    /// so windows built anywhere, and buttons added after they were built, all look the same.
+    static func styleButtonsWhenShown() {
+        guard keyObserver == nil else { return }
+        keyObserver = NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil,
+                                                             queue: .main) { note in
+            if let window = note.object as? NSWindow { styleButtons(in: window) }
+        }
+    }
+
+    static func styleButtons(in window: NSWindow) {
+        if let root = window.contentView?.superview ?? window.contentView { styleButtons(in: root) }
+    }
+
+    /// One look for every push button (as in Connect to FTP server): rounded, regular size, the
+    /// regular system font. Buttons in the same stack, or the same grid column, are as wide as the
+    /// widest of them. Checkboxes, radio buttons, pop-ups and borderless buttons are left alone;
+    /// hidden views and the pages of tab views are included. Running it again changes nothing.
+    static func styleButtons(in root: NSView) {
+        var groups: [ObjectIdentifier: [NSButton]] = [:]
+        var order: [ObjectIdentifier] = []
+        func visit(_ view: NSView) {
+            if let button = view as? NSButton, isPushButton(button) {
+                stylePushButton(button)
+                if let key = groupKey(of: button) {
+                    if groups[key] == nil { order.append(key) }
+                    groups[key, default: []].append(button)
+                }
+            }
+            view.subviews.forEach(visit)
+            if let tabs = view as? NSTabView {
+                for item in tabs.tabViewItems { if let page = item.view, page.superview == nil { visit(page) } }
+            }
+        }
+        visit(root)
+        for key in order { equalizeWidths(groups[key] ?? []) }
+    }
+
+    /// Push buttons are bordered: checkboxes and radio buttons are not (pop-ups are NSButtons too).
+    static func isPushButton(_ button: NSButton) -> Bool {
+        button.isBordered && !(button is NSPopUpButton)
+    }
+
+    static func stylePushButton(_ button: NSButton) {
+        if button.bezelStyle != .regularSquare && button.bezelStyle != .recessed {
+            button.bezelStyle = .rounded
+        }
+        button.controlSize = .regular
+        // Titles drawn in their own colours (Synchronize's arrows) keep them.
+        let title = button.attributedTitle
+        let colour = title.length > 0 ? title.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor : nil
+        let coloured = colour.map { $0 != .controlTextColor } ?? false
+        if !coloured { button.font = .systemFont(ofSize: NSFont.systemFontSize) }
+    }
+
+    /// Buttons side by side: the arranged views of one stack, or one column of a grid.
+    static func groupKey(of button: NSButton) -> ObjectIdentifier? {
+        if let stack = button.superview as? NSStackView, stack.arrangedSubviews.contains(button) {
+            return ObjectIdentifier(stack)
+        }
+        if let grid = button.superview as? NSGridView, let column = grid.cell(for: button)?.column {
+            return ObjectIdentifier(column)
+        }
+        return nil
+    }
+
+    static let equalWidthID = "AppWindows.equalWidth"
+
+    /// At least as wide as the widest button of the group (below required: fixed widths win).
+    static func equalizeWidths(_ buttons: [NSButton]) {
+        let titled = buttons.filter { !$0.title.isEmpty }
+        guard titled.count > 1 else { return }
+        let width = titled.map(\.intrinsicContentSize.width).max() ?? 0
+        for button in titled {
+            if let old = button.constraints.first(where: { $0.identifier == equalWidthID }) {
+                old.constant = width
+                continue
+            }
+            let c = button.widthAnchor.constraint(greaterThanOrEqualToConstant: width)
+            c.priority = NSLayoutConstraint.Priority(999)
+            c.identifier = equalWidthID
+            c.isActive = true
+        }
+    }
+
+    // MARK: - Tab Navigation & Key View Order
+
+    /// Sets a closed-loop tab key view navigation sequence for `views` in `window`.
+    static func setTabOrder(_ views: [NSView], in window: NSWindow) {
+        let validViews = views.filter { !$0.isHidden }
+        guard !validViews.isEmpty else { return }
+        window.autorecalculatesKeyViewLoop = false
+        for i in 0..<(validViews.count - 1) {
+            validViews[i].nextKeyView = validViews[i + 1]
+        }
+        validViews.last?.nextKeyView = validViews.first
+        if window.initialFirstResponder == nil || window.initialFirstResponder === window.contentView {
+            window.initialFirstResponder = validViews.first
+        }
     }
 }

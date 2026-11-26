@@ -2,16 +2,17 @@ import AppKit
 
 /// Options → Shortcuts: every panel action with its keys. "Add Shortcut…" records the next key
 /// combination for the selected action (Esc cancels); a key already used elsewhere moves over,
-/// and the note under the table says where it came from.
+/// and the note under the table says where it came from. Individual shortcuts can be removed
+/// via their inline "×" button, the "Remove Shortcut…" button, or the right-click context menu.
 final class ShortcutsPage: NSView, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
     var bindings = KeyBindings.standard {
         didSet { if bindings != oldValue { refilter() } }
     }
     var onChange: ((KeyBindings) -> Void)?
 
-    private let table = NSTableView()
+    private let table = ShortcutsTableView()
     private let addButton = NSButton(title: "Add Shortcut…", target: nil, action: nil)
-    private let removeButton = NSButton(title: "Remove Shortcuts", target: nil, action: nil)
+    private let removeButton = NSButton(title: "Remove Shortcut", target: nil, action: nil)
     private let resetButton = NSButton(title: "Reset to Defaults", target: nil, action: nil)
     let note = NSTextField(labelWithString: "")
     private var monitor: Any?
@@ -24,6 +25,7 @@ final class ShortcutsPage: NSView, NSTableViewDataSource, NSTableViewDelegate, N
 
     init() {
         super.init(frame: .zero)
+        table.shortcutsPage = self
 
         let title = NSTextField(labelWithString: "Shortcuts")
         title.font = .boldSystemFont(ofSize: 15)
@@ -33,10 +35,10 @@ final class ShortcutsPage: NSView, NSTableViewDataSource, NSTableViewDelegate, N
         actionColumn.width = 300
         let keysColumn = NSTableColumn(identifier: .init("keys"))
         keysColumn.title = "Keys"
-        keysColumn.width = 220
+        keysColumn.width = 280
         table.addTableColumn(actionColumn)
         table.addTableColumn(keysColumn)
-        table.rowHeight = 22
+        table.rowHeight = 24
         table.usesAlternatingRowBackgroundColors = true
         table.dataSource = self
         table.delegate = self
@@ -92,20 +94,40 @@ final class ShortcutsPage: NSView, NSTableViewDataSource, NSTableViewDelegate, N
 
     func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
         let action = actions[row]
-        let text: String
         if column?.identifier.rawValue == "keys" {
-            text = recordingAction == action
-                ? "Press keys…  (Esc cancels)"
-                : bindings.keys(for: action).map(\.displayName).joined(separator: ",  ")
+            if recordingAction == action {
+                let label = NSTextField(labelWithString: "Press keys…  (Esc cancels)")
+                label.lineBreakMode = .byTruncatingTail
+                label.textColor = .controlAccentColor
+                return label
+            }
+            let keys = bindings.keys(for: action)
+            if keys.isEmpty {
+                return NSTextField(labelWithString: "")
+            }
+            let container = NSStackView()
+            container.orientation = .horizontal
+            container.spacing = 5
+            container.alignment = .centerY
+            for combo in keys {
+                let pill = KeyPillView(action: action, combo: combo) { [weak self] act, c in
+                    self?.removeSingle(combo: c, from: act)
+                }
+                pill.setContentHuggingPriority(.required, for: .horizontal)
+                pill.setContentCompressionResistancePriority(.required, for: .horizontal)
+                container.addArrangedSubview(pill)
+            }
+            // Flexible trailing spacer prevents pills from being stretched horizontally on table scroll/reuse
+            let spacer = NSView()
+            spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            container.addArrangedSubview(spacer)
+            return container
         } else {
-            text = action.label
+            let label = NSTextField(labelWithString: action.label)
+            label.lineBreakMode = .byTruncatingTail
+            return label
         }
-        let label = NSTextField(labelWithString: text)
-        label.lineBreakMode = .byTruncatingTail
-        if recordingAction == action && column?.identifier.rawValue == "keys" {
-            label.textColor = .controlAccentColor
-        }
-        return label
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -163,7 +185,9 @@ final class ShortcutsPage: NSView, NSTableViewDataSource, NSTableViewDelegate, N
     }
 
     private func updateButtons() {
-        removeButton.isEnabled = !(selectedAction.map { bindings.keys(for: $0).isEmpty } ?? true)
+        let keys = selectedAction.map { bindings.keys(for: $0) } ?? []
+        removeButton.isEnabled = !keys.isEmpty
+        removeButton.title = keys.count > 1 ? "Remove Shortcut…" : "Remove Shortcut"
         addButton.isEnabled = selectedAction != nil
     }
 
@@ -200,12 +224,51 @@ final class ShortcutsPage: NSView, NSTableViewDataSource, NSTableViewDelegate, N
         changed()
     }
 
-    @objc private func removePressed() {
+    /// Removes a single shortcut key combination from an action.
+    public func removeSingle(combo: KeyCombo, from action: CommandAction) {
+        bindings.remove(combo, from: action)
+        note.stringValue = "\(combo.displayName) removed from “\(action.label)”."
+        changed()
+    }
+
+    @objc func removeSpecificComboItem(_ sender: NSMenuItem) {
+        guard let action = selectedAction, let combo = sender.representedObject as? KeyCombo else { return }
+        removeSingle(combo: combo, from: action)
+    }
+
+    @objc func removeAllCombos() {
         guard let action = selectedAction else { return }
-        stopRecording()
         for combo in bindings.keys(for: action) { bindings.remove(combo, from: action) }
         note.stringValue = "“\(action.label)” has no shortcut now."
         changed()
+    }
+
+    @objc func removePressed() {
+        guard let action = selectedAction else { return }
+        stopRecording()
+        let keys = bindings.keys(for: action)
+        guard !keys.isEmpty else { return }
+
+        let isMouse = NSApp.currentEvent?.type == .leftMouseUp || NSApp.currentEvent?.type == .leftMouseDown
+        if keys.count > 1 && isMouse {
+            let menu = NSMenu(title: "Remove Shortcut")
+            for combo in keys {
+                let item = NSMenuItem(title: "Remove \(combo.displayName)", action: #selector(removeSpecificComboItem(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = combo
+                menu.addItem(item)
+            }
+            menu.addItem(.separator())
+            let allItem = NSMenuItem(title: "Remove All (\(keys.count) shortcuts)", action: #selector(removeAllCombos), keyEquivalent: "")
+            allItem.target = self
+            menu.addItem(allItem)
+
+            let pt = NSPoint(x: 0, y: removeButton.bounds.height + 2)
+            menu.popUp(positioning: nil, at: pt, in: removeButton)
+            return
+        }
+
+        removeAllCombos()
     }
 
     @objc private func resetPressed() {
@@ -228,5 +291,109 @@ final class ShortcutsPage: NSView, NSTableViewDataSource, NSTableViewDelegate, N
         table.reloadData()
         updateButtons()
         onChange?(bindings)
+    }
+}
+
+/// An individual keyboard shortcut badge with an inline "×" remove button.
+final class KeyPillView: NSView {
+    let action: CommandAction
+    let combo: KeyCombo
+    var onRemove: ((CommandAction, KeyCombo) -> Void)?
+
+    init(action: CommandAction, combo: KeyCombo, onRemove: @escaping (CommandAction, KeyCombo) -> Void) {
+        self.action = action
+        self.combo = combo
+        self.onRemove = onRemove
+        super.init(frame: .zero)
+
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let label = NSTextField(labelWithString: combo.displayName)
+        label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        label.textColor = .labelColor
+        label.lineBreakMode = .byClipping
+
+        let closeBtn = NSButton()
+        closeBtn.bezelStyle = .inline
+        closeBtn.isBordered = false
+        closeBtn.title = "×"
+        closeBtn.font = .systemFont(ofSize: 12, weight: .bold)
+        closeBtn.contentTintColor = .secondaryLabelColor
+        closeBtn.target = self
+        closeBtn.action = #selector(removeClicked)
+        closeBtn.toolTip = "Remove shortcut \(combo.displayName)"
+
+        let stack = NSStackView(views: [label, closeBtn])
+        stack.spacing = 3
+        stack.alignment = .centerY
+        stack.edgeInsets = NSEdgeInsets(top: 1, left: 5, bottom: 1, right: 3)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            closeBtn.widthAnchor.constraint(equalToConstant: 13),
+            closeBtn.heightAnchor.constraint(equalToConstant: 14),
+        ])
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let pillPath = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 4, yRadius: 4)
+
+        // Pill background: always crisp control background in the active appearance (never black on scroll)
+        NSColor.controlBackgroundColor.setFill()
+        pillPath.fill()
+
+        NSColor.separatorColor.setStroke()
+        pillPath.lineWidth = 1.0
+        pillPath.stroke()
+    }
+
+    @objc private func removeClicked() {
+        onRemove?(action, combo)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+}
+
+/// Custom table view with right-click context menu to remove individual shortcuts or add shortcuts.
+private final class ShortcutsTableView: NSTableView {
+    weak var shortcutsPage: ShortcutsPage?
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        let row = self.row(at: point)
+        guard row >= 0, let page = shortcutsPage, page.actions.indices.contains(row) else {
+            return super.menu(for: event)
+        }
+        selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        let action = page.actions[row]
+        let keys = page.bindings.keys(for: action)
+        let menu = NSMenu(title: action.label)
+        let addItem = NSMenuItem(title: "Add Shortcut…", action: #selector(page.addPressed), keyEquivalent: "")
+        addItem.target = page
+        menu.addItem(addItem)
+        if !keys.isEmpty {
+            menu.addItem(.separator())
+            for combo in keys {
+                let item = NSMenuItem(title: "Remove \(combo.displayName)", action: #selector(page.removeSpecificComboItem(_:)), keyEquivalent: "")
+                item.target = page
+                item.representedObject = combo
+                menu.addItem(item)
+            }
+            if keys.count > 1 {
+                menu.addItem(.separator())
+                let allItem = NSMenuItem(title: "Remove All (\(keys.count) shortcuts)", action: #selector(page.removeAllCombos), keyEquivalent: "")
+                allItem.target = page
+                menu.addItem(allItem)
+            }
+        }
+        return menu
     }
 }
