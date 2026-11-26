@@ -28,17 +28,16 @@ public final class FTPController {
         alert.messageText = "The server's certificate could not be verified"
         alert.informativeText = summary + "\n\nOnly trust it if you know this is the right server. ClassicCommander will remember exactly this key and refuse a different one later."
         alert.addButton(withTitle: "Cancel")
-        alert.addButton(withTitle: "Trust This Certificate")
+        alert.addButton(withTitle: "Trust")
         return Modal.run(alert) == .alertSecondButtonReturn
     }
     /// Asks whether to trust an SSH server's host key (fingerprints). Replaceable in tests.
     public var askHostKeyTrust: (String) -> Bool = { text in
         let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "This server's SSH host key is not known yet"
+        alert.messageText = "Unknown SSH host key"
         alert.informativeText = text + "\n\nOnly trust it if the fingerprint is right. ClassicCommander will remember these keys and refuse different ones later."
         alert.addButton(withTitle: "Cancel")
-        alert.addButton(withTitle: "Trust This Host Key")
+        alert.addButton(withTitle: "Trust")
         return Modal.run(alert) == .alertSecondButtonReturn
     }
     public private(set) lazy var managerWindow = FTPConnectionManagerController(ftp: self)

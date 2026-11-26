@@ -31,13 +31,13 @@ final class TransferDialogController: NSWindowController, NSComboBoxDelegate {
         self.question = question
         self.defaults = defaults
         self.sizeFormat = sizeFormat
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 210), styleMask: [.titled], backing: .buffered, defer: true)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 200), styleMask: [.titled], backing: .buffered, defer: true)
         window.title = AppWindows.title(question.verb)
         AppWindows.style(window)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.contentView = build()
-        AppWindows.setTabOrder([targetField, maskField, verifyBox, okButton, queueButton, cancelButton], in: window)
+        AppWindows.setTabOrder([targetField, maskField, verifyBox, queueButton, cancelButton, okButton], in: window)
         recount()
     }
 
@@ -70,17 +70,31 @@ final class TransferDialogController: NSWindowController, NSComboBoxDelegate {
         cancelButton.keyEquivalent = "\u{1b}"
         for b in [okButton, queueButton, cancelButton] {
             b.bezelStyle = .rounded
-            b.widthAnchor.constraint(greaterThanOrEqualToConstant: 110).isActive = true
+            b.widthAnchor.constraint(greaterThanOrEqualToConstant: AppWindows.Layout.buttonMinWidth).isActive = true
         }
-        let typeRow = NSStackView(views: [NSTextField(labelWithString: "Only files of type:"), NSView(), statsLabel])
-        let buttons = NSStackView(views: [okButton, queueButton, NSView(), cancelButton])
+        let typeLabel = NSTextField(labelWithString: "Only files of type:")
+        typeLabel.setContentHuggingPriority(.required, for: .horizontal)
+        typeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        statsLabel.setContentHuggingPriority(.required, for: .horizontal)
+        statsLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let typeSpacer = NSView()
+        typeSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let typeRow = NSStackView(views: [typeLabel, typeSpacer, statsLabel])
+        typeRow.spacing = AppWindows.Layout.controlSpacing
+
+        let buttonSpacer = NSView()
+        buttonSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let buttons = NSStackView(views: [queueButton, buttonSpacer, cancelButton, okButton])
+        buttons.spacing = AppWindows.Layout.controlSpacing
+
+        let m = AppWindows.Layout.margin
         let stack = NSStackView(views: [message, targetField, typeRow, maskField, verifyBox, buttons])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 8
-        stack.setCustomSpacing(14, after: targetField)
-        stack.setCustomSpacing(14, after: verifyBox)
-        stack.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
+        stack.spacing = AppWindows.Layout.controlSpacing
+        stack.setCustomSpacing(AppWindows.Layout.sectionSpacing, after: targetField)
+        stack.setCustomSpacing(AppWindows.Layout.margin, after: verifyBox)
+        stack.edgeInsets = NSEdgeInsets(top: m, left: m, bottom: m, right: m)
         stack.translatesAutoresizingMaskIntoConstraints = false
         let root = NSView()
         root.addSubview(stack)
@@ -89,10 +103,11 @@ final class TransferDialogController: NSWindowController, NSComboBoxDelegate {
             stack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             stack.topAnchor.constraint(equalTo: root.topAnchor),
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            targetField.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
-            typeRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
-            maskField.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
-            buttons.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
+            root.widthAnchor.constraint(equalToConstant: 480),
+            targetField.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+            typeRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+            maskField.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+            buttons.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
         ])
         return root
     }
@@ -250,7 +265,7 @@ final class ConflictDialogController: NSWindowController {
 
         buttons = Self.buttons.enumerated().map { i, entry in
             let b = NSButton(title: entry.0, target: self, action: #selector(pressed(_:)))
-            b.bezelStyle = .regularSquare
+            b.bezelStyle = .rounded
             b.tag = 1000 + i
             return b
         }
@@ -276,31 +291,30 @@ final class ConflictDialogController: NSWindowController {
         buttons[5].toolTip = "Rename (N)"
         buttons[6].toolTip = "Cancel (Esc)"
 
-        // Total Commander-style 3-column button layout:
-        // Col 1 (Overwrite): Replace, Replace All, Replace All Older
-        // Col 2 (Skip / Alt): Skip, Skip All, Rename…
-        // Col 3 (Dismiss): Cancel
-        for b in [buttons[0], buttons[1], buttons[4]] {
-            b.widthAnchor.constraint(equalToConstant: 140).isActive = true
+        // 3-column equal-width action rows (Overwrite row, Skip/Rename row) with Cancel at bottom-right.
+        let row1 = NSStackView(views: [buttons[0], buttons[1], buttons[4]])
+        let row2 = NSStackView(views: [buttons[2], buttons[3], buttons[5]])
+        for row in [row1, row2] {
+            row.distribution = .fillEqually
+            row.spacing = AppWindows.Layout.controlSpacing
         }
-        for b in [buttons[2], buttons[3], buttons[5]] {
-            b.widthAnchor.constraint(equalToConstant: 110).isActive = true
-        }
-        buttons[6].widthAnchor.constraint(equalToConstant: 90).isActive = true
+        buttons[6].widthAnchor.constraint(greaterThanOrEqualToConstant: AppWindows.Layout.buttonMinWidth).isActive = true
 
-        let grid = NSGridView(views: [
-            [buttons[0], buttons[2], buttons[6]],
-            [buttons[1], buttons[3], NSGridCell.emptyContentView],
-            [buttons[4], buttons[5], NSGridCell.emptyContentView],
-        ])
-        grid.rowSpacing = 8
-        grid.columnSpacing = 10
+        let sep = NSBox()
+        sep.boxType = .separator
 
-        let stack = NSStackView(views: [title, replace, with, grid])
+        let bottomBar = NSStackView(views: [NSView(), buttons[6]])
+        bottomBar.spacing = AppWindows.Layout.controlSpacing
+
+        let m = AppWindows.Layout.margin
+        let stack = NSStackView(views: [title, replace, with, row1, row2, sep, bottomBar])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 12
-        stack.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
+        stack.spacing = AppWindows.Layout.controlSpacing
+        stack.setCustomSpacing(AppWindows.Layout.sectionSpacing, after: title)
+        stack.setCustomSpacing(AppWindows.Layout.sectionSpacing, after: with)
+        stack.setCustomSpacing(AppWindows.Layout.sectionSpacing, after: row2)
+        stack.edgeInsets = NSEdgeInsets(top: m, left: m, bottom: m, right: m)
         stack.translatesAutoresizingMaskIntoConstraints = false
         let root = NSView()
         root.addSubview(stack)
@@ -309,8 +323,13 @@ final class ConflictDialogController: NSWindowController {
             stack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             stack.topAnchor.constraint(equalTo: root.topAnchor),
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            replace.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor, constant: -32),
-            with.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor, constant: -32),
+            root.widthAnchor.constraint(equalToConstant: 480),
+            replace.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor, constant: -m * 2),
+            with.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor, constant: -m * 2),
+            row1.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+            row2.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+            sep.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+            bottomBar.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
         ])
         return root
     }

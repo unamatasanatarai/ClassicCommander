@@ -22,11 +22,15 @@ enum AppWindows {
 
     /// Makes every window, dialog, menu and alert follow `theme`, now and when opened later.
     static func apply(_ theme: Theme) {
+        // Use macOS Blue (4) for native system focus rings/controls app-wide.
+        UserDefaults.standard.set(4, forKey: "AppleAccentColor")
         chrome = theme.chrome.nsColor
+        accent = theme.accent.nsColor
         NSApp.appearance = appearance(for: theme)
         styleButtonsWhenShown()
         for window in NSApp.windows where window.title.hasPrefix(appTitle) {
             style(window)
+            styleButtons(in: window)
         }
     }
 
@@ -78,10 +82,24 @@ enum AppWindows {
         if let root = window.contentView?.superview ?? window.contentView { styleButtons(in: root) }
     }
 
-    /// One look for every push button (as in Connect to FTP server): rounded, regular size, the
-    /// regular system font. Buttons in the same stack, or the same grid column, are as wide as the
-    /// widest of them. Checkboxes, radio buttons, pop-ups and borderless buttons are left alone;
-    /// hidden views and the pages of tab views are included. Running it again changes nothing.
+    /// Global design tokens (matching the unified dialog & control palette).
+    private(set) static var accent = Theme.standard.accent.nsColor   // #0a63e0 by default
+    static let danger = NSColor(srgbRed: 197 / 255, green: 34 / 255, blue: 31 / 255, alpha: 1)   // #c5221f
+    static let errorText = NSColor(srgbRed: 179 / 255, green: 38 / 255, blue: 30 / 255, alpha: 1) // #b3261e
+
+    /// Unified layout metrics shared across all windows, dialogs, and popups.
+    enum Layout {
+        static let margin: CGFloat = 16
+        static let sectionSpacing: CGFloat = 12
+        static let controlSpacing: CGFloat = 8
+        static let buttonMinWidth: CGFloat = 88
+    }
+
+    /// One look for every push button: rounded, regular size, the regular system font.
+    /// Buttons in the same stack, or the same grid column, are as wide as the widest of them.
+    /// Checkboxes, radio buttons, pop-ups, toggle pills (`.recessed`), and compact icon-only
+    /// buttons (`.regularSquare` with `.imageOnly`) are left alone; hidden views and the pages
+    /// of tab views are included. Running it again changes nothing.
     static func styleButtons(in root: NSView) {
         var groups: [ObjectIdentifier: [NSButton]] = [:]
         var order: [ObjectIdentifier] = []
@@ -108,7 +126,8 @@ enum AppWindows {
     }
 
     static func stylePushButton(_ button: NSButton) {
-        if button.bezelStyle != .regularSquare && button.bezelStyle != .recessed {
+        let isIconOnlySquare = button.bezelStyle == .regularSquare && button.imagePosition == .imageOnly
+        if !isIconOnlySquare && button.bezelStyle != .recessed && button.bezelStyle != .inline {
             button.bezelStyle = .rounded
         }
         button.controlSize = .regular
@@ -116,7 +135,12 @@ enum AppWindows {
         let title = button.attributedTitle
         let colour = title.length > 0 ? title.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor : nil
         let coloured = colour.map { $0 != .controlTextColor } ?? false
-        if !coloured { button.font = .systemFont(ofSize: NSFont.systemFontSize) }
+        if !coloured {
+            button.font = .systemFont(ofSize: NSFont.systemFontSize)
+        }
+        if button.keyEquivalent == "\r" && button.bezelColor != danger {
+            button.bezelColor = accent
+        }
     }
 
     /// Buttons side by side: the arranged views of one stack, or one column of a grid.
@@ -147,6 +171,22 @@ enum AppWindows {
             c.identifier = equalWidthID
             c.isActive = true
         }
+    }
+
+    // MARK: - Table Cells
+
+    /// Wraps a label in an `NSTableCellView` so its text is vertically centred and padded in the row.
+    static func centeredCell(_ label: NSTextField, leading: CGFloat = 4) -> NSTableCellView {
+        let cell = NSTableCellView()
+        cell.textField = label
+        label.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: leading),
+            label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -leading),
+            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        return cell
     }
 
     // MARK: - Tab Navigation & Key View Order

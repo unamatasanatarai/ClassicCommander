@@ -6,6 +6,7 @@ struct AppMain {
     private static var appDelegate: AppDelegate?
 
     static func main() {
+        UserDefaults.standard.set(4, forKey: "AppleAccentColor")
         let app = NSApplication.shared
         autoreleasepool {
             let delegate = AppDelegate()

@@ -159,25 +159,26 @@ public final class TransferProgressWindowController: NSWindowController {
         pauseButton.bezelStyle = .rounded
         pauseButton.target = self
         pauseButton.action = #selector(pausePressed)
-        pauseButton.widthAnchor.constraint(equalToConstant: 85).isActive = true
+        pauseButton.widthAnchor.constraint(greaterThanOrEqualToConstant: AppWindows.Layout.buttonMinWidth).isActive = true
+
+        backgroundButton.title = "Background"
+        backgroundButton.bezelStyle = .rounded
+        backgroundButton.target = self
+        backgroundButton.action = #selector(backgroundPressed)
+        backgroundButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 96).isActive = true
 
         cancelButton.title = "Cancel"
         cancelButton.bezelStyle = .rounded
         cancelButton.keyEquivalent = "\u{1b}"
         cancelButton.target = self
         cancelButton.action = #selector(cancelPressed)
-        cancelButton.widthAnchor.constraint(equalToConstant: 95).isActive = true
+        cancelButton.widthAnchor.constraint(greaterThanOrEqualToConstant: AppWindows.Layout.buttonMinWidth).isActive = true
 
-        backgroundButton.title = "Background"
-        backgroundButton.bezelStyle = .rounded
-        backgroundButton.target = self
-        backgroundButton.action = #selector(backgroundPressed)
-        backgroundButton.widthAnchor.constraint(equalToConstant: 95).isActive = true
-
-        let buttonsRow = NSStackView(views: [pauseButton, NSView(), cancelButton, NSView(), backgroundButton])
-        buttonsRow.spacing = 8
+        let buttonsRow = NSStackView(views: [pauseButton, backgroundButton, NSView(), cancelButton])
+        buttonsRow.spacing = AppWindows.Layout.controlSpacing
         buttonsRow.alignment = NSLayoutConstraint.Attribute.centerY
 
+        let m = AppWindows.Layout.margin
         let stack = NSStackView(views: [
             statusLabel,
             fromLabel,
@@ -194,8 +195,8 @@ public final class TransferProgressWindowController: NSWindowController {
         stack.setCustomSpacing(8, after: toLabel)
         stack.setCustomSpacing(6, after: fileRow)
         stack.setCustomSpacing(4, after: totalRow)
-        stack.setCustomSpacing(10, after: statsRow)
-        stack.edgeInsets = NSEdgeInsets(top: 12, left: 16, bottom: 12, right: 16)
+        stack.setCustomSpacing(AppWindows.Layout.sectionSpacing, after: statsRow)
+        stack.edgeInsets = NSEdgeInsets(top: m, left: m, bottom: m, right: m)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let root = NSView()
@@ -205,13 +206,13 @@ public final class TransferProgressWindowController: NSWindowController {
             stack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             stack.topAnchor.constraint(equalTo: root.topAnchor),
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            statusLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
-            fromLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
-            toLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
-            fileRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
-            totalRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
-            statsRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
-            buttonsRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
+            statusLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+            fromLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+            toLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+            fileRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+            totalRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+            statsRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+            buttonsRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
         ])
         return root
     }

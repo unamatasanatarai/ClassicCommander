@@ -320,15 +320,15 @@ public final class TransfersWindowController: NSWindowController, NSTableViewDat
         case "status":
             let label = NSTextField(labelWithString: job.statusText)
             if job.failedCount > 0 { label.textColor = .systemRed }
-            return label
+            return AppWindows.centeredCell(label)
         case "speed":
             let time = Int(job.elapsed)
             let text = job.state == .queued ? "" : "\(f.compact(Int64(job.speed)))/s · \(time / 60):\(String(format: "%02d", time % 60))"
-            return NSTextField(labelWithString: text)
+            return AppWindows.centeredCell(NSTextField(labelWithString: text))
         default:
             let label = NSTextField(labelWithString: "\(job.title)   (\(f.size(job.bytesProcessed, as: sizeFormat)) of \(f.size(job.bytesTotal, as: sizeFormat)))")
             label.lineBreakMode = .byTruncatingMiddle
-            return label
+            return AppWindows.centeredCell(label)
         }
     }
 
@@ -343,16 +343,16 @@ public final class TransfersWindowController: NSWindowController, NSTableViewDat
             let label = NSTextField(labelWithString: text)
             label.textColor = color
             label.toolTip = text
-            return label
+            return AppWindows.centeredCell(label)
         case "size":
             let label = NSTextField(labelWithString: item.isFolder ? "folder" : EntryFormatter.shared.size(item.size, as: sizeFormat))
             label.alignment = .right
-            return label
+            return AppWindows.centeredCell(label)
         default:
             let label = NSTextField(labelWithString: EntryFormatter.visible(item.destination.displayPath))
             label.lineBreakMode = .byTruncatingMiddle
             label.toolTip = "From \(item.source.displayPath)"
-            return label
+            return AppWindows.centeredCell(label)
         }
     }
 }

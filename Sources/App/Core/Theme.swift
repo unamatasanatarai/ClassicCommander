@@ -74,6 +74,7 @@ public enum ThemeSlot: String, CaseIterable {
     case headerBackground, headerText
     case chrome, chromeText, lines
     case markText, markOnCursorText
+    case accent
 
     public var label: String {
         switch self {
@@ -96,6 +97,7 @@ public enum ThemeSlot: String, CaseIterable {
         case .lines: return "Lines and borders"
         case .markText: return "Marked (selected) text"
         case .markOnCursorText: return "Marked text on cursor"
+        case .accent: return "Accent (buttons, inputs)"
         }
     }
 }
@@ -120,6 +122,7 @@ public struct Theme: Equatable {
     public var lines: RGBColor
     public var markText: RGBColor
     public var markOnCursorText: RGBColor
+    public var accent: RGBColor
 
     public subscript(slot: ThemeSlot) -> RGBColor {
         get {
@@ -143,6 +146,7 @@ public struct Theme: Equatable {
             case .lines: return lines
             case .markText: return markText
             case .markOnCursorText: return markOnCursorText
+            case .accent: return accent
             }
         }
         set {
@@ -166,6 +170,7 @@ public struct Theme: Equatable {
             case .lines: lines = newValue
             case .markText: markText = newValue
             case .markOnCursorText: markOnCursorText = newValue
+            case .accent: accent = newValue
             }
         }
     }
@@ -182,7 +187,8 @@ public struct Theme: Equatable {
                      headerBackground: c(.headerBackground),
                      headerText: c(.headerText), chrome: c(.chrome), chromeText: c(.chromeText),
                      lines: c(.lines), markText: c(.markText),
-                     markOnCursorText: colors[.markOnCursorText].flatMap(RGBColor.init(hex:)) ?? c(.markText).readable(on: c(.cursorBackground)))
+                     markOnCursorText: colors[.markOnCursorText].flatMap(RGBColor.init(hex:)) ?? c(.markText).readable(on: c(.cursorBackground)),
+                     accent: colors[.accent].flatMap(RGBColor.init(hex:)) ?? RGBColor(hex: "#0A63E0")!)
     }
 
     /// Total Commander's default look: white panels, grey chrome, light cursor bar with navy text.

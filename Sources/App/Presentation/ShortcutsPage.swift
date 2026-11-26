@@ -38,7 +38,7 @@ final class ShortcutsPage: NSView, NSTableViewDataSource, NSTableViewDelegate, N
         keysColumn.width = 280
         table.addTableColumn(actionColumn)
         table.addTableColumn(keysColumn)
-        table.rowHeight = 24
+        table.rowHeight = 26
         table.usesAlternatingRowBackgroundColors = true
         table.dataSource = self
         table.delegate = self
@@ -78,7 +78,7 @@ final class ShortcutsPage: NSView, NSTableViewDataSource, NSTableViewDelegate, N
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
             scroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
             filterField.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            scroll.heightAnchor.constraint(equalToConstant: 350),
+            scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 240),
             buttons.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
         table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
@@ -98,12 +98,12 @@ final class ShortcutsPage: NSView, NSTableViewDataSource, NSTableViewDelegate, N
             if recordingAction == action {
                 let label = NSTextField(labelWithString: "Press keys…  (Esc cancels)")
                 label.lineBreakMode = .byTruncatingTail
-                label.textColor = .controlAccentColor
-                return label
+                label.textColor = AppWindows.accent
+                return AppWindows.centeredCell(label)
             }
             let keys = bindings.keys(for: action)
             if keys.isEmpty {
-                return NSTextField(labelWithString: "")
+                return AppWindows.centeredCell(NSTextField(labelWithString: ""))
             }
             let container = NSStackView()
             container.orientation = .horizontal
@@ -117,16 +117,23 @@ final class ShortcutsPage: NSView, NSTableViewDataSource, NSTableViewDelegate, N
                 pill.setContentCompressionResistancePriority(.required, for: .horizontal)
                 container.addArrangedSubview(pill)
             }
-            // Flexible trailing spacer prevents pills from being stretched horizontally on table scroll/reuse
             let spacer = NSView()
             spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
             spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             container.addArrangedSubview(spacer)
-            return container
+            let cell = NSTableCellView()
+            container.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(container)
+            NSLayoutConstraint.activate([
+                container.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                container.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+                container.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            ])
+            return cell
         } else {
             let label = NSTextField(labelWithString: action.label)
             label.lineBreakMode = .byTruncatingTail
-            return label
+            return AppWindows.centeredCell(label)
         }
     }
 
@@ -309,17 +316,22 @@ final class KeyPillView: NSView {
         setContentHuggingPriority(.required, for: .horizontal)
         setContentCompressionResistancePriority(.required, for: .horizontal)
 
+        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let pillText = NSColor(srgbRed: isDark ? 0.92 : 0.12, green: isDark ? 0.92 : 0.12, blue: isDark ? 0.94 : 0.13, alpha: 1)
+        let pillMute = NSColor(srgbRed: isDark ? 0.65 : 0.40, green: isDark ? 0.65 : 0.40, blue: isDark ? 0.68 : 0.43, alpha: 1)
+
         let label = NSTextField(labelWithString: combo.displayName)
         label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
-        label.textColor = .labelColor
+        label.textColor = pillText
         label.lineBreakMode = .byClipping
 
         let closeBtn = NSButton()
         closeBtn.bezelStyle = .inline
         closeBtn.isBordered = false
-        closeBtn.title = "×"
-        closeBtn.font = .systemFont(ofSize: 12, weight: .bold)
-        closeBtn.contentTintColor = .secondaryLabelColor
+        closeBtn.attributedTitle = NSAttributedString(string: "×", attributes: [
+            .foregroundColor: pillMute,
+            .font: NSFont.systemFont(ofSize: 12, weight: .bold),
+        ])
         closeBtn.target = self
         closeBtn.action = #selector(removeClicked)
         closeBtn.toolTip = "Remove shortcut \(combo.displayName)"

@@ -50,7 +50,7 @@ final class FTPProfileEditorController: NSWindowController, NSTabViewDelegate {
         self.profile = profile
         self.initialPassword = password
         self.isNew = isNew
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 560), styleMask: [.titled], backing: .buffered, defer: true)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 520), styleMask: [.titled], backing: .buffered, defer: true)
         window.title = AppWindows.title("Connection settings")
         AppWindows.style(window)
         super.init(window: window)
@@ -160,6 +160,8 @@ final class FTPProfileEditorController: NSWindowController, NSTabViewDelegate {
 
         let tabs = self.tabs
         tabs.delegate = self
+        tabs.drawsBackground = false
+        tabs.tabViewBorderType = .none
         for (title, view) in [("General", general), ("Advanced", advanced)] {
             let item = NSTabViewItem(identifier: title)
             item.label = title
@@ -186,13 +188,15 @@ final class FTPProfileEditorController: NSWindowController, NSTabViewDelegate {
         cancelButton.keyEquivalent = "\u{1b}"
         testResult.preferredMaxLayoutWidth = 560
         testResult.textColor = .secondaryLabelColor
+        let m = AppWindows.Layout.margin
         let buttons = NSStackView(views: [testButton, NSView(), cancelButton, okButton])
+        buttons.spacing = AppWindows.Layout.controlSpacing
 
         let stack = NSStackView(views: [tabs, testResult, buttons])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+        stack.spacing = AppWindows.Layout.controlSpacing
+        stack.edgeInsets = NSEdgeInsets(top: m, left: m, bottom: m, right: m)
         stack.translatesAutoresizingMaskIntoConstraints = false
         let root = NSView()
         root.addSubview(stack)
@@ -201,10 +205,10 @@ final class FTPProfileEditorController: NSWindowController, NSTabViewDelegate {
             stack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             stack.topAnchor.constraint(equalTo: root.topAnchor),
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            tabs.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
-            tabs.heightAnchor.constraint(equalToConstant: 470),
-            buttons.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
-            testResult.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
+            tabs.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+            tabs.heightAnchor.constraint(equalToConstant: 430),
+            buttons.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+            testResult.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
         ])
         return root
     }

@@ -445,25 +445,42 @@ public final class UIGallery: NSObject {
     }
 
     @objc public func showPackFilesProgress() {
-        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 110), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 116), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         win.title = AppWindows.title("Pack Files")
         AppWindows.style(win)
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 110))
+        let content = NSView()
         let label = NSTextField(labelWithString: "Packing release-archive.zip…")
-        label.frame = NSRect(x: 20, y: 74, width: 340, height: 18)
         label.font = .systemFont(ofSize: 12, weight: .medium)
-        let bar = NSProgressIndicator(frame: NSRect(x: 20, y: 46, width: 340, height: 20))
+        label.lineBreakMode = .byTruncatingMiddle
+        let bar = NSProgressIndicator()
         bar.style = .bar
         bar.isIndeterminate = true
         bar.startAnimation(nil)
         let cancelBtn = NSButton(title: "Cancel", target: win, action: #selector(NSWindow.performClose(_:)))
-        cancelBtn.frame = NSRect(x: 280, y: 12, width: 80, height: 26)
         cancelBtn.bezelStyle = .rounded
-        content.addSubview(label)
-        content.addSubview(bar)
-        content.addSubview(cancelBtn)
+        cancelBtn.keyEquivalent = "\u{1b}"
+        cancelBtn.widthAnchor.constraint(greaterThanOrEqualToConstant: AppWindows.Layout.buttonMinWidth).isActive = true
+        let btnRow = NSStackView(views: [NSView(), cancelBtn])
+        let m = AppWindows.Layout.margin
+        let stack = NSStackView(views: [label, bar, btnRow])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = AppWindows.Layout.controlSpacing
+        stack.edgeInsets = NSEdgeInsets(top: m, left: m, bottom: m, right: m)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: content.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            content.widthAnchor.constraint(equalToConstant: 400),
+            label.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+            bar.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+            btnRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+        ])
         win.contentView = content
-        win.center()
+        AppWindows.place(win)
         let wc = NSWindowController(window: win)
         activeControllers.append(wc)
         win.makeKeyAndOrderFront(nil)
@@ -489,26 +506,26 @@ public final class UIGallery: NSObject {
     // MARK: - Dialogs, Prompts & Alerts
 
     private func showModelessAlert(_ alert: NSAlert) {
-        Modal.style(alert)
-        let win = alert.window
-        win.isReleasedWhenClosed = false
-        for button in alert.buttons {
-            button.target = win
-            button.action = #selector(NSWindow.performClose(_:))
+        var winRef: NSWindow?
+        let win = Modal.dialogWindow(for: alert) { _ in
+            winRef?.performClose(nil)
         }
+        winRef = win
         let wc = NSWindowController(window: win)
         activeControllers.append(wc)
+        AppWindows.place(win)
         win.makeKeyAndOrderFront(nil)
     }
 
     @objc public func showNewFolderPrompt() {
         let alert = NSAlert()
         alert.messageText = "New Folder"
-        alert.informativeText = "New folder (directory):"
+        alert.informativeText = "Create in ~/Documents/Projects"
         alert.addButton(withTitle: "Create")
         alert.addButton(withTitle: "Cancel")
-        let field = NSTextField(string: "My New Folder")
-        field.frame = NSRect(x: 0, y: 0, width: 420, height: 24)
+        let field = NSTextField(string: "")
+        field.placeholderString = "Folder name"
+        field.frame = NSRect(x: 0, y: 0, width: 400, height: 24)
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
         showModelessAlert(alert)
@@ -517,11 +534,12 @@ public final class UIGallery: NSObject {
     @objc public func showSelectMaskPrompt() {
         let alert = NSAlert()
         alert.messageText = "Select files"
-        alert.informativeText = "Select files by mask:"
+        alert.informativeText = "Match by file name mask"
         alert.addButton(withTitle: "Select")
         alert.addButton(withTitle: "Cancel")
-        let field = NSTextField(string: "*.*")
-        field.frame = NSRect(x: 0, y: 0, width: 420, height: 24)
+        let field = NSTextField(string: "*")
+        field.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        field.frame = NSRect(x: 0, y: 0, width: 400, height: 24)
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
         showModelessAlert(alert)
@@ -530,11 +548,12 @@ public final class UIGallery: NSObject {
     @objc public func showDeselectMaskPrompt() {
         let alert = NSAlert()
         alert.messageText = "Deselect files"
-        alert.informativeText = "Deselect files by mask:"
+        alert.informativeText = "Remove matching files from the selection"
         alert.addButton(withTitle: "Deselect")
         alert.addButton(withTitle: "Cancel")
         let field = NSTextField(string: "*.tmp;*.bak")
-        field.frame = NSRect(x: 0, y: 0, width: 420, height: 24)
+        field.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        field.frame = NSRect(x: 0, y: 0, width: 400, height: 24)
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
         showModelessAlert(alert)
@@ -542,9 +561,9 @@ public final class UIGallery: NSObject {
 
     @objc public func showDeleteTrashConfirm() {
         let alert = NSAlert()
-        alert.messageText = "Delete"
-        alert.informativeText = "Do you want to move 4 marked files to the Trash?"
-        alert.addButton(withTitle: "Delete")
+        alert.messageText = "Move 4 files to the Trash?"
+        alert.informativeText = "You can restore them from the Trash later."
+        alert.addButton(withTitle: "Move to Trash")
         alert.addButton(withTitle: "Cancel")
         showModelessAlert(alert)
     }
@@ -552,8 +571,8 @@ public final class UIGallery: NSObject {
     @objc public func showDeletePermanentConfirm() {
         let alert = NSAlert()
         alert.alertStyle = .critical
-        alert.messageText = "Delete permanently"
-        alert.informativeText = "Do you want to delete 4 files permanently?\nThis cannot be undone."
+        alert.messageText = "Delete 4 files permanently?"
+        alert.informativeText = "They will be removed immediately and can't be recovered."
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         showModelessAlert(alert)
@@ -561,52 +580,57 @@ public final class UIGallery: NSObject {
 
     @objc public func showOperationProblems() {
         let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "Copy problems (3 errors)"
+        alert.messageText = "Copy finished with 3 errors"
         let text = """
+        These items were not copied.
         • Permission denied: /Volumes/BB/system/config.sys
         • Target volume is read-only: /Volumes/Backup
-        • Connection reset by peer (SFTP transfer interrupted)
+        • Connection reset by peer: The SFTP transfer was interrupted.
         """
         alert.informativeText = text
         alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Copy details")
         showModelessAlert(alert)
     }
 
     @objc public func showCertTrustAlert() {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "The server's certificate could not be verified"
+        alert.messageText = "Can't verify this server's certificate"
         alert.informativeText = """
-        Certificate for sftp.example.com expired on 2026-10-15.
+        sftp.example.com
+        Problem: Expired on 2026-10-15
         Issuer: Let's Encrypt Authority X3
-        SHA-256 Fingerprint: 3A:5B:C8:41:9E:52:19:D4:E8:22:15:AC...
+        SHA-256: 3A:5B:C8:41:9E:52:19:D4:E8:22:15:AC…
 
         Only trust it if you know this is the right server.
         """
         alert.addButton(withTitle: "Cancel")
-        alert.addButton(withTitle: "Trust This Certificate")
+        alert.addButton(withTitle: "Trust anyway")
         showModelessAlert(alert)
     }
 
     @objc public func showHostKeyAlert() {
         let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "This server's SSH host key is not known yet"
+        alert.messageText = "Unknown SSH host key"
         alert.informativeText = """
+        You haven't connected to this server before.
         Server: sftp.example.com (port 22)
         Key type: ED25519 (256 bit)
-        Fingerprint: SHA256:4d82f7c00643ea1824c77609a84b067d983415eb...
+        Fingerprint: SHA256:4d82f7c00643ea1824c77609a84b067d983415eb…
 
-        Do you want to trust this host key and continue connecting?
+        Trust this host key and continue connecting?
         """
+        alert.addButton(withTitle: "Trust and connect")
         alert.addButton(withTitle: "Cancel")
-        alert.addButton(withTitle: "Trust This Host Key")
         showModelessAlert(alert)
     }
 
     @objc public func showAboutPanel() {
-        NSApp.orderFrontStandardAboutPanel(nil)
+        AboutWindowController.shared.present()
+        if !activeControllers.contains(where: { $0 === AboutWindowController.shared }) {
+            activeControllers.append(AboutWindowController.shared)
+        }
     }
 
     // MARK: - Helpers

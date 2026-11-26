@@ -114,12 +114,12 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
     init(commander: CommanderView, defaults: UserDefaults = .standard) {
         self.commander = commander
         self.defaults = defaults
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 690),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 580),
                               styleMask: [.titled, .closable, .resizable, .miniaturizable],
                               backing: .buffered, defer: true)
         window.title = AppWindows.title("Find Files")
         AppWindows.style(window)
-        window.minSize = NSSize(width: 780, height: 600)
+        window.minSize = NSSize(width: 700, height: 520)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
@@ -198,7 +198,7 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
         let allButtons = [startButton, cancelButton, viewButton, newSearchButton, goToButton, feedButton,
                           browseButton, drivesButton]
         wire(allButtons, #selector(buttonPressed(_:)))
-        for b in allButtons { b.bezelStyle = .regularSquare }
+        for b in allButtons { b.bezelStyle = .rounded }
         startButton.keyEquivalent = "\r"
         cancelButton.keyEquivalent = "\u{1b}"
         let side = NSStackView(views: [startButton, cancelButton])
@@ -336,7 +336,7 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
             p.datePickerStyle = .textField
             p.datePickerElements = .yearMonthDay
             p.dateValue = Date()
-            b.bezelStyle = .regularSquare
+            b.bezelStyle = .rounded
             b.target = self
             b.action = #selector(showCalendar(_:))
         }
@@ -865,7 +865,7 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
             label = NSTextField(labelWithString: EntryFormatter.visible(shown) + (rows[i].item.isDirectory ? "/" : ""))
             label.lineBreakMode = .byTruncatingMiddle
         }
-        return label
+        return AppWindows.centeredCell(label)
     }
 
     public func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {

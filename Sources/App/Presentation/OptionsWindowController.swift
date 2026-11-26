@@ -29,6 +29,10 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
     private let previewActive: PanelView
     private let previewInactive: PanelView
     private let previewPair: PreviewPair
+    private let previewInput = NSTextField(string: "Sample input")
+    private let previewCheckbox = NSButton(checkboxWithTitle: "Option", target: nil, action: nil)
+    private let previewCancelButton = NSButton(title: "Cancel", target: nil, action: nil)
+    private let previewApplyButton = NSButton(title: "Save", target: nil, action: nil)
     private let bracketsCheckbox = NSButton(checkboxWithTitle: "Show square brackets around directory names",
                                             target: nil, action: nil)
     private let functionBarCheckbox = NSButton(checkboxWithTitle: "Show function key buttons (Copy, Move, NewFolder, Delete)",
@@ -36,9 +40,9 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
     private let statusIconCheckbox = NSButton(checkboxWithTitle: "Show icon in the menu bar", target: nil, action: nil)
     let hiddenFilesCheckbox = NSButton(checkboxWithTitle: "Show hidden files (names starting with a dot)  ⌘⇧.", target: nil, action: nil)
     /// Sizes in the Copy / Move dialogs and the queue: bytes or readable.
-    let sizeFormatPopup = NSPopUpButton()
-    /// The tab bar: with two or more tabs, or always.
-    let tabBarPopup = NSPopUpButton()
+    let sizeBytesCheckbox = NSButton(checkboxWithTitle: "Show exact byte counts in copy dialogs and the queue (off: readable, e.g. 1,9 MB)", target: nil, action: nil)
+    /// The tab bar: always or only with two or more tabs.
+    let tabBarAlwaysCheckbox = NSButton(checkboxWithTitle: "Always show the tab bar (even with one tab; ⌃T new tab, middle-click closes)", target: nil, action: nil)
     private let sizeCheckbox = NSButton(checkboxWithTitle: "Space calculates the size of folders",
                                         target: nil, action: nil)
     /// FTP/SFTP transfers at the same time: total, uploads, downloads (0 = the total).
@@ -60,12 +64,12 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
     /// Long right-click: seconds until the context menu opens.
     let holdField = NSTextField()
     /// Refresh automatically: off, on create/delete/rename, or on every change.
-    let autoRefreshPopup = NSPopUpButton()
+    var autoRefreshRadios: [NSButton] = []
     /// Finder's "Open With → ClassicCommander": left or right panel.
-    let finderPanelPopup = NSPopUpButton()
+    let finderPanelControl = NSSegmentedControl(labels: FinderPanel.allCases.map(\.label), trackingMode: .selectOne, target: nil, action: nil)
     private let holdStepper = NSStepper()
     let shortcutsPage = ShortcutsPage()
-    private let quickSearchPopup = NSPopUpButton()
+    private var quickSearchRadios: [NSButton] = []
     private let filterByDefaultCheckbox = NSButton(checkboxWithTitle: "Filter files by default (hide non-matching names)",
                                                    target: nil, action: nil)
     private let pageList = OptionsPageList(pages: ["Display", "Operation", "Quick Search", "FTP", "Color", "Shortcuts"])
@@ -87,11 +91,12 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         previewPair = PreviewPair(active: previewActive, inactive: previewInactive)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 860, height: 680),
-            styleMask: [.titled, .closable],
+            contentRect: NSRect(x: 0, y: 0, width: 740, height: 600),
+            styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: true
         )
+        window.minSize = NSSize(width: 680, height: 560)
         window.title = AppWindows.title("Options")
         AppWindows.style(window)
         window.isReleasedWhenClosed = false
@@ -153,18 +158,19 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
 
         let ok = button("OK", action: #selector(okPressed), key: "\r")
         let cancel = button("Cancel", action: #selector(cancelPressed), key: "\u{1b}")
-        let buttons = NSStackView(views: [ok, cancel])
+        let buttons = NSStackView(views: [cancel, ok])
         let exportButton = button("Export…", action: #selector(exportPressed), key: "")
         let importButton = button("Import…", action: #selector(importPressed), key: "")
         let fileButtons = NSStackView(views: [exportButton, importButton])
-        fileButtons.spacing = 8
+        fileButtons.spacing = AppWindows.Layout.controlSpacing
         fileButtons.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(fileButtons)
+        let m = AppWindows.Layout.margin
         NSLayoutConstraint.activate([
-            fileButtons.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
-            fileButtons.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14),
+            fileButtons.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: m),
+            fileButtons.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -m),
         ])
-        buttons.spacing = 8
+        buttons.spacing = AppWindows.Layout.controlSpacing
 
         for v in [sidebar, buttons] + pages {
             v.translatesAutoresizingMaskIntoConstraints = false
@@ -172,28 +178,28 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         }
         for page in pages {
             NSLayoutConstraint.activate([
-                page.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: 16),
-                page.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
-                page.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
-                page.bottomAnchor.constraint(lessThanOrEqualTo: buttons.topAnchor, constant: -12),
+                page.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: m),
+                page.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -m),
+                page.topAnchor.constraint(equalTo: root.topAnchor, constant: m),
+                page.bottomAnchor.constraint(lessThanOrEqualTo: buttons.topAnchor, constant: -AppWindows.Layout.sectionSpacing),
             ])
         }
         showPage(0)
         NSLayoutConstraint.activate([
-            searchField.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
-            searchField.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
+            searchField.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: m),
+            searchField.topAnchor.constraint(equalTo: root.topAnchor, constant: m),
             searchField.widthAnchor.constraint(equalTo: sidebar.widthAnchor),
             noMatchLabel.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 8),
             noMatchLabel.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -8),
             noMatchLabel.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 8),
-            sidebar.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
-            sidebar.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 8),
-            sidebar.widthAnchor.constraint(equalToConstant: 160),
-            sidebar.bottomAnchor.constraint(equalTo: buttons.topAnchor, constant: -12),
+            sidebar.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: m),
+            sidebar.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: AppWindows.Layout.controlSpacing),
+            sidebar.widthAnchor.constraint(equalToConstant: 150),
+            sidebar.bottomAnchor.constraint(equalTo: buttons.topAnchor, constant: -AppWindows.Layout.sectionSpacing),
 
-            buttons.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
-            buttons.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14),
-            ok.widthAnchor.constraint(greaterThanOrEqualToConstant: 80),
+            buttons.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -m),
+            buttons.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -m),
+            ok.widthAnchor.constraint(greaterThanOrEqualToConstant: AppWindows.Layout.buttonMinWidth),
             cancel.widthAnchor.constraint(equalTo: ok.widthAnchor),
         ])
         return root
@@ -217,6 +223,7 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
     static func searchableText(of view: NSView) -> String? {
         switch view {
         case let popup as NSPopUpButton: return popup.itemTitles.joined(separator: " ")
+        case let seg as NSSegmentedControl: return (0..<seg.segmentCount).compactMap { seg.label(forSegment: $0) }.joined(separator: " ")
         case let button as NSButton: return button.title
         case let field as NSTextField where !field.isEditable: return field.stringValue
         default: return nil
@@ -269,23 +276,11 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
     private func buildDisplayPage() -> NSView {
         let title = NSTextField(labelWithString: "Display")
         title.font = .boldSystemFont(ofSize: 15)
-        bracketsCheckbox.target = self
-        bracketsCheckbox.action = #selector(displayToggled)
-        functionBarCheckbox.target = self
-        functionBarCheckbox.action = #selector(displayToggled)
-        statusIconCheckbox.target = self
-        statusIconCheckbox.action = #selector(displayToggled)
-        hiddenFilesCheckbox.target = self
-        hiddenFilesCheckbox.action = #selector(displayToggled)
-        sizeFormatPopup.addItems(withTitles: SizeFormat.allCases.map(\.label))
-        sizeFormatPopup.target = self
-        sizeFormatPopup.action = #selector(displayToggled)
-        let sizeRow = NSStackView(views: [NSTextField(labelWithString: "Sizes in copy dialogs and the queue:"), sizeFormatPopup])
-        tabBarPopup.addItems(withTitles: TabBarMode.allCases.map(\.label))
-        tabBarPopup.target = self
-        tabBarPopup.action = #selector(displayToggled)
-        let tabRow = NSStackView(views: [NSTextField(labelWithString: "Show the tab bar (⌃T new tab, middle-click closes):"), tabBarPopup])
-        let stack = NSStackView(views: [title, bracketsCheckbox, functionBarCheckbox, statusIconCheckbox, hiddenFilesCheckbox, sizeRow, tabRow])
+        for box in [bracketsCheckbox, functionBarCheckbox, statusIconCheckbox, hiddenFilesCheckbox, sizeBytesCheckbox, tabBarAlwaysCheckbox] {
+            box.target = self
+            box.action = #selector(displayToggled)
+        }
+        let stack = NSStackView(views: [title, bracketsCheckbox, functionBarCheckbox, statusIconCheckbox, hiddenFilesCheckbox, sizeBytesCheckbox, tabBarAlwaysCheckbox])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
@@ -320,14 +315,24 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         let holdRow = NSStackView(views: [NSTextField(labelWithString: "Hold the right mouse button"), holdField, holdStepper,
                                           NSTextField(labelWithString: "seconds for the context menu")])
         holdRow.spacing = 6
-        finderPanelPopup.addItems(withTitles: FinderPanel.allCases.map(\.label))
-        finderPanelPopup.target = self
-        finderPanelPopup.action = #selector(finderPanelChosen)
-        let finderRow = NSStackView(views: [NSTextField(labelWithString: "Finder's Open With → ClassicCommander opens in the"), finderPanelPopup])
-        autoRefreshPopup.addItems(withTitles: AutoRefresh.allCases.map(\.label))
-        autoRefreshPopup.target = self
-        autoRefreshPopup.action = #selector(autoRefreshChosen)
-        let refreshRow = NSStackView(views: [NSTextField(labelWithString: "Refresh automatically:"), autoRefreshPopup])
+        finderPanelControl.target = self
+        finderPanelControl.action = #selector(finderPanelChosen)
+        let finderRow = NSStackView(views: [NSTextField(labelWithString: "Finder's Open With → ClassicCommander opens in:"), finderPanelControl])
+        finderRow.spacing = 8
+        let refreshHeading = NSTextField(labelWithString: "Refresh automatically:")
+        autoRefreshRadios = AutoRefresh.allCases.enumerated().map { i, mode in
+            let r = NSButton(radioButtonWithTitle: mode.label, target: self, action: #selector(autoRefreshChosen(_:)))
+            r.tag = i
+            return r
+        }
+        let refreshGroup = NSStackView(views: autoRefreshRadios)
+        refreshGroup.orientation = .vertical
+        refreshGroup.alignment = .leading
+        refreshGroup.spacing = 4
+        let refreshContainer = NSStackView(views: [refreshHeading, refreshGroup])
+        refreshContainer.orientation = .vertical
+        refreshContainer.alignment = .leading
+        refreshContainer.spacing = 4
         terminalPopup.target = self
         terminalPopup.action = #selector(terminalChosen)
         terminalArgumentsField.placeholderString = "empty: open the folder with the app"
@@ -346,31 +351,36 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         terminalHint.font = .systemFont(ofSize: 11)
         terminalHint.preferredMaxLayoutWidth = 380
         let stack = NSStackView(views: [title, heading, sizeCheckbox, moveDownCheckbox, selectionHeading, maskFoldersCheckbox, hideOthersCheckbox, renameExtensionCheckbox, holdRow,
-                                        finderRow, refreshRow, terminalHeading, terminalGrid, terminalHint])
+                                        finderRow, refreshContainer, terminalHeading, terminalGrid, terminalHint])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 12
-        stack.setCustomSpacing(6, after: heading)
-        stack.setCustomSpacing(8, after: sizeCheckbox)
-        stack.setCustomSpacing(24, after: moveDownCheckbox)
-        stack.setCustomSpacing(6, after: selectionHeading)
-        stack.setCustomSpacing(8, after: hideOthersCheckbox)
-        stack.setCustomSpacing(8, after: maskFoldersCheckbox)
-        stack.setCustomSpacing(8, after: renameExtensionCheckbox)
-        stack.setCustomSpacing(24, after: refreshRow)
-        stack.setCustomSpacing(6, after: terminalHeading)
-        stack.setCustomSpacing(6, after: terminalGrid)
+        stack.spacing = 8
+        stack.setCustomSpacing(4, after: heading)
+        stack.setCustomSpacing(6, after: sizeCheckbox)
+        stack.setCustomSpacing(12, after: moveDownCheckbox)
+        stack.setCustomSpacing(4, after: selectionHeading)
+        stack.setCustomSpacing(6, after: hideOthersCheckbox)
+        stack.setCustomSpacing(6, after: maskFoldersCheckbox)
+        stack.setCustomSpacing(6, after: renameExtensionCheckbox)
+        stack.setCustomSpacing(12, after: refreshContainer)
+        stack.setCustomSpacing(4, after: terminalHeading)
+        stack.setCustomSpacing(4, after: terminalGrid)
         return stack
     }
 
     private func buildQuickSearchPage() -> NSView {
         let title = NSTextField(labelWithString: "Quick Search")
         title.font = .boldSystemFont(ofSize: 15)
-        quickSearchPopup.addItems(withTitles: QuickSearchOptions.Activation.allCases.map(\.label))
-        quickSearchPopup.target = self
-        quickSearchPopup.action = #selector(quickSearchChanged)
-        let row = NSStackView(views: [NSTextField(labelWithString: "Start quick search with:"), quickSearchPopup])
-        row.spacing = 8
+        let activationHeading = NSTextField(labelWithString: "Start quick search with:")
+        quickSearchRadios = QuickSearchOptions.Activation.allCases.enumerated().map { i, mode in
+            let r = NSButton(radioButtonWithTitle: mode.label, target: self, action: #selector(quickSearchRadioChanged(_:)))
+            r.tag = i
+            return r
+        }
+        let radioGroup = NSStackView(views: quickSearchRadios)
+        radioGroup.orientation = .vertical
+        radioGroup.alignment = .leading
+        radioGroup.spacing = 6
 
         filterByDefaultCheckbox.target = self
         filterByDefaultCheckbox.action = #selector(quickSearchChanged)
@@ -383,16 +393,25 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
             With “Letters alone”, keys that have a shortcut (h j k l, 5–8 …) keep their shortcut.
             """)
         help.textColor = .secondaryLabelColor
-        help.preferredMaxLayoutWidth = 560
-        let stack = NSStackView(views: [title, row, filterByDefaultCheckbox, help])
+        help.preferredMaxLayoutWidth = 520
+        let stack = NSStackView(views: [title, activationHeading, radioGroup, filterByDefaultCheckbox, help])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
+        stack.setCustomSpacing(6, after: activationHeading)
         return stack
     }
 
+    @objc func quickSearchRadioChanged(_ sender: NSButton) {
+        for (i, r) in quickSearchRadios.enumerated() { r.state = i == sender.tag ? .on : .off }
+        working.quickSearch.activation = QuickSearchOptions.Activation.allCases[sender.tag]
+        working.quickSearch.filterByDefault = filterByDefaultCheckbox.state == .on
+    }
+
     @objc func quickSearchChanged() {
-        working.quickSearch.activation = QuickSearchOptions.Activation.allCases[max(0, quickSearchPopup.indexOfSelectedItem)]
+        if let idx = quickSearchRadios.firstIndex(where: { $0.state == .on }) {
+            working.quickSearch.activation = QuickSearchOptions.Activation.allCases[idx]
+        }
         working.quickSearch.filterByDefault = filterByDefaultCheckbox.state == .on
     }
 
@@ -400,12 +419,13 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         let title = NSTextField(labelWithString: "FTP")
         title.font = .boldSystemFont(ofSize: 15)
 
-        let transfersHeading = NSTextField(labelWithString: "FTP / SFTP transfers at the same time:")
+        let transfersHeading = NSTextField(labelWithString: "Concurrent transfers")
+        transfersHeading.font = .systemFont(ofSize: 13, weight: .semibold)
         var rows: [[NSView]] = []
         for (i, name) in ["Total open transfers:", "Max uploads:", "Max downloads:"].enumerated() {
             let field = transferFields[i], stepper = transferSteppers[i]
             field.alignment = .right
-            field.widthAnchor.constraint(equalToConstant: 44).isActive = true
+            field.widthAnchor.constraint(equalToConstant: 48).isActive = true
             let formatter = NumberFormatter()
             formatter.minimum = i == 0 ? 1 : 0
             formatter.maximum = 32
@@ -419,17 +439,29 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
             stepper.valueWraps = false
             stepper.target = self
             stepper.action = #selector(transfersChanged(_:))
-            rows.append([NSTextField(labelWithString: name), NSStackView(views: [field, stepper])])
+            let controlPair = NSStackView(views: [field, stepper])
+            controlPair.spacing = 4
+            let rowLabel = NSTextField(labelWithString: name)
+            rowLabel.setContentHuggingPriority(.required, for: .horizontal)
+            rows.append([rowLabel, controlPair])
         }
         let grid = NSGridView(views: rows)
         grid.column(at: 0).xPlacement = .trailing
-        grid.rowSpacing = 6
+        grid.column(at: 1).xPlacement = .leading
+        grid.rowSpacing = AppWindows.Layout.controlSpacing
+        grid.columnSpacing = 10
+        grid.setContentHuggingPriority(.required, for: .horizontal)
+
         let hint = NSTextField(wrappingLabelWithString: "0 uploads or downloads = up to the total. Applies to files that start next.")
         hint.textColor = .secondaryLabelColor
         hint.font = .systemFont(ofSize: 11)
-        hint.preferredMaxLayoutWidth = 380
+        hint.preferredMaxLayoutWidth = 520
 
-        let connectionHeading = NSTextField(labelWithString: "Connections & Security:")
+        let sep = NSBox()
+        sep.boxType = .separator
+
+        let connectionHeading = NSTextField(labelWithString: "Connections & Security")
+        connectionHeading.font = .systemFont(ofSize: 13, weight: .semibold)
         let connectionInfo = NSTextField(wrappingLabelWithString: """
             Saved FTP, FTPS, and SFTP connections are configured in the Connection Manager (⌃F).
             Passwords and SSH passphrases are stored encrypted in the macOS Keychain.
@@ -437,19 +469,19 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
             """)
         connectionInfo.textColor = .secondaryLabelColor
         connectionInfo.font = .systemFont(ofSize: 12)
-        connectionInfo.preferredMaxLayoutWidth = 460
+        connectionInfo.preferredMaxLayoutWidth = 520
 
         let openManagerButton = button("Open FTP Connection Manager… (⌃F)", action: #selector(openFTPManagerPressed), key: "")
 
-        let stack = NSStackView(views: [title, transfersHeading, grid, hint, connectionHeading, connectionInfo, openManagerButton])
+        let stack = NSStackView(views: [title, transfersHeading, grid, hint, sep, connectionHeading, connectionInfo, openManagerButton])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 12
-        stack.setCustomSpacing(6, after: transfersHeading)
-        stack.setCustomSpacing(6, after: grid)
-        stack.setCustomSpacing(20, after: hint)
-        stack.setCustomSpacing(6, after: connectionHeading)
-        stack.setCustomSpacing(10, after: connectionInfo)
+        stack.spacing = AppWindows.Layout.controlSpacing
+        stack.setCustomSpacing(AppWindows.Layout.sectionSpacing, after: title)
+        stack.setCustomSpacing(AppWindows.Layout.sectionSpacing, after: hint)
+        stack.setCustomSpacing(AppWindows.Layout.sectionSpacing, after: sep)
+        stack.setCustomSpacing(AppWindows.Layout.sectionSpacing, after: connectionInfo)
+        sep.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         return stack
     }
 
@@ -491,7 +523,7 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
             rows.append(row)
         }
         let grid = NSGridView(views: rows)
-        grid.rowSpacing = 8
+        grid.rowSpacing = 6
         grid.columnSpacing = 10
         grid.column(at: 0).xPlacement = .trailing
         grid.column(at: 2).xPlacement = .trailing
@@ -501,15 +533,33 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         let previewLabel = NSTextField(labelWithString: "Preview:")
         let preview = previewPair
         preview.translatesAutoresizingMaskIntoConstraints = false
-        preview.heightAnchor.constraint(equalToConstant: 240).isActive = true
+        preview.heightAnchor.constraint(equalToConstant: 145).isActive = true
 
-        let stack = NSStackView(views: [title, presetRow, grid, previewLabel, preview])
+        previewInput.isEditable = false
+        previewInput.isSelectable = false
+        previewInput.wantsLayer = true
+        previewInput.layer?.cornerRadius = 5
+        previewInput.layer?.borderWidth = 1.5
+        previewInput.widthAnchor.constraint(equalToConstant: 140).isActive = true
+        previewCheckbox.state = .on
+        previewCheckbox.isEnabled = false
+        for b in [previewCancelButton, previewApplyButton] {
+            b.bezelStyle = .rounded
+            b.isEnabled = false
+            b.widthAnchor.constraint(greaterThanOrEqualToConstant: 76).isActive = true
+        }
+        let controlsPreview = NSStackView(views: [previewInput, previewCheckbox, NSView(), previewCancelButton, previewApplyButton])
+        controlsPreview.spacing = 10
+        controlsPreview.alignment = .centerY
+
+        let stack = NSStackView(views: [title, presetRow, grid, previewLabel, preview, controlsPreview])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 12
-        stack.setCustomSpacing(18, after: grid)
-        stack.setCustomSpacing(6, after: previewLabel)
+        stack.spacing = 8
+        stack.setCustomSpacing(10, after: grid)
+        stack.setCustomSpacing(4, after: previewLabel)
         preview.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        controlsPreview.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         return stack
     }
 
@@ -528,9 +578,10 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         functionBarCheckbox.state = working.display.showFunctionKeyBar ? .on : .off
         statusIconCheckbox.state = working.display.showStatusBarIcon ? .on : .off
         hiddenFilesCheckbox.state = working.display.showHiddenFiles ? .on : .off
-        sizeFormatPopup.selectItem(at: SizeFormat.allCases.firstIndex(of: working.display.sizeFormat) ?? 0)
-        tabBarPopup.selectItem(at: TabBarMode.allCases.firstIndex(of: working.display.tabBar) ?? 0)
-        quickSearchPopup.selectItem(at: QuickSearchOptions.Activation.allCases.firstIndex(of: working.quickSearch.activation) ?? 0)
+        sizeBytesCheckbox.state = working.display.sizeFormat == .bytes ? .on : .off
+        tabBarAlwaysCheckbox.state = working.display.tabBar == .always ? .on : .off
+        let qsIdx = QuickSearchOptions.Activation.allCases.firstIndex(of: working.quickSearch.activation) ?? 0
+        for (i, r) in quickSearchRadios.enumerated() { r.state = i == qsIdx ? .on : .off }
         filterByDefaultCheckbox.state = working.quickSearch.filterByDefault ? .on : .off
         sizeCheckbox.state = working.operation.spaceCalculatesFolderSize ? .on : .off
         moveDownCheckbox.state = working.operation.spaceMovesCursorDown ? .on : .off
@@ -539,8 +590,9 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         renameExtensionCheckbox.state = working.operation.renameSelectsExtension ? .on : .off
         holdField.doubleValue = working.operation.contextMenuHold
         holdStepper.doubleValue = working.operation.contextMenuHold
-        finderPanelPopup.selectItem(at: FinderPanel.allCases.firstIndex(of: working.operation.finderOpensIn) ?? 0)
-        autoRefreshPopup.selectItem(at: AutoRefresh.allCases.firstIndex(of: working.operation.autoRefresh) ?? 1)
+        finderPanelControl.selectedSegment = FinderPanel.allCases.firstIndex(of: working.operation.finderOpensIn) ?? 0
+        let arIdx = AutoRefresh.allCases.firstIndex(of: working.operation.autoRefresh) ?? 1
+        for (i, r) in autoRefreshRadios.enumerated() { r.state = i == arIdx ? .on : .off }
         reloadTerminalPopup()
         terminalArgumentsField.stringValue = working.operation.terminalArguments
         let values = [working.operation.maxTransfers, working.operation.maxUploads, working.operation.maxDownloads]
@@ -566,6 +618,14 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         previewInactive.theme = working.theme
         previewPair.activeTabBar.theme = working.theme
         previewPair.inactiveTabBar.theme = working.theme
+        updateAccentPreview()
+    }
+
+    private func updateAccentPreview() {
+        let accent = working.theme.accent.nsColor
+        previewApplyButton.bezelColor = accent
+        previewCheckbox.contentTintColor = accent
+        previewInput.layer?.borderColor = accent.withAlphaComponent(0.75).cgColor
     }
 
     @objc private func wellChanged(_ sender: NSColorWell) {
@@ -581,6 +641,7 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         previewInactive.theme = working.theme
         previewPair.activeTabBar.theme = working.theme
         previewPair.inactiveTabBar.theme = working.theme
+        updateAccentPreview()
     }
 
     @objc private func presetChosen() {
@@ -594,9 +655,8 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         working.display.showFunctionKeyBar = functionBarCheckbox.state == .on
         working.display.showStatusBarIcon = statusIconCheckbox.state == .on
         working.display.showHiddenFiles = hiddenFilesCheckbox.state == .on
-        working.display.tabBar = tabBarPopup.indexOfSelectedItem == 1 ? .always : .whenSeveral
-        working.display.sizeFormat = SizeFormat.allCases.indices.contains(sizeFormatPopup.indexOfSelectedItem)
-            ? SizeFormat.allCases[sizeFormatPopup.indexOfSelectedItem] : .readable
+        working.display.tabBar = tabBarAlwaysCheckbox.state == .on ? .always : .whenSeveral
+        working.display.sizeFormat = sizeBytesCheckbox.state == .on ? .bytes : .readable
         previewActive.display = working.display
         previewInactive.display = working.display
     }
@@ -670,13 +730,14 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         working.operation.renameSelectsExtension = renameExtensionCheckbox.state == .on
     }
 
-    @objc func autoRefreshChosen() {
-        let i = autoRefreshPopup.indexOfSelectedItem
+    @objc func autoRefreshChosen(_ sender: NSButton? = nil) {
+        let i = sender?.tag ?? autoRefreshRadios.firstIndex { $0.state == .on } ?? 1
+        for (idx, r) in autoRefreshRadios.enumerated() { r.state = idx == i ? .on : .off }
         working.operation.autoRefresh = AutoRefresh.allCases.indices.contains(i) ? AutoRefresh.allCases[i] : .structure
     }
 
     @objc func finderPanelChosen() {
-        working.operation.finderOpensIn = finderPanelPopup.indexOfSelectedItem == 1 ? .right : .left
+        working.operation.finderOpensIn = finderPanelControl.selectedSegment == 1 ? .right : .left
     }
 
     /// The hold field or its stepper changed: keep both in step and save (live).
@@ -885,7 +946,8 @@ private final class OptionsPageList: NSScrollView, NSTableViewDataSource, NSTabl
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("page"))
         table.addTableColumn(column)
         table.headerView = nil
-        table.rowHeight = 22
+        table.rowHeight = 26
+        table.intercellSpacing = NSSize(width: 0, height: 2)
         table.allowsEmptySelection = false
         table.dataSource = self
         table.delegate = self
@@ -919,7 +981,7 @@ private final class OptionsPageList: NSScrollView, NSTableViewDataSource, NSTabl
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let label = NSTextField(labelWithString: pages[shown[row]])
         label.lineBreakMode = .byTruncatingTail
-        return label
+        return AppWindows.centeredCell(label, leading: 6)
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {

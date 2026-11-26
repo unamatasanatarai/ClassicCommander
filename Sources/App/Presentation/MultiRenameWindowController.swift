@@ -44,10 +44,10 @@ final class MultiRenameWindowController: NSWindowController, NSWindowDelegate, N
     init(commander: CommanderView, defaults: UserDefaults = .standard) {
         self.commander = commander
         self.defaults = defaults
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 600),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 500),
                               styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: true)
         window.title = AppWindows.title("Multi-Rename Tool")
-        window.minSize = NSSize(width: 900, height: 420)
+        window.minSize = NSSize(width: 820, height: 400)
         window.isReleasedWhenClosed = false
         AppWindows.style(window)
         super.init(window: window)
@@ -176,7 +176,8 @@ final class MultiRenameWindowController: NSWindowController, NSWindowDelegate, N
         startButton.keyEquivalent = "\r"
         closeButton.keyEquivalent = "\u{1b}"
         statusLabel.lineBreakMode = .byTruncatingTail
-        let bottom = NSStackView(views: [statusLabel, NSView(), startButton, undoButton, closeButton])
+        let bottom = NSStackView(views: [statusLabel, NSView(), undoButton, closeButton, startButton])
+        bottom.spacing = AppWindows.Layout.controlSpacing
 
         let stack = NSStackView(views: [top, scroll, bottom])
         stack.orientation = .vertical
@@ -394,6 +395,6 @@ final class MultiRenameWindowController: NSWindowController, NSWindowDelegate, N
         default: label = NSTextField(labelWithString: EntryFormatter.visible(r.entry.name))
         }
         label.lineBreakMode = .byTruncatingMiddle
-        return label
+        return AppWindows.centeredCell(label)
     }
 }

@@ -167,7 +167,8 @@ enum MultiRenameTests {
             try expect(tool.rows.map(\.newName) == ["file_01.txt", "file_02.txt"], "preview: \(tool.rows.map(\.newName))")
             try expect(tool.startButton.isEnabled, "Start! on")
             func cell(_ column: String, _ row: Int) -> NSTextField? {
-                tool.tableView(tool.table, viewFor: tool.table.tableColumns.first { $0.identifier.rawValue == column }, row: row) as? NSTextField
+                let view = tool.tableView(tool.table, viewFor: tool.table.tableColumns.first { $0.identifier.rawValue == column }, row: row)
+                return (view as? NSTableCellView)?.textField ?? (view as? NSTextField)
             }
             try expect(cell("new", 0)?.stringValue == "file_01.txt" && cell("old", 0)?.stringValue == "one.txt"
                        && cell("size", 0)?.stringValue == "7" && cell("where", 0)?.stringValue == dir.path && cell("date", 0) != nil, "cells")

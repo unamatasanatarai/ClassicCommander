@@ -86,38 +86,48 @@ public final class FileCommands {
         let sourceDir = sourcePanel.model.directory
 
         let progressWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 380, height: 110),
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 116),
             styleMask: [.titled],
             backing: .buffered,
             defer: false
         )
-        progressWindow.title = "Pack Files"
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 110))
+        progressWindow.title = AppWindows.title("Pack Files")
+        AppWindows.style(progressWindow)
+        let content = NSView()
         let label = NSTextField(labelWithString: "Packing \(archiveURL.lastPathComponent)…")
-        label.frame = NSRect(x: 20, y: 74, width: 340, height: 18)
+        label.font = .systemFont(ofSize: 12, weight: .medium)
         label.lineBreakMode = .byTruncatingMiddle
-        let bar = NSProgressIndicator(frame: NSRect(x: 20, y: 46, width: 340, height: 20))
+        let bar = NSProgressIndicator()
         bar.style = .bar
         bar.isIndeterminate = true
         bar.startAnimation(nil)
         var runningProcess: Process?
         var cancelled = false
         let cancelBtn = NSButton(title: "Cancel", target: nil, action: nil)
-        cancelBtn.frame = NSRect(x: 280, y: 12, width: 80, height: 26)
         cancelBtn.bezelStyle = .rounded
-        content.addSubview(label)
-        content.addSubview(bar)
-        content.addSubview(cancelBtn)
+        cancelBtn.keyEquivalent = "\u{1b}"
+        cancelBtn.widthAnchor.constraint(greaterThanOrEqualToConstant: AppWindows.Layout.buttonMinWidth).isActive = true
+        let btnRow = NSStackView(views: [NSView(), cancelBtn])
+        let m = AppWindows.Layout.margin
+        let stack = NSStackView(views: [label, bar, btnRow])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = AppWindows.Layout.controlSpacing
+        stack.edgeInsets = NSEdgeInsets(top: m, left: m, bottom: m, right: m)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: content.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            content.widthAnchor.constraint(equalToConstant: 400),
+            label.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+            bar.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+            btnRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+        ])
         progressWindow.contentView = content
-        if let parent = commander.window {
-            let pf = parent.frame
-            progressWindow.setFrameOrigin(NSPoint(
-                x: pf.midX - progressWindow.frame.width / 2,
-                y: pf.midY - progressWindow.frame.height / 2
-            ))
-        } else {
-            progressWindow.center()
-        }
+        AppWindows.place(progressWindow)
         progressWindow.makeKeyAndOrderFront(nil)
 
         let cancelHandler = BlockAction {
@@ -391,7 +401,7 @@ final class AlertPrompts: FileCommandPrompts {
         alert.addButton(withTitle: okTitle)
         alert.addButton(withTitle: "Cancel")
         let field = NSTextField(string: defaultValue)
-        field.frame = NSRect(x: 0, y: 0, width: 420, height: 24)
+        field.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
         guard Modal.run(alert) == .alertFirstButtonReturn else { return nil }
@@ -421,12 +431,12 @@ final class AlertPrompts: FileCommandPrompts {
         alert.informativeText = "Unpack \(archiveName) to:"
         alert.addButton(withTitle: "Unpack")
         alert.addButton(withTitle: "Cancel")
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 52))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 52))
         let field = NSTextField(string: defaultTarget)
-        field.frame = NSRect(x: 0, y: 28, width: 420, height: 24)
+        field.frame = NSRect(x: 0, y: 28, width: 320, height: 24)
         let checkbox = NSButton(checkboxWithTitle: "Overwrite existing files", target: nil, action: nil)
         checkbox.state = .off
-        checkbox.frame = NSRect(x: 0, y: 0, width: 420, height: 20)
+        checkbox.frame = NSRect(x: 0, y: 0, width: 320, height: 20)
         container.addSubview(field)
         container.addSubview(checkbox)
         alert.accessoryView = container
@@ -445,7 +455,6 @@ final class AlertPrompts: FileCommandPrompts {
 
     func showProblems(title: String, report: OperationReport) {
         let alert = NSAlert()
-        alert.alertStyle = .warning
         alert.messageText = title
         let count = report.errors.count
         alert.informativeText = "\(count) \(count == 1 ? "item" : "items") could not be processed:"

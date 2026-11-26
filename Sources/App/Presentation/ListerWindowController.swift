@@ -41,7 +41,7 @@ public final class ListerWindowController: NSWindowController, NSWindowDelegate,
         self.index = max(0, min(index, files.count - 1))
         textScroll = NSTextView.scrollableTextView()
         textView = textScroll.documentView as! NSTextView
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 640),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 540),
                               styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: true)
         window.minSize = NSSize(width: 480, height: 300)
         window.isReleasedWhenClosed = false

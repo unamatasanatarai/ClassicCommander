@@ -51,7 +51,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         mainMenu.addItem(appMenuItem)
 
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "About \(AppConfig.appName)", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        let aboutItem = NSMenuItem(title: "About \(AppConfig.appName)", action: #selector(showAboutPanel), keyEquivalent: "")
+        aboutItem.target = self
+        appMenu.addItem(aboutItem)
         appMenu.addItem(NSMenuItem.separator())
         let prefsItem = NSMenuItem(title: "Preferences…", action: #selector(showOptions), keyEquivalent: ",")
         prefsItem.target = self
@@ -299,7 +301,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
     }
 
     @objc private func quitPressed() {
-        if quitGate.press() {
+        let isMenuClick = NSApp.currentEvent.map { $0.type != .keyDown } ?? false
+        if isMenuClick || quitGate.press() {
             Modal.terminate()
         } else if let commander = commanderView, window.isVisible {
             commander.showHint("Press ⌘Q again to quit")
@@ -421,6 +424,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         guard let raw = sender.representedObject as? String, let action = CommandAction(rawValue: raw) else { return }
         showWindow()
         commanderView?.perform(action)
+    }
+
+    @objc func showAboutPanel() {
+        AboutWindowController.shared.present()
     }
 
     @objc func showOptions() {

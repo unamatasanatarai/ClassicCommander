@@ -23,7 +23,7 @@ final class DiffWindowController: NSWindowController, NSWindowDelegate {
     init(leftTitle: String, rightTitle: String) {
         self.leftTitle = leftTitle
         self.rightTitle = rightTitle
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 700),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 920, height: 580),
                               styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: true)
         window.title = AppWindows.title("Compare: " + (leftTitle as NSString).lastPathComponent)
         AppWindows.style(window)
@@ -142,7 +142,8 @@ final class DiffWindowController: NSWindowController, NSWindowDelegate {
             NSLayoutConstraint.activate([
                 row.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 4),
                 row.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -4),
-                row.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+                row.topAnchor.constraint(equalTo: container.topAnchor, constant: 2),
+                row.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -2),
             ])
             return container
         }
@@ -363,9 +364,6 @@ final class DiffTextView: NSTextView {
 final class DiffTopBarView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        NSColor.windowBackgroundColor.setFill()
-        dirtyRect.fill()
-
         NSColor.separatorColor.setStroke()
         let path = NSBezierPath()
         path.move(to: NSPoint(x: 0, y: 0.5))
@@ -378,16 +376,5 @@ final class DiffTopBarView: NSView {
 final class DiffDividerView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        NSColor.windowBackgroundColor.setFill()
-        dirtyRect.fill()
-
-        NSColor.separatorColor.withAlphaComponent(0.4).setStroke()
-        let path = NSBezierPath()
-        path.move(to: NSPoint(x: 0.5, y: 0))
-        path.line(to: NSPoint(x: 0.5, y: bounds.height))
-        path.move(to: NSPoint(x: bounds.width - 0.5, y: 0))
-        path.line(to: NSPoint(x: bounds.width - 0.5, y: bounds.height))
-        path.lineWidth = 1.0
-        path.stroke()
     }
 }

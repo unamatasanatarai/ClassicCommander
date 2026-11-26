@@ -63,11 +63,11 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
     init(commander: CommanderView, defaults: UserDefaults = .standard) {
         self.commander = commander
         self.defaults = defaults
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1060, height: 640),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 480),
                               styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: true)
         window.title = AppWindows.title("Synchronize directories")
         AppWindows.style(window)
-        window.minSize = NSSize(width: 900, height: 420)
+        window.minSize = NSSize(width: 780, height: 380)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
@@ -111,8 +111,9 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         }
         for b in [leftBrowse, rightBrowse] { b.widthAnchor.constraint(equalToConstant: 40).isActive = true }
         closeButton.keyEquivalent = "\u{1b}"
-        for f in [leftPath, rightPath] { f.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true }
-        maskField.widthAnchor.constraint(equalToConstant: 150).isActive = true
+        compareButton.keyEquivalent = "\r"
+        for f in [leftPath, rightPath] { f.widthAnchor.constraint(greaterThanOrEqualToConstant: 210).isActive = true }
+        maskField.widthAnchor.constraint(equalToConstant: 120).isActive = true
         maskField.stringValue = "*.*"
         maskField.toolTip = "Files to compare, e.g. *.*  or  *.txt;*.doc  or  * | *.tmp"
 
@@ -126,7 +127,7 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         ignoreDateBox.toolTip = "Only size (and content) decides; dates are ignored."
         emptyDirsBox.toolTip = "Also list empty folders and folders that exist on one side only."
 
-        // Show: toggle buttons. Colours follow the result list.
+        // Show: toggle pills with crisp ON (elevated) vs OFF (muted) states.
         let toggles: [(NSButton, NSColor, String)] = [
             (showRight, .systemGreen, "Show files to copy left → right"),
             (showEqual, .labelColor, "Show identical files"),
@@ -137,42 +138,40 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         ]
         for (b, color, tip) in toggles {
             b.setButtonType(.pushOnPushOff)
-            b.bezelStyle = .recessed
-            b.showsBorderOnlyWhileMouseInside = false
+            b.isBordered = false
+            b.wantsLayer = true
+            b.layer?.cornerRadius = 5
+            b.layer?.borderWidth = 1
             b.state = .on
             b.toolTip = tip
             b.target = self
             b.action = #selector(filterChanged)
+            b.heightAnchor.constraint(equalToConstant: 24).isActive = true
             if b.title.count == 1 {
                 b.attributedTitle = NSAttributedString(string: b.title, attributes: [
                     .foregroundColor: color, .font: NSFont.boldSystemFont(ofSize: 15),
                 ])
                 b.widthAnchor.constraint(equalToConstant: 34).isActive = true
             } else {
-                b.font = .systemFont(ofSize: 11, weight: .medium)
-                b.widthAnchor.constraint(equalToConstant: 96).isActive = true
+                b.font = .systemFont(ofSize: 12, weight: .medium)
+                b.widthAnchor.constraint(equalToConstant: 92).isActive = true
             }
         }
         let arrows = NSStackView(views: [showRight, showEqual, showDifferent, showLeft])
-        arrows.spacing = 2
+        arrows.spacing = 4
         let sideFilters = NSStackView(views: [showDuplicates, showSingles])
         sideFilters.orientation = .vertical
-        sideFilters.spacing = 2
-        let showBox = NSBox()
-        showBox.title = "Show:"
-        showBox.contentViewMargins = NSSize(width: 8, height: 6)
+        sideFilters.spacing = 4
+        let showHeading = NSTextField(labelWithString: "Show:")
+        showHeading.font = .systemFont(ofSize: 12, weight: .semibold)
+        showHeading.textColor = .secondaryLabelColor
         let showRow = NSStackView(views: [arrows, sideFilters])
+        showRow.alignment = .centerY
         showRow.spacing = 10
-        showRow.translatesAutoresizingMaskIntoConstraints = false
-        if let content = showBox.contentView {
-            content.addSubview(showRow)
-            NSLayoutConstraint.activate([
-                showRow.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-                showRow.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-                showRow.topAnchor.constraint(equalTo: content.topAnchor),
-                showRow.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-            ])
-        }
+        let showGroup = NSStackView(views: [showHeading, showRow])
+        showGroup.orientation = .vertical
+        showGroup.alignment = .leading
+        showGroup.spacing = 6
 
         let options = NSStackView(views: [asymmetricBox, subdirsBox, byContentBox, ignoreDateBox, emptyDirsBox])
         options.orientation = .vertical
@@ -184,30 +183,31 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         compareColumn.orientation = .vertical
         compareColumn.alignment = .leading
         compareColumn.spacing = 6
-        let actions = NSStackView(views: [synchronizeButton, closeButton])
-        actions.orientation = .vertical
-        actions.spacing = 6
+        let actions = NSStackView(views: [closeButton, synchronizeButton])
+        actions.spacing = AppWindows.Layout.controlSpacing
         // Small vertical stacks must fill and hug, or their buttons have no fixed position
         // (ambiguous layout: Compare once drifted up over the path field).
-        for column in [compareColumn, actions, options] {
+        for column in [compareColumn, options] {
             column.distribution = .fill
             column.setHuggingPriority(.required, for: .vertical)
         }
-        for b in [synchronizeButton, closeButton] { b.widthAnchor.constraint(equalToConstant: 140).isActive = true }
+        for b in [synchronizeButton, closeButton] {
+            b.widthAnchor.constraint(greaterThanOrEqualToConstant: AppWindows.Layout.buttonMinWidth).isActive = true
+        }
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
 
         let pathsRow = NSStackView(views: [leftPath, leftBrowse, maskField, rightPath, rightBrowse])
         pathsRow.spacing = 6
-        let controlsRow = NSStackView(views: [compareColumn, options, showBox, spinner, NSView(), actions])
+        let controlsRow = NSStackView(views: [compareColumn, options, showGroup, spinner, NSView()])
         controlsRow.alignment = .top
-        controlsRow.spacing = 18
+        controlsRow.spacing = 16
 
         let columns: [(Column, String, CGFloat, NSTextAlignment)] = [
-            (.leftName, "Name", 230, .left), (.leftSize, "Size", 80, .right), (.leftDate, "Date", 125, .left),
+            (.leftName, "Name", 180, .left), (.leftSize, "Size", 70, .right), (.leftDate, "Date", 110, .left),
             (.action, "<=>", 44, .center),
-            (.rightDate, "Date", 125, .left), (.rightSize, "Size", 80, .right), (.rightName, "Name", 230, .left),
+            (.rightDate, "Date", 110, .left), (.rightSize, "Size", 70, .right), (.rightName, "Name", 180, .left),
         ]
         for (id, title, width, align) in columns {
             let c = NSTableColumn(identifier: .init(id.rawValue))
@@ -236,11 +236,15 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         scroll.borderType = .bezelBorder
 
         statusLabel.lineBreakMode = .byTruncatingTail
-        let stack = NSStackView(views: [pathsRow, controlsRow, scroll, statusLabel])
+        let bottomBar = NSStackView(views: [statusLabel, NSView(), actions])
+        bottomBar.spacing = AppWindows.Layout.controlSpacing
+        bottomBar.alignment = .centerY
+        let m = AppWindows.Layout.margin
+        let stack = NSStackView(views: [pathsRow, controlsRow, scroll, bottomBar])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 10, left: 10, bottom: 8, right: 10)
+        stack.spacing = AppWindows.Layout.controlSpacing
+        stack.edgeInsets = NSEdgeInsets(top: AppWindows.Layout.sectionSpacing, left: m, bottom: AppWindows.Layout.sectionSpacing, right: m)
         stack.translatesAutoresizingMaskIntoConstraints = false
         let root = NSView()
         root.addSubview(stack)
@@ -249,10 +253,10 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
             stack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             stack.topAnchor.constraint(equalTo: root.topAnchor),
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            pathsRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -20),
-            controlsRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -20),
-            scroll.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -20),
-            statusLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -20),
+            pathsRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+            controlsRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+            scroll.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
+            bottomBar.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
             leftPath.widthAnchor.constraint(equalTo: rightPath.widthAnchor),
         ])
         return root
@@ -608,6 +612,21 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
     private func updateButtons() {
         synchronizeButton.isEnabled = !isComparing && config != nil && !currentPlan.isEmpty
         for b in [leftPath, rightPath, maskField] { b.isEnabled = !isComparing }
+        updateToggleStyles()
+    }
+
+    private func updateToggleStyles() {
+        let isDark = window?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let onFill = (isDark ? NSColor(white: 0.26, alpha: 1.0) : NSColor(white: 1.0, alpha: 0.95)).cgColor
+        let offFill = (isDark ? NSColor(white: 1.0, alpha: 0.06) : NSColor(white: 0.0, alpha: 0.06)).cgColor
+        let onBorder = (isDark ? NSColor(white: 1.0, alpha: 0.25) : NSColor(white: 0.0, alpha: 0.22)).cgColor
+        let offBorder = (isDark ? NSColor(white: 1.0, alpha: 0.10) : NSColor(white: 0.0, alpha: 0.10)).cgColor
+        for b in [showRight, showEqual, showDifferent, showLeft, showDuplicates, showSingles] {
+            let on = b.state == .on
+            b.layer?.backgroundColor = on ? onFill : offFill
+            b.layer?.borderColor = on ? onBorder : offBorder
+            b.alphaValue = on ? 1.0 : 0.45
+        }
     }
 
     @objc private func buttonPressed(_ sender: NSButton) {
@@ -698,7 +717,7 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         label.lineBreakMode = id == .leftName || id == .rightName ? .byTruncatingMiddle : .byTruncatingTail
         label.textColor = Self.color(for: r)
         if id == .action { label.font = .boldSystemFont(ofSize: 15) }
-        return label
+        return AppWindows.centeredCell(label)
     }
 
     private func makeDeleteActionView(for action: SyncAction, row: SyncRow) -> NSView {
@@ -988,6 +1007,6 @@ final class SyncConfirmationController: NSWindowController, NSTableViewDataSourc
         let label = NSTextField(labelWithString: text)
         label.lineBreakMode = .byTruncatingHead
         if op.kind == .delete { label.textColor = .systemRed }
-        return label
+        return AppWindows.centeredCell(label)
     }
 }

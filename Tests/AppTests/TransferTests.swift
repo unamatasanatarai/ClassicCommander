@@ -59,10 +59,10 @@ enum TransferTests {
             // Tab navigation key view loop
             try expect(dialog.targetField.nextKeyView === dialog.maskField, "target -> mask")
             try expect(dialog.maskField.nextKeyView === dialog.verifyBox, "mask -> verify")
-            try expect(dialog.verifyBox.nextKeyView === dialog.okButton, "verify -> ok")
-            try expect(dialog.okButton.nextKeyView === dialog.queueButton, "ok -> queue")
+            try expect(dialog.verifyBox.nextKeyView === dialog.queueButton, "verify -> queue")
             try expect(dialog.queueButton.nextKeyView === dialog.cancelButton, "queue -> cancel")
-            try expect(dialog.cancelButton.nextKeyView === dialog.targetField, "cancel -> target")
+            try expect(dialog.cancelButton.nextKeyView === dialog.okButton, "cancel -> ok")
+            try expect(dialog.okButton.nextKeyView === dialog.targetField, "ok -> target")
         }
 
         testRunner("Target file exists: both sides shown, every button, Rename asks for the name") {

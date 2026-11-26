@@ -522,7 +522,8 @@ public enum CoverageTests {
             send(window, "tableViewSelectionDidChange:", Notification(name: NSTableView.selectionDidChangeNotification))
             try expect(window.fileRows == [0, 1], "both files listed")
             func cellText(_ column: Int, _ row: Int) -> String {
-                (window.tableView(window.files, viewFor: window.files.tableColumns[column], row: row) as? NSTextField)?.stringValue ?? ""
+                let view = window.tableView(window.files, viewFor: window.files.tableColumns[column], row: row)
+                return ((view as? NSTableCellView)?.textField ?? (view as? NSTextField))?.stringValue ?? ""
             }
             try expect(cellText(0, 0) == "Copied" && cellText(0, 1).hasPrefix("Failed") && cellText(1, 0).hasSuffix("ok.html"),
                        "statuses: \(cellText(0, 0)) / \(cellText(0, 1))")
@@ -859,11 +860,11 @@ public enum CoverageTests {
             options.holdField.doubleValue = 50
             options.holdChanged(options.holdField)
             try expect(store.settings.operation.contextMenuHold == 10, "hold time capped")
-            options.finderPanelPopup.selectItem(at: 1)
+            options.finderPanelControl.selectedSegment = 1
             options.finderPanelChosen()
             try expect(store.settings.operation.finderOpensIn == .right, "Finder panel saved")
-            options.tabBarPopup.selectItem(at: 1)
-            options.sizeFormatPopup.selectItem(at: 0)
+            options.tabBarAlwaysCheckbox.state = .on
+            options.sizeBytesCheckbox.state = .on
             send(options, "displayToggled")
             try expect(store.settings.display.sizeFormat == .bytes && store.settings.display.tabBar == .always, "size format and tab bar saved")
             // Search: pages that mention it stay listed, matches are highlighted, Shortcuts filters too.
@@ -880,8 +881,7 @@ public enum CoverageTests {
             options.searchChanged()
             try expect(options.highlighted.isEmpty && OptionsWindowController.matches("Show Hidden", ["hidden", "show"]), "cleared")
             options.showPage(0)
-            options.autoRefreshPopup.selectItem(at: 2)
-            options.autoRefreshChosen()
+            options.autoRefreshChosen(options.autoRefreshRadios[2])
             try expect(store.settings.operation.autoRefresh == .everything, "auto refresh saved")
             options.maskFoldersCheckbox.state = .off
             options.renameExtensionCheckbox.state = .on
