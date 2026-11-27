@@ -416,6 +416,7 @@ public final class UIGallery: NSObject {
         )
         let dlg = ConflictDialogController(conflict: conflict, sizeFormat: .readable)
         activeControllers.append(dlg)
+        if let win = dlg.window { AppWindows.place(win) }
         dlg.showWindow(nil)
         dlg.window?.makeKeyAndOrderFront(nil)
     }

@@ -86,30 +86,54 @@ enum AppWindows {
         }
     }
 
-    /// Moves focus between visible, enabled push buttons using Arrow keys or `h/j/k/l`
-    /// whenever a button currently has focus.
+    /// Moves focus between visible, enabled push buttons using Arrow keys
+    /// whenever a button currently has focus (or no text/table control has focus).
     @discardableResult
     static func handleButtonNav(_ event: NSEvent, in window: NSWindow) -> Bool {
-        guard let current = window.firstResponder as? NSButton, isPushButton(current) else { return false }
+        let responder = window.firstResponder
+        if responder is NSText || responder is NSTextView || responder is NSTableView || responder is NSComboBox {
+            return false
+        }
         let mods = event.modifierFlags.intersection([.command, .option, .control])
         guard mods.isEmpty else { return false }
+
+        let currentButton = (responder as? NSButton).flatMap { isPushButton($0) ? $0 : nil }
+        if event.keyCode == 36, let current = currentButton, current.keyEquivalent != "\r" {
+            current.performClick(nil)
+            return true
+        }
+
         let dir: (dx: CGFloat, dy: CGFloat)?
         switch event.keyCode {
         case 123: dir = (-1, 0) // Left
         case 124: dir = (1, 0)  // Right
         case 125: dir = (0, -1) // Down
         case 126: dir = (0, 1)  // Up
-        default:
-            switch event.charactersIgnoringModifiers?.lowercased() {
-            case "h": dir = (-1, 0)
-            case "l": dir = (1, 0)
-            case "j": dir = (0, -1)
-            case "k": dir = (0, 1)
-            default: dir = nil
-            }
+        default: dir = nil
         }
         guard let d = dir else { return false }
-        return moveButtonFocus(from: current, in: window, direction: d)
+
+        if let current = currentButton {
+            return moveButtonFocus(from: current, in: window, direction: d)
+        }
+        if let initial = window.initialFirstResponder as? NSButton, isPushButton(initial), initial.isEnabled {
+            window.makeFirstResponder(initial)
+            return true
+        }
+        if let root = window.contentView, let first = firstPushButton(in: root) {
+            window.makeFirstResponder(first)
+            return true
+        }
+        return false
+    }
+
+    private static func firstPushButton(in view: NSView) -> NSButton? {
+        guard !view.isHidden else { return nil }
+        if let b = view as? NSButton, isPushButton(b), b.isEnabled { return b }
+        for sub in view.subviews {
+            if let found = firstPushButton(in: sub) { return found }
+        }
+        return nil
     }
 
     static func moveButtonFocus(from current: NSButton, in window: NSWindow, direction: (dx: CGFloat, dy: CGFloat)) -> Bool {
@@ -207,11 +231,17 @@ enum AppWindows {
             button.bezelStyle = .rounded
         }
         button.controlSize = .regular
-        // Titles drawn in their own colours (Synchronize's arrows) keep them.
+        // Titles drawn in their own colours (Synchronize's arrows) or with underlined mnemonics keep them.
         let title = button.attributedTitle
         let colour = title.length > 0 ? title.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor : nil
         let coloured = colour.map { $0 != .controlTextColor } ?? false
-        if !coloured {
+        var hasUnderline = false
+        if title.length > 0 {
+            title.enumerateAttribute(.underlineStyle, in: NSRange(location: 0, length: title.length)) { val, _, stop in
+                if let style = val as? Int, style != 0 { hasUnderline = true; stop.pointee = true }
+            }
+        }
+        if !coloured && !hasUnderline {
             button.font = .systemFont(ofSize: NSFont.systemFontSize)
         }
         if button.keyEquivalent == "\r" && button.bezelColor != danger {

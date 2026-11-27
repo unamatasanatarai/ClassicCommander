@@ -284,13 +284,18 @@ final class ConflictDialogController: NSWindowController {
         buttons[6].keyEquivalent = "\u{1b}"
         buttons[6].keyEquivalentModifierMask = []
 
-        buttons[0].toolTip = "Replace (Return or R)"
-        buttons[1].toolTip = "Replace All (A)"
-        buttons[2].toolTip = "Skip (S)"
-        buttons[3].toolTip = "Skip All (K)"
-        buttons[4].toolTip = "Replace All Older (O)"
-        buttons[5].toolTip = "Rename (N)"
-        buttons[6].toolTip = "Cancel (Esc)"
+        func underline(_ button: NSButton, at index: Int) {
+            let attr = NSMutableAttributedString(string: button.title, attributes: [
+                .font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
+            ])
+            attr.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: NSRange(location: index, length: 1))
+            button.attributedTitle = attr
+        }
+        underline(buttons[1], at: 8)  // Replace [A]ll
+        underline(buttons[2], at: 0)  // [S]kip
+        underline(buttons[3], at: 1)  // S[k]ip All
+        underline(buttons[4], at: 12) // Replace All [O]lder
+        underline(buttons[5], at: 2)  // Re[n]ame…
 
         // 3-column equal-width action rows (Overwrite row, Skip/Rename row) with Cancel at bottom-right.
         let row1 = NSStackView(views: [buttons[0], buttons[1], buttons[4]])
