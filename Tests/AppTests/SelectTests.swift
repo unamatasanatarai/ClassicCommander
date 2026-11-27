@@ -311,6 +311,19 @@ enum SelectTests {
             alert.addButton(withTitle: "Cancel")
             Modal.style(alert)
             try expect(alert.buttons.allSatisfy { $0.appearance != nil && $0.bezelStyle == .rounded }, "alert buttons styled")
+
+            // Spatial button navigation with arrows and hjkl.
+            let navWin = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 120), styleMask: [.titled], backing: .buffered, defer: false)
+            let b1 = push("One"); let b2 = push("Two"); let b3 = push("Three"); let b4 = push("Four")
+            let navGrid = NSGridView(views: [[b1, b2], [b3, b4]])
+            navGrid.translatesAutoresizingMaskIntoConstraints = false
+            navWin.contentView?.addSubview(navGrid)
+            navWin.layoutIfNeeded()
+            navWin.makeFirstResponder(b1)
+            try expect(AppWindows.moveButtonFocus(from: b1, in: navWin, direction: (1, 0)) && navWin.firstResponder === b2, "right -> b2")
+            try expect(AppWindows.moveButtonFocus(from: b2, in: navWin, direction: (0, -1)) && navWin.firstResponder === b4, "down -> b4")
+            try expect(AppWindows.moveButtonFocus(from: b4, in: navWin, direction: (-1, 0)) && navWin.firstResponder === b3, "left -> b3")
+            try expect(AppWindows.moveButtonFocus(from: b3, in: navWin, direction: (0, 1)) && navWin.firstResponder === b1, "up -> b1")
         }
 
         testRunner("Held context menu: stays open on release, hover, submenus, keys, pick on release over an item") {

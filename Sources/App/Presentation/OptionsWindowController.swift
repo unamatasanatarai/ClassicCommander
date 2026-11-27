@@ -172,6 +172,11 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         ])
         buttons.spacing = AppWindows.Layout.controlSpacing
 
+        let footerSeparator = NSBox()
+        footerSeparator.boxType = .separator
+        footerSeparator.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(footerSeparator)
+
         for v in [sidebar, buttons] + pages {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
@@ -181,7 +186,7 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
                 page.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: m),
                 page.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -m),
                 page.topAnchor.constraint(equalTo: root.topAnchor, constant: m),
-                page.bottomAnchor.constraint(lessThanOrEqualTo: buttons.topAnchor, constant: -AppWindows.Layout.sectionSpacing),
+                page.bottomAnchor.constraint(lessThanOrEqualTo: footerSeparator.topAnchor, constant: -AppWindows.Layout.sectionSpacing),
             ])
         }
         showPage(0)
@@ -195,7 +200,11 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
             sidebar.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: m),
             sidebar.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: AppWindows.Layout.controlSpacing),
             sidebar.widthAnchor.constraint(equalToConstant: 150),
-            sidebar.bottomAnchor.constraint(equalTo: buttons.topAnchor, constant: -AppWindows.Layout.sectionSpacing),
+            sidebar.bottomAnchor.constraint(equalTo: footerSeparator.topAnchor, constant: -AppWindows.Layout.sectionSpacing),
+
+            footerSeparator.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            footerSeparator.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            footerSeparator.bottomAnchor.constraint(equalTo: buttons.topAnchor, constant: -AppWindows.Layout.sectionSpacing),
 
             buttons.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -m),
             buttons.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -m),

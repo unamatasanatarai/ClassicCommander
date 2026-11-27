@@ -67,15 +67,91 @@ enum AppWindows {
     // MARK: Buttons
 
     private static var keyObserver: NSObjectProtocol?
+    private static var buttonNavMonitor: Any?
 
     /// Every window's buttons get the one button style (`styleButtons`) when the window becomes key,
     /// so windows built anywhere, and buttons added after they were built, all look the same.
     static func styleButtonsWhenShown() {
-        guard keyObserver == nil else { return }
-        keyObserver = NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil,
-                                                             queue: .main) { note in
-            if let window = note.object as? NSWindow { styleButtons(in: window) }
+        if keyObserver == nil {
+            keyObserver = NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil,
+                                                                 queue: .main) { note in
+                if let window = note.object as? NSWindow { styleButtons(in: window) }
+            }
         }
+        if buttonNavMonitor == nil {
+            buttonNavMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                guard let window = event.window, window !== mainWindow else { return event }
+                return handleButtonNav(event, in: window) ? nil : event
+            }
+        }
+    }
+
+    /// Moves focus between visible, enabled push buttons using Arrow keys or `h/j/k/l`
+    /// whenever a button currently has focus.
+    @discardableResult
+    static func handleButtonNav(_ event: NSEvent, in window: NSWindow) -> Bool {
+        guard let current = window.firstResponder as? NSButton, isPushButton(current) else { return false }
+        let mods = event.modifierFlags.intersection([.command, .option, .control])
+        guard mods.isEmpty else { return false }
+        let dir: (dx: CGFloat, dy: CGFloat)?
+        switch event.keyCode {
+        case 123: dir = (-1, 0) // Left
+        case 124: dir = (1, 0)  // Right
+        case 125: dir = (0, -1) // Down
+        case 126: dir = (0, 1)  // Up
+        default:
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "h": dir = (-1, 0)
+            case "l": dir = (1, 0)
+            case "j": dir = (0, -1)
+            case "k": dir = (0, 1)
+            default: dir = nil
+            }
+        }
+        guard let d = dir else { return false }
+        return moveButtonFocus(from: current, in: window, direction: d)
+    }
+
+    static func moveButtonFocus(from current: NSButton, in window: NSWindow, direction: (dx: CGFloat, dy: CGFloat)) -> Bool {
+        guard let root = window.contentView else { return false }
+        var buttons: [NSButton] = []
+        func collect(_ view: NSView) {
+            guard !view.isHidden else { return }
+            if let b = view as? NSButton, isPushButton(b), b.isEnabled { buttons.append(b) }
+            view.subviews.forEach(collect)
+        }
+        collect(root)
+        let curRect = current.convert(current.bounds, to: nil)
+        let curCenter = NSPoint(x: curRect.midX, y: curRect.midY)
+
+        var best: (button: NSButton, score: CGFloat)?
+        for candidate in buttons where candidate !== current {
+            let r = candidate.convert(candidate.bounds, to: nil)
+            let dx = r.midX - curCenter.x
+            let dy = r.midY - curCenter.y
+            let primary: CGFloat
+            let perp: CGFloat
+            if direction.dx > 0 {
+                guard dx > 4 else { continue }
+                primary = dx; perp = abs(dy)
+            } else if direction.dx < 0 {
+                guard dx < -4 else { continue }
+                primary = -dx; perp = abs(dy)
+            } else if direction.dy > 0 {
+                guard dy > 4 else { continue }
+                primary = dy; perp = abs(dx)
+            } else {
+                guard dy < -4 else { continue }
+                primary = -dy; perp = abs(dx)
+            }
+            let score = primary + perp * 3.0
+            if best == nil || score < best!.score {
+                best = (candidate, score)
+            }
+        }
+        guard let target = best?.button else { return false }
+        window.makeFirstResponder(target)
+        return true
     }
 
     static func styleButtons(in window: NSWindow) {

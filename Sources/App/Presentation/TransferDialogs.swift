@@ -200,7 +200,8 @@ final class ConflictDialogController: NSWindowController {
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.contentView = build()
-        AppWindows.setTabOrder(buttons, in: window)
+        // Visual reading order: Row 1 (Replace, Replace All, Replace All Older), Row 2 (Skip, Skip All, Rename…), Cancel.
+        AppWindows.setTabOrder([buttons[0], buttons[1], buttons[4], buttons[2], buttons[3], buttons[5], buttons[6]], in: window)
     }
 
     @available(*, unavailable)
