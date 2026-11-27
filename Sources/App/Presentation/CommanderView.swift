@@ -648,6 +648,7 @@ public final class CommanderView: NSView {
     /// View → Show → Custom (⌃F12): asks for a mask like "*.txt *.md" or "*.* | *.tmp".
     private func askShowMask() -> String? {
         let alert = NSAlert()
+        alert.alertStyle = .informational
         alert.messageText = "Show only files matching"
         alert.informativeText = "e.g. *.txt *.md   or   *.* | *.tmp *.log  (after | : excluded). Folders are always shown. Empty shows all files."
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))

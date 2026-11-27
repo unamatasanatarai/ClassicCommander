@@ -44,8 +44,25 @@ if [[ ${#tests[@]} -eq 0 ]]; then
     exit 1
 fi
 
+obj_dir="${cache_dir}/test-obj"
+mkdir -p "$obj_dir"
+file_map="${obj_dir}/output-file-map.json"
+{
+    printf '{\n  "": {"swift-dependencies": "%s/master.swiftdeps"}' "$obj_dir"
+    for f in "${sources[@]}" "${tests[@]}"; do
+        key="${f//\//_}"
+        printf ',\n  "%s": {"object": "%s/%s.o", "swiftdeps": "%s/%s.swiftdeps"}' "$f" "$obj_dir" "$key" "$obj_dir" "$key"
+    done
+    printf '\n}\n'
+} >"$file_map"
+
 printf '%s\n' "Compiling unit test suite..."
 swiftc -sdk "$sdk_path" \
+    -Onone \
+    -incremental \
+    -output-file-map "$file_map" \
+    -module-name RunSwiftTests \
+    -num-threads "$(sysctl -n hw.ncpu)" \
     "${sources[@]}" \
     "${tests[@]}" \
     -o "$test_bin"

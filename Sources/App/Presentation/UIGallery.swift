@@ -519,6 +519,7 @@ public final class UIGallery: NSObject {
 
     @objc public func showNewFolderPrompt() {
         let alert = NSAlert()
+        alert.alertStyle = .informational
         alert.messageText = "New Folder"
         alert.informativeText = "Create in ~/Documents/Projects"
         alert.addButton(withTitle: "Create")
@@ -533,6 +534,7 @@ public final class UIGallery: NSObject {
 
     @objc public func showSelectMaskPrompt() {
         let alert = NSAlert()
+        alert.alertStyle = .informational
         alert.messageText = "Select files"
         alert.informativeText = "Match by file name mask"
         alert.addButton(withTitle: "Select")
@@ -547,6 +549,7 @@ public final class UIGallery: NSObject {
 
     @objc public func showDeselectMaskPrompt() {
         let alert = NSAlert()
+        alert.alertStyle = .informational
         alert.messageText = "Deselect files"
         alert.informativeText = "Remove matching files from the selection"
         alert.addButton(withTitle: "Deselect")
@@ -561,6 +564,7 @@ public final class UIGallery: NSObject {
 
     @objc public func showDeleteTrashConfirm() {
         let alert = NSAlert()
+        alert.alertStyle = .informational
         alert.messageText = "Move 4 files to the Trash?"
         alert.informativeText = "You can restore them from the Trash later."
         alert.addButton(withTitle: "Move to Trash")
@@ -580,6 +584,7 @@ public final class UIGallery: NSObject {
 
     @objc public func showOperationProblems() {
         let alert = NSAlert()
+        alert.alertStyle = .informational
         alert.messageText = "Copy finished with 3 errors"
         let text = """
         These items were not copied.
@@ -612,6 +617,7 @@ public final class UIGallery: NSObject {
 
     @objc public func showHostKeyAlert() {
         let alert = NSAlert()
+        alert.alertStyle = .informational
         alert.messageText = "Unknown SSH host key"
         alert.informativeText = """
         You haven't connected to this server before.

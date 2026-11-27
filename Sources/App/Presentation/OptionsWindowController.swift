@@ -513,27 +513,29 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
                 well.target = self
                 well.action = #selector(wellChanged(_:))
                 well.translatesAutoresizingMaskIntoConstraints = false
-                well.widthAnchor.constraint(equalToConstant: 44).isActive = true
-                well.heightAnchor.constraint(equalToConstant: 22).isActive = true
+                well.widthAnchor.constraint(equalToConstant: 38).isActive = true
+                well.heightAnchor.constraint(equalToConstant: 18).isActive = true
                 wells[slot] = well
-                row.append(NSTextField(labelWithString: slot.label + ":"))
+                let lbl = NSTextField(labelWithString: slot.label + ":")
+                lbl.font = .systemFont(ofSize: 12)
+                row.append(lbl)
                 row.append(well)
             }
             while row.count < 4 { row.append(NSGridCell.emptyContentView) }
             rows.append(row)
         }
         let grid = NSGridView(views: rows)
-        grid.rowSpacing = 6
-        grid.columnSpacing = 10
+        grid.rowSpacing = 3
+        grid.columnSpacing = 8
         grid.column(at: 0).xPlacement = .trailing
         grid.column(at: 2).xPlacement = .trailing
-        grid.column(at: 2).leadingPadding = 24
+        grid.column(at: 2).leadingPadding = 16
         for r in 0..<grid.numberOfRows { grid.row(at: r).yPlacement = .center }
 
         let previewLabel = NSTextField(labelWithString: "Preview:")
         let preview = previewPair
         preview.translatesAutoresizingMaskIntoConstraints = false
-        preview.heightAnchor.constraint(equalToConstant: 145).isActive = true
+        preview.heightAnchor.constraint(equalToConstant: 215).isActive = true
 
         previewInput.isEditable = false
         previewInput.isSelectable = false
@@ -542,10 +544,10 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         previewInput.layer?.borderWidth = 1.5
         previewInput.widthAnchor.constraint(equalToConstant: 140).isActive = true
         previewCheckbox.state = .on
-        previewCheckbox.isEnabled = false
+        previewCheckbox.refusesFirstResponder = true
         for b in [previewCancelButton, previewApplyButton] {
             b.bezelStyle = .rounded
-            b.isEnabled = false
+            b.refusesFirstResponder = true
             b.widthAnchor.constraint(greaterThanOrEqualToConstant: 76).isActive = true
         }
         let controlsPreview = NSStackView(views: [previewInput, previewCheckbox, NSView(), previewCancelButton, previewApplyButton])
@@ -555,8 +557,8 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         let stack = NSStackView(views: [title, presetRow, grid, previewLabel, preview, controlsPreview])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 8
-        stack.setCustomSpacing(10, after: grid)
+        stack.spacing = 6
+        stack.setCustomSpacing(8, after: grid)
         stack.setCustomSpacing(4, after: previewLabel)
         preview.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         controlsPreview.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true

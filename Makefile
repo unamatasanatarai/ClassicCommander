@@ -24,8 +24,8 @@ build:
 debug:
 	@DEBUG=1 ./scripts/build.sh
 
-## run: Kill running app, rebuild, and launch application
-run: kill build
+## run: Kill running app, rebuild (fast debug), and launch application
+run: kill debug
 	@echo "==> Launching $(APP_NAME).app..."
 	@open "$(APP_BUNDLE)"
 

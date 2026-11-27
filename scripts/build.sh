@@ -91,14 +91,40 @@ if [[ "${DEBUG:-0}" == "1" || "${CONFIGURATION:-}" == "debug" ]]; then
         -DDEBUG
         -num-threads "$(sysctl -n hw.ncpu)"
     )
+    if [[ ${#arch_list[@]} -eq 1 ]]; then
+        obj_dir="${build_dir}/obj/${arch_list[0]}"
+        mkdir -p "$obj_dir"
+        file_map="${obj_dir}/output-file-map.json"
+        {
+            printf '{\n  "": {"swift-dependencies": "%s/master.swiftdeps"}' "$obj_dir"
+            for f in "${sources[@]}"; do
+                key="${f//\//_}"
+                printf ',\n  "%s": {"object": "%s/%s.o", "swiftdeps": "%s/%s.swiftdeps"}' "$f" "$obj_dir" "$key" "$obj_dir" "$key"
+            done
+            printf '\n}\n'
+        } >"$file_map"
+        swiftc_flags+=(
+            -incremental
+            -output-file-map "$file_map"
+            -module-name "${app_name//[^A-Za-z0-9_]/_}"
+        )
+    fi
     build_mode="debug"
-else
+elif [[ "${RELEASE:-0}" == "1" ]]; then
     swiftc_flags=(
         -Osize
         -whole-module-optimization
         -lto=llvm-thin
+        -num-threads "$(sysctl -n hw.ncpu)"
         -Xlinker -dead_strip
         -Xlinker -x
+    )
+    build_mode="release"
+else
+    swiftc_flags=(
+        -O
+        -whole-module-optimization
+        -num-threads "$(sysctl -n hw.ncpu)"
     )
     build_mode="release"
 fi

@@ -17,6 +17,7 @@ public final class FTPController {
     /// Shows a message (errors, results). Replaceable in tests.
     public var showMessage: (String, String) -> Void = { title, text in
         let alert = NSAlert()
+        alert.alertStyle = .informational
         alert.messageText = title
         alert.informativeText = text
         Modal.run(alert)
@@ -34,6 +35,7 @@ public final class FTPController {
     /// Asks whether to trust an SSH server's host key (fingerprints). Replaceable in tests.
     public var askHostKeyTrust: (String) -> Bool = { text in
         let alert = NSAlert()
+        alert.alertStyle = .informational
         alert.messageText = "Unknown SSH host key"
         alert.informativeText = text + "\n\nOnly trust it if the fingerprint is right. ClassicCommander will remember these keys and refuse different ones later."
         alert.addButton(withTitle: "Cancel")

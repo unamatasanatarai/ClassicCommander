@@ -396,6 +396,7 @@ public final class FileCommands {
 final class AlertPrompts: FileCommandPrompts {
     func askText(title: String, message: String, defaultValue: String, okTitle: String) -> String? {
         let alert = NSAlert()
+        alert.alertStyle = .informational
         alert.messageText = title
         alert.informativeText = message
         alert.addButton(withTitle: okTitle)
@@ -411,6 +412,7 @@ final class AlertPrompts: FileCommandPrompts {
 
     func confirm(title: String, message: String, okTitle: String) -> Bool {
         let alert = NSAlert()
+        alert.alertStyle = title.lowercased().contains("permanently") ? .critical : .informational
         alert.messageText = title
         alert.informativeText = message
         alert.addButton(withTitle: okTitle)
@@ -427,6 +429,7 @@ final class AlertPrompts: FileCommandPrompts {
 
     func askUnpack(archiveName: String, defaultTarget: String) -> (target: String, overwrite: Bool)? {
         let alert = NSAlert()
+        alert.alertStyle = .informational
         alert.messageText = "Unpack Files"
         alert.informativeText = "Unpack \(archiveName) to:"
         alert.addButton(withTitle: "Unpack")
@@ -455,6 +458,7 @@ final class AlertPrompts: FileCommandPrompts {
 
     func showProblems(title: String, report: OperationReport) {
         let alert = NSAlert()
+        alert.alertStyle = .informational
         alert.messageText = title
         let count = report.errors.count
         alert.informativeText = "\(count) \(count == 1 ? "item" : "items") could not be processed:"
