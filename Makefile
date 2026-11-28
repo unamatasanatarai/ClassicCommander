@@ -45,7 +45,7 @@ coverage:
 
 ## crap: Calculate CRAP risk scores for all methods and report high-risk functions
 crap:
-	@./tools/crap/run.sh
+	@./tools/crap/run.sh --baseline
 
 ## dmg: Build styled DMG distribution package
 dmg:

@@ -252,701 +252,597 @@ def extract_function_data(
     }
 
 
+def _risk_hotspots(functions: list, limit: int = 8) -> list:
+    """Groups over-limit and warning functions by file, worst files first."""
+    by_file = {}
+    for fn in functions:
+        entry = by_file.setdefault(
+            fn["file"], {"file": fn["file"], "crap": 0, "total": 0, "worst": 0.0}
+        )
+        entry["total"] += 1
+        entry["worst"] = max(entry["worst"], fn["crap"])
+        if fn["is_crap"]:
+            entry["crap"] += 1
+    ranked = [e for e in by_file.values() if e["crap"] > 0]
+    ranked.sort(key=lambda e: (e["crap"], e["worst"]), reverse=True)
+    return ranked[:limit]
+
+
+def _format_generated_at(stamp: str) -> str:
+    """Formats an ISO timestamp as '28 Nov 2026, 09:29 UTC'."""
+    try:
+        moment = datetime.datetime.fromisoformat(stamp).astimezone(
+            datetime.timezone.utc
+        )
+    except ValueError:
+        return stamp
+    return f"{moment.day} {moment:%b %Y, %H:%M} UTC"
+
+
+def _hotspots_html(hotspots: list) -> str:
+    """Renders the hotspot list items; each one filters the table to its file."""
+    if not hotspots:
+        return '<li class="hs-empty">No function is over the limit.</li>'
+    top = hotspots[0]["crap"]
+    items = []
+    for spot in hotspots:
+        path = spot["file"]
+        directory, _, name = path.rpartition("/")
+        width = round(spot["crap"] / top * 100, 1)
+        items.append(
+            f'<li><button type="button" class="hs" data-file="{html.escape(path)}" '
+            f'title="Show functions in {html.escape(path)}">'
+            f'<span class="hs-name">{html.escape(name)}</span>'
+            f'<span class="hs-dir">{html.escape(directory.replace("Sources/App", "App", 1))}</span>'
+            f'<span class="hs-bar"><span style="width:{width}%"></span></span>'
+            f'<span class="hs-n">{spot["crap"]}<span class="hs-of">/{spot["total"]}</span></span>'
+            f"</button></li>"
+        )
+    return "\n".join(items)
+
+
 def generate_html_report(data: dict) -> str:
-    """Generates a modern, self-contained, offline HTML report with live filtering, sorting, and stats."""
+    """Generates a self-contained, offline HTML report with live filtering, sorting, and stats."""
     summary = data["summary"]
     threshold = data["threshold"]
     warning_threshold = data.get("warning_threshold", 4.0)
-    funcs_json = json.dumps(data["functions"])
+    functions = data["functions"]
+    total = summary["total_functions"] or 1
 
-    return f"""<!DOCTYPE html>
+    directories = sorted({os.path.dirname(fn["file"]) for fn in functions})
+    dir_options = "\n".join(
+        f'<option value="{html.escape(d)}/">{html.escape(d.replace("Sources/App", "App", 1))}</option>'
+        for d in directories
+    )
+
+    def share(count: int) -> str:
+        return f"{count / total * 100:.4g}"
+
+    replacements = {
+        "%%GENERATED%%": html.escape(_format_generated_at(data["generated_at"])),
+        "%%TOTAL%%": f"{summary['total_functions']:,}",
+        "%%CRAP_N%%": f"{summary['crap_functions']:,}",
+        "%%CRAP_PCT%%": f"{summary['crap_percentage']:.1f}",
+        "%%WARN_N%%": f"{summary['warning_functions']:,}",
+        "%%OK_N%%": f"{summary['healthy_functions']:,}",
+        "%%ZERO_N%%": f"{summary['zero_coverage_functions']:,}",
+        "%%CRAP_W%%": share(summary["crap_functions"]),
+        "%%WARN_W%%": share(summary["warning_functions"]),
+        "%%OK_W%%": share(summary["healthy_functions"]),
+        "%%MAX%%": f"{summary['max_crap']:.1f}",
+        "%%AVG_CX%%": f"{summary['average_complexity']:.1f}",
+        "%%AVG_COV%%": f"{summary['average_coverage']:.1f}",
+        "%%SKIPPED%%": f"{summary.get('skipped_implicit_closures', 0):,}",
+        "%%T%%": f"{threshold:g}",
+        "%%W%%": f"{warning_threshold:g}",
+        "%%DIR_OPTIONS%%": dir_options,
+        "%%HOTSPOTS%%": _hotspots_html(_risk_hotspots(functions)),
+        "%%T_JS%%": json.dumps(threshold),
+        "%%W_JS%%": json.dumps(warning_threshold),
+        # Escape "</" so no identifier can ever close the <script> element.
+        "%%DATA%%": json.dumps(functions, separators=(",", ":")).replace("</", "<\\/"),
+    }
+    page = HTML_TEMPLATE
+    for token, value in replacements.items():
+        page = page.replace(token, value)
+    return page
+
+
+HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CRAP Score Analysis &amp; Baseline - ClassicCommander</title>
-  <style>
-    :root {{
-      --bg: #f8fafc;
-      --card-bg: #ffffff;
-      --text: #0f172a;
-      --text-muted: #64748b;
-      --border: #e2e8f0;
-      --crap: #ef4444;
-      --crap-bg: #fee2e2;
-      --warning: #f59e0b;
-      --warning-bg: #fef3c7;
-      --good: #10b981;
-      --good-bg: #d1fae5;
-      --primary: #2563eb;
-      --primary-light: #eff6ff;
-      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    }}
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>CRAP report · ClassicCommander</title>
+<style>
+  :root {
+    --paper: #f5f4f0;
+    --surface: #ffffff;
+    --ink: #1a1c1e;
+    --ink-2: #53575c;
+    --ink-3: #868a8f;
+    --rule: #e2e0d9;
+    --rule-2: #cdc9bf;
+    --track: #ebe9e3;
+    --crap: #b3261e;
+    --crap-tint: #fbe8e5;
+    --warn: #9a5b00;
+    --warn-tint: #fcf0d9;
+    --ok: #2e6b4c;
+    --ok-tint: #e3f0e8;
+    --ok-bar: #8fb9a1;
+    --focus: #2357d9;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #131416;
+      --surface: #1b1c1f;
+      --ink: #ecebe7;
+      --ink-2: #a8aaad;
+      --ink-3: #74777b;
+      --rule: #2a2c30;
+      --rule-2: #3a3d42;
+      --track: #2a2c30;
+      --crap: #ff8a7a;
+      --crap-tint: #3a1d1a;
+      --warn: #f0b75a;
+      --warn-tint: #36290f;
+      --ok: #79c99e;
+      --ok-tint: #17301f;
+      --ok-bar: #3f7a5b;
+      --focus: #7ea2ff;
+    }
+  }
 
-    @media (prefers-color-scheme: dark) {{
-      :root {{
-        --bg: #0f172a;
-        --card-bg: #1e293b;
-        --text: #f1f5f9;
-        --text-muted: #94a3b8;
-        --border: #334155;
-        --crap: #f87171;
-        --crap-bg: #450a0a;
-        --warning: #fbbf24;
-        --warning-bg: #451a03;
-        --good: #34d399;
-        --good-bg: #064e3b;
-        --primary: #3b82f6;
-        --primary-light: #1e3a8a;
-      }}
-    }}
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font: 14px/1.45 var(--sans);
+    font-variant-numeric: tabular-nums;
+  }
+  .page { max-width: 1240px; margin: 0 auto; padding: 28px 32px 48px; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+  button, input, select { font: inherit; color: inherit; }
+  .num { font-variant-numeric: tabular-nums; }
 
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{
-      font-family: var(--font-sans);
-      background: var(--bg);
-      color: var(--text);
-      line-height: 1.5;
-      padding: 24px;
-    }}
+  /* Masthead */
+  .mast {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 8px 24px; flex-wrap: wrap;
+    padding-bottom: 14px; border-bottom: 1px solid var(--rule);
+  }
+  .mast h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.005em; }
+  .mast h1 span { color: var(--ink-3); font-weight: 400; margin: 0 6px; }
+  .mast p { margin: 0; color: var(--ink-3); font-size: 13px; }
 
-    .container {{
-      max-width: 1440px;
-      margin: 0 auto;
-    }}
+  /* Overview */
+  .overview {
+    display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+    gap: 48px; padding: 32px 0 36px;
+  }
+  .eyebrow { margin: 0 0 10px; font-size: 13px; color: var(--ink-2); }
+  .verdict-n { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  .verdict-n strong {
+    font-size: 64px; line-height: 0.95; font-weight: 600; letter-spacing: -0.035em; color: var(--crap);
+  }
+  .verdict-n span { font-size: 17px; color: var(--ink-2); }
+  .verdict-n span b { color: var(--ink); font-weight: 600; }
 
-    header {{
-      margin-bottom: 24px;
-      padding-bottom: 20px;
-      border-bottom: 1px solid var(--border);
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      flex-wrap: wrap;
-      gap: 16px;
-    }}
+  .dist { display: flex; height: 10px; margin: 26px 0 10px; border-radius: 2px; overflow: hidden; gap: 2px; }
+  .dist i { display: block; min-width: 2px; }
+  .dist .d-ok { background: var(--ok-bar); }
+  .dist .d-warn { background: var(--warn); opacity: .75; }
+  .dist .d-crap { background: var(--crap); }
+  .legend { display: flex; gap: 6px 22px; flex-wrap: wrap; margin: 0; padding: 0; list-style: none; font-size: 13px; color: var(--ink-2); }
+  .legend li { display: flex; align-items: center; gap: 7px; }
+  .legend b { color: var(--ink); font-weight: 600; }
+  .sw { width: 8px; height: 8px; border-radius: 1px; display: inline-block; }
 
-    h1 {{
-      font-size: 26px;
-      font-weight: 700;
-      letter-spacing: -0.02em;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }}
+  .facts {
+    display: grid; grid-template-columns: repeat(4, auto); justify-content: start;
+    gap: 0 36px; margin: 30px 0 0; padding-top: 18px; border-top: 1px solid var(--rule);
+  }
+  .facts div { display: flex; flex-direction: column-reverse; gap: 2px; }
+  .facts dt { font-size: 12px; color: var(--ink-3); }
+  .facts dd { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+  .facts dd small { font-size: 13px; font-weight: 400; color: var(--ink-3); margin-left: 1px; }
 
-    .subtitle {{
-      color: var(--text-muted);
-      font-size: 14px;
-      margin-top: 4px;
-    }}
+  .hotspots h2, .list-head h2 { margin: 0; font-size: 13px; font-weight: 600; }
+  .hotspots header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+  .hotspots header p { margin: 0; font-size: 12px; color: var(--ink-3); }
+  .hotspots ol { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule); }
+  .hotspots li { border-bottom: 1px solid var(--rule); }
+  .hs-empty { padding: 12px 0; color: var(--ink-3); }
+  .hs {
+    width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 72px 44px;
+    grid-template-rows: auto auto; column-gap: 14px; align-items: center;
+    padding: 8px 6px; margin: 0; border: 0; background: none; text-align: left; cursor: pointer;
+    border-radius: 3px;
+  }
+  .hs:hover { background: var(--surface); }
+  .hs[aria-pressed="true"] { background: var(--surface); box-shadow: inset 2px 0 0 var(--ink); }
+  .hs-name { font-family: var(--mono); font-size: 12.5px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hs-dir { grid-row: 2; font-size: 11.5px; color: var(--ink-3); }
+  .hs-bar { grid-column: 2; grid-row: 1 / span 2; height: 4px; background: var(--track); border-radius: 2px; overflow: hidden; }
+  .hs-bar span { display: block; height: 100%; background: var(--crap); opacity: .85; }
+  .hs-n { grid-column: 3; grid-row: 1 / span 2; text-align: right; font-weight: 600; }
+  .hs-of { color: var(--ink-3); font-weight: 400; font-size: 12px; }
 
-    .formula-tag {{
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      padding: 6px 12px;
-      border-radius: 6px;
-      font-family: var(--font-mono);
-      font-size: 13px;
-      color: var(--text-muted);
-    }}
+  /* Function list */
+  .list { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; }
+  .list-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 16px 18px 0; flex-wrap: wrap; }
+  .kbd { font-family: var(--mono); font-size: 11px; color: var(--ink-3); border: 1px solid var(--rule-2); border-radius: 3px; padding: 0 4px; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 10px 12px; align-items: center; padding: 12px 18px 14px; border-bottom: 1px solid var(--rule); }
+  .search { flex: 1 1 260px; position: relative; }
+  .search input {
+    width: 100%; height: 32px; padding: 0 10px 0 30px;
+    border: 1px solid var(--rule-2); border-radius: 5px; background: var(--paper);
+  }
+  .search input::placeholder { color: var(--ink-3); }
+  .search svg { position: absolute; left: 9px; top: 9px; width: 14px; height: 14px; color: var(--ink-3); }
 
-    .kpis {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-      gap: 14px;
-      margin-bottom: 24px;
-    }}
+  .seg { display: inline-flex; border: 1px solid var(--rule-2); border-radius: 5px; padding: 2px; background: var(--paper); flex-wrap: wrap; }
+  .seg button {
+    border: 0; background: none; height: 26px; padding: 0 10px; border-radius: 3px; cursor: pointer;
+    color: var(--ink-2); font-size: 13px; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+  }
+  .seg button:hover { color: var(--ink); }
+  .seg button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--rule-2); }
+  .seg .c { color: var(--ink-3); font-size: 12px; }
+  .field { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-2); }
+  .field select, .field input {
+    height: 32px; border: 1px solid var(--rule-2); border-radius: 5px; background: var(--paper); padding: 0 8px;
+  }
+  .field input { width: 64px; }
+  .chip {
+    display: none; align-items: center; gap: 6px; height: 28px; padding: 0 4px 0 10px;
+    border-radius: 14px; background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 12px;
+  }
+  .chip.on { display: inline-flex; }
+  .chip button { border: 0; background: none; color: inherit; width: 20px; height: 20px; border-radius: 10px; cursor: pointer; font-size: 14px; line-height: 1; }
+  .chip button:hover { background: rgba(127,127,127,.35); }
 
-    .kpi-card {{
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 16px;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-    }}
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    position: sticky; top: 0; z-index: 1; background: var(--surface);
+    text-align: left; font-weight: 500; font-size: 12px; color: var(--ink-3);
+    padding: 0; border-bottom: 1px solid var(--rule);
+  }
+  thead th button {
+    border: 0; background: none; width: 100%; text-align: inherit; padding: 10px 12px; cursor: pointer;
+    color: inherit; font-size: inherit; display: flex; gap: 4px; align-items: center; justify-content: inherit;
+  }
+  thead th:first-child button { padding-left: 18px; }
+  thead th button:hover { color: var(--ink); }
+  thead th[aria-sort] button { color: var(--ink); }
+  thead th[aria-sort="ascending"] button::after { content: "↑"; }
+  thead th[aria-sort="descending"] button::after { content: "↓"; }
+  th.r, td.r { text-align: right; }
+  th.r button { justify-content: flex-end; }
+  tbody td { padding: 9px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  tbody td:first-child { padding-left: 18px; }
+  tbody td:last-child { padding-right: 18px; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover td { background: color-mix(in srgb, var(--paper) 60%, transparent); }
 
-    .kpi-title {{
-      font-size: 12px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: var(--text-muted);
-    }}
+  .score { display: flex; align-items: center; gap: 10px; }
+  .score b { width: 34px; text-align: right; font-weight: 600; font-size: 14px; }
+  .lvl-crap b { color: var(--crap); }
+  .lvl-warn b { color: var(--warn); }
+  .lvl-ok b { color: var(--ink-2); font-weight: 500; }
+  .meter { position: relative; width: 72px; height: 4px; background: var(--track); border-radius: 2px; }
+  .meter span { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; }
+  .meter i { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--surface); box-shadow: inset 0 0 0 1px var(--rule-2); z-index: 1; }
+  .lvl-crap .meter span { background: var(--crap); }
+  .lvl-warn .meter span { background: var(--warn); }
+  .lvl-ok .meter span { background: var(--ok-bar); }
 
-    .kpi-value {{
-      font-size: 28px;
-      font-weight: 700;
-      margin-top: 6px;
-      line-height: 1.1;
-    }}
+  .cov-low { color: var(--crap); }
+  .cov-zero { color: var(--crap); font-weight: 600; }
+  .muted { color: var(--ink-3); }
 
-    .kpi-sub {{
-      font-size: 12px;
-      color: var(--text-muted);
-      margin-top: 4px;
-    }}
+  .fn, .loc { overflow-wrap: anywhere; }
+  .fn { font-family: var(--mono); font-size: 12.5px; line-height: 1.5; }
+  .fn .ctx { color: var(--ink-3); }
+  .fn .typ { color: var(--ink-2); }
+  .fn .mem { color: var(--ink); font-weight: 600; }
+  .loc { margin-top: 2px; font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); }
+  .loc .m-only { display: none; }
 
-    .kpi-crap {{ color: var(--crap); }}
-    .kpi-warning {{ color: var(--warning); }}
-    .kpi-good {{ color: var(--good); }}
+  .empty td { padding: 48px 18px; text-align: center; color: var(--ink-2); }
+  .empty button { margin-left: 8px; border: 1px solid var(--rule-2); background: var(--paper); border-radius: 5px; padding: 4px 10px; cursor: pointer; }
 
-    .toolbar {{
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 16px;
-      margin-bottom: 20px;
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-    }}
+  .pager { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 18px; border-top: 1px solid var(--rule); font-size: 13px; color: var(--ink-2); }
+  .pager-nav { display: flex; align-items: center; gap: 6px; }
+  .pager-nav button { height: 30px; min-width: 30px; border: 1px solid var(--rule-2); background: var(--surface); border-radius: 5px; cursor: pointer; padding: 0 10px; }
+  .pager-nav button:disabled { opacity: .4; cursor: default; }
 
-    .toolbar-row {{
-      display: flex;
-      gap: 12px;
-      flex-wrap: wrap;
-      align-items: center;
-    }}
+  .notes { margin-top: 28px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; font-size: 12.5px; color: var(--ink-2); }
+  .notes h3 { margin: 0 0 4px; font-size: 12px; font-weight: 600; color: var(--ink); }
+  .notes p { margin: 0; }
+  .notes code { font-family: var(--mono); font-size: 12px; color: var(--ink); }
 
-    .search-input {{
-      flex: 1;
-      min-width: 260px;
-      padding: 9px 14px;
-      border-radius: 6px;
-      border: 1px solid var(--border);
-      background: var(--bg);
-      color: var(--text);
-      font-size: 14px;
-    }}
-    .search-input:focus {{
-      outline: none;
-      border-color: var(--primary);
-    }}
-
-    .filter-btn {{
-      padding: 7px 14px;
-      border-radius: 6px;
-      border: 1px solid var(--border);
-      background: var(--bg);
-      color: var(--text);
-      font-size: 13px;
-      font-weight: 500;
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      transition: all 0.15s ease;
-    }}
-
-    .filter-btn:hover {{
-      border-color: var(--primary);
-    }}
-
-    .filter-btn.active {{
-      background: var(--primary);
-      color: #ffffff;
-      border-color: var(--primary);
-    }}
-
-    .filter-badge {{
-      background: rgba(0,0,0,0.1);
-      padding: 2px 6px;
-      border-radius: 10px;
-      font-size: 11px;
-    }}
-    .active .filter-badge {{
-      background: rgba(255,255,255,0.25);
-    }}
-
-    .control-group {{
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 13px;
-      color: var(--text-muted);
-    }}
-
-    .control-select, .control-input {{
-      padding: 6px 10px;
-      border-radius: 6px;
-      border: 1px solid var(--border);
-      background: var(--bg);
-      color: var(--text);
-      font-size: 13px;
-    }}
-
-    .table-container {{
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      overflow-x: auto;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-    }}
-
-    table {{
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 13px;
-      text-align: left;
-    }}
-
-    th {{
-      background: var(--bg);
-      padding: 12px 14px;
-      font-weight: 600;
-      color: var(--text-muted);
-      border-bottom: 1px solid var(--border);
-      cursor: pointer;
-      user-select: none;
-      white-space: nowrap;
-    }}
-
-    th:hover {{
-      color: var(--text);
-    }}
-
-    th.sorted-asc::after {{ content: " ▲"; color: var(--primary); font-size: 10px; }}
-    th.sorted-desc::after {{ content: " ▼"; color: var(--primary); font-size: 10px; }}
-
-    td {{
-      padding: 10px 14px;
-      border-bottom: 1px solid var(--border);
-      vertical-align: middle;
-    }}
-
-    tr:last-child td {{
-      border-bottom: none;
-    }}
-
-    tr:hover {{
-      background: rgba(0,0,0,0.015);
-    }}
-
-    .badge {{
-      display: inline-flex;
-      align-items: center;
-      padding: 3px 8px;
-      border-radius: 4px;
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.03em;
-    }}
-
-    .badge-crap {{
-      background: var(--crap-bg);
-      color: var(--crap);
-    }}
-
-    .badge-warning {{
-      background: var(--warning-bg);
-      color: var(--warning);
-    }}
-
-    .badge-good {{
-      background: var(--good-bg);
-      color: var(--good);
-    }}
-
-    .score-cell {{
-      font-family: var(--font-mono);
-      font-weight: 700;
-      font-size: 14px;
-    }}
-
-    .score-crap {{ color: var(--crap); }}
-    .score-warning {{ color: var(--warning); }}
-    .score-good {{ color: var(--good); }}
-
-    .func-name {{
-      font-family: var(--font-mono);
-      font-size: 13px;
-      font-weight: 600;
-      word-break: break-all;
-    }}
-
-    .func-file {{
-      color: var(--text-muted);
-      font-size: 12px;
-      font-family: var(--font-mono);
-      margin-top: 2px;
-    }}
-
-    .progress-bar {{
-      width: 80px;
-      height: 6px;
-      background: var(--border);
-      border-radius: 3px;
-      overflow: hidden;
-      display: inline-block;
-      vertical-align: middle;
-      margin-right: 6px;
-    }}
-
-    .progress-fill {{
-      height: 100%;
-      background: var(--good);
-    }}
-    .progress-fill.low {{ background: var(--crap); }}
-    .progress-fill.mid {{ background: var(--warning); }}
-
-    .pagination {{
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 14px 16px;
-      border-top: 1px solid var(--border);
-      background: var(--bg);
-      border-radius: 0 0 8px 8px;
-      font-size: 13px;
-      color: var(--text-muted);
-    }}
-
-    .page-buttons {{
-      display: flex;
-      gap: 6px;
-    }}
-
-    .page-btn {{
-      padding: 5px 12px;
-      border: 1px solid var(--border);
-      background: var(--card-bg);
-      color: var(--text);
-      border-radius: 4px;
-      font-size: 13px;
-      cursor: pointer;
-    }}
-
-    .page-btn:disabled {{
-      opacity: 0.5;
-      cursor: not-allowed;
-    }}
-
-    .footer {{
-      margin-top: 24px;
-      font-size: 12px;
-      color: var(--text-muted);
-      text-align: center;
-    }}
-  </style>
+  @media (max-width: 900px) {
+    .overview { grid-template-columns: 1fr; gap: 36px; }
+    .notes { grid-template-columns: 1fr; gap: 16px; }
+  }
+  @media (max-width: 640px) {
+    .page { padding: 20px 16px 36px; }
+    .overview { padding-top: 24px; }
+    .verdict-n strong { font-size: 52px; }
+    .facts { grid-template-columns: repeat(2, auto); gap: 14px 36px; }
+    .list { border-radius: 0; border-left: 0; border-right: 0; margin: 0 -16px; }
+    .list-head, .toolbar, .pager { padding-left: 16px; padding-right: 16px; }
+    .kbd-hint { display: none; }
+    table { table-layout: fixed; }
+    thead th[data-col="crap"] { width: 64px !important; }
+    thead th[data-col="coverage"] { width: 72px !important; }
+    .col-cx { display: none; }
+    .loc .m-only { display: inline; }
+    .meter { display: none; }
+    .score b { width: auto; }
+    tbody td, thead th button { padding-left: 8px; padding-right: 8px; }
+    tbody td:first-child, thead th:first-child button { padding-left: 16px; }
+    tbody td:last-child { padding-right: 16px; }
+  }
+</style>
 </head>
 <body>
-  <div class="container">
-    <header>
-      <div>
-        <h1>ClassicCommander CRAP Score Analysis</h1>
-        <div class="subtitle">Change Risk Anti-Patterns analysis generated on {html.escape(data['generated_at'])}</div>
-      </div>
-      <div class="formula-tag">
-        CRAP(m) = comp(m)² × (1 - cov(m))³ + comp(m) [Target: ≤ {threshold:g} | Warning: {warning_threshold:g}–{threshold:g} | Error: &gt; {threshold:g}]
-      </div>
-    </header>
+<div class="page">
+  <header class="mast">
+    <h1>ClassicCommander<span>/</span>CRAP report</h1>
+    <p>Sources/App · generated %%GENERATED%%</p>
+  </header>
 
-    <div class="kpis">
-      <div class="kpi-card">
-        <div class="kpi-title">Total Functions</div>
-        <div class="kpi-value">{summary['total_functions']:,}</div>
-        <div class="kpi-sub">Sources/App code</div>
+  <section class="overview" aria-label="Summary">
+    <div>
+      <p class="eyebrow">Functions over the CRAP limit of %%T%%</p>
+      <div class="verdict-n">
+        <strong>%%CRAP_N%%</strong>
+        <span>of <b>%%TOTAL%%</b> functions · %%CRAP_PCT%%%</span>
       </div>
-      <div class="kpi-card">
-        <div class="kpi-title">CRAP Errors</div>
-        <div class="kpi-value kpi-crap">{summary['crap_functions']:,}</div>
-        <div class="kpi-sub">{summary['crap_percentage']}% of total (&gt; {threshold:g})</div>
+      <div class="dist" aria-hidden="true">
+        <i class="d-ok" style="flex-basis:%%OK_W%%%"></i>
+        <i class="d-warn" style="flex-basis:%%WARN_W%%%"></i>
+        <i class="d-crap" style="flex-basis:%%CRAP_W%%%"></i>
       </div>
-      <div class="kpi-card">
-        <div class="kpi-title">Warning ({warning_threshold:g}–{threshold:g})</div>
-        <div class="kpi-value kpi-warning">{summary['warning_functions']:,}</div>
-        <div class="kpi-sub">Approaching target limit</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-title">Healthy (&lt; {warning_threshold:g})</div>
-        <div class="kpi-value kpi-good">{summary['healthy_functions']:,}</div>
-        <div class="kpi-sub">Target goal satisfied</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-title">Max CRAP Score</div>
-        <div class="kpi-value kpi-crap">{summary['max_crap']:.1f}</div>
-        <div class="kpi-sub">Highest risk function</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-title">Avg Complexity</div>
-        <div class="kpi-value">{summary['average_complexity']:.1f}</div>
-        <div class="kpi-sub">Avg decisions / method</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-title">Avg Coverage</div>
-        <div class="kpi-value kpi-good">{summary['average_coverage']:.1f}%</div>
-        <div class="kpi-sub">Region execution coverage</div>
-      </div>
+      <ul class="legend">
+        <li><span class="sw" style="background:var(--ok-bar)"></span><b>%%OK_N%%</b> healthy, below %%W%%</li>
+        <li><span class="sw" style="background:var(--warn)"></span><b>%%WARN_N%%</b> warning, %%W%%–%%T%%</li>
+        <li><span class="sw" style="background:var(--crap)"></span><b>%%CRAP_N%%</b> over limit</li>
+      </ul>
+      <dl class="facts">
+        <div><dt>Worst score</dt><dd>%%MAX%%</dd></div>
+        <div><dt>Average coverage</dt><dd>%%AVG_COV%%<small>%</small></dd></div>
+        <div><dt>Average complexity</dt><dd>%%AVG_CX%%</dd></div>
+        <div><dt>Never executed</dt><dd>%%ZERO_N%%</dd></div>
+      </dl>
     </div>
 
+    <aside class="hotspots" aria-labelledby="hs-title">
+      <header>
+        <h2 id="hs-title">Where the risk concentrates</h2>
+        <p>over limit / all functions</p>
+      </header>
+      <ol>
+%%HOTSPOTS%%
+      </ol>
+    </aside>
+  </section>
+
+  <section class="list" id="list" aria-labelledby="list-title">
+    <div class="list-head">
+      <h2 id="list-title">Functions</h2>
+      <span class="kbd-hint muted" style="font-size:12px">Press <span class="kbd">/</span> to search</span>
+    </div>
     <div class="toolbar">
-      <div class="toolbar-row">
-        <input type="text" id="searchInput" class="search-input" placeholder="Search functions, classes, files (e.g. CommanderView, ZipArchive, .swift)...">
-        <div class="control-group">
-          <label for="filterDir">Directory:</label>
-          <select id="filterDir" class="control-select">
-            <option value="">All Directories</option>
-            <option value="Sources/App/Core">Sources/App/Core</option>
-            <option value="Sources/App/Presentation">Sources/App/Presentation</option>
-            <option value="Sources/App/Core/FTP">Sources/App/Core/FTP</option>
+      <label class="search">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="7" cy="7" r="5"/><path d="m11 11 3.5 3.5"/></svg>
+        <input type="search" id="q" placeholder="Function, type or file" aria-label="Search functions, types or files" autocomplete="off" spellcheck="false">
+      </label>
+      <div class="seg" role="group" aria-label="Risk level">
+        <button type="button" data-risk="all" aria-pressed="true">All <span class="c">%%TOTAL%%</span></button>
+        <button type="button" data-risk="crap" aria-pressed="false">Over limit <span class="c">%%CRAP_N%%</span></button>
+        <button type="button" data-risk="warning" aria-pressed="false">Warning <span class="c">%%WARN_N%%</span></button>
+        <button type="button" data-risk="healthy" aria-pressed="false">Healthy <span class="c">%%OK_N%%</span></button>
+        <button type="button" data-risk="uncovered" aria-pressed="false">Untested <span class="c">%%ZERO_N%%</span></button>
+      </div>
+      <label class="field">Area
+        <select id="dir">
+          <option value="">All</option>
+%%DIR_OPTIONS%%
+        </select>
+      </label>
+      <label class="field">Score ≥
+        <input type="number" id="min" min="0" step="1" value="0" inputmode="decimal">
+      </label>
+      <span class="chip" id="fileChip"><span id="fileChipText"></span><button type="button" id="fileClear" aria-label="Clear file filter">×</button></span>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th data-col="crap" style="width:150px"><button type="button">CRAP</button></th>
+          <th data-col="complexity" class="r col-cx" style="width:96px"><button type="button">Complexity</button></th>
+          <th data-col="coverage" class="r" style="width:96px"><button type="button">Coverage</button></th>
+          <th data-col="name"><button type="button">Function</button></th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+
+    <div class="pager">
+      <span id="range" aria-live="polite"></span>
+      <div class="pager-nav">
+        <label class="field">Rows
+          <select id="size">
+            <option value="50" selected>50</option>
+            <option value="100">100</option>
+            <option value="250">250</option>
+            <option value="all">All</option>
           </select>
-        </div>
-      </div>
-      <div class="toolbar-row">
-        <div style="display:flex; gap:8px; flex-wrap:wrap;">
-          <button class="filter-btn active" data-filter="all">All <span class="filter-badge" id="badgeAll">{summary['total_functions']}</span></button>
-          <button class="filter-btn" data-filter="crap">CRAP Only <span class="filter-badge" id="badgeCrap">{summary['crap_functions']}</span></button>
-          <button class="filter-btn" data-filter="warning">Warning <span class="filter-badge" id="badgeWarning">{summary['warning_functions']}</span></button>
-          <button class="filter-btn" data-filter="healthy">Healthy <span class="filter-badge" id="badgeHealthy">{summary['healthy_functions']}</span></button>
-          <button class="filter-btn" data-filter="uncovered">0% Coverage <span class="filter-badge" id="badgeUncovered">{summary['zero_coverage_functions']}</span></button>
-        </div>
-        <div style="margin-left:auto; display:flex; gap:12px; align-items:center;">
-          <div class="control-group">
-            <label for="minCrapInput">Min CRAP:</label>
-            <input type="number" id="minCrapInput" class="control-input" style="width:70px;" min="0" step="5" value="0">
-          </div>
-          <div class="control-group">
-            <label for="pageSizeSelect">Show:</label>
-            <select id="pageSizeSelect" class="control-select">
-              <option value="50" selected>50</option>
-              <option value="100">100</option>
-              <option value="250">250</option>
-              <option value="all">All</option>
-            </select>
-          </div>
-        </div>
+        </label>
+        <button type="button" id="prev" aria-label="Previous page">‹</button>
+        <span id="pageNo" class="num"></span>
+        <button type="button" id="next" aria-label="Next page">›</button>
       </div>
     </div>
+  </section>
 
-    <div class="table-container">
-      <table id="crapTable">
-        <thead>
-          <tr>
-            <th data-col="status" style="width: 100px;">Status</th>
-            <th data-col="crap" class="sorted-desc" style="width: 110px;">CRAP Score</th>
-            <th data-col="complexity" style="width: 110px;">Complexity</th>
-            <th data-col="coverage" style="width: 150px;">Coverage</th>
-            <th data-col="name">Function / Method</th>
-            <th data-col="file" style="width: 320px;">Location</th>
-          </tr>
-        </thead>
-        <tbody id="tableBody">
-          <!-- Rows inserted via JS -->
-        </tbody>
-      </table>
-      <div class="pagination">
-        <div id="pageInfo">Showing 0-0 of 0</div>
-        <div class="page-buttons">
-          <button id="prevBtn" class="page-btn">Previous</button>
-          <span id="pageCurrent" style="padding: 5px 8px; font-weight:600;">1</span>
-          <button id="nextBtn" class="page-btn">Next</button>
-        </div>
-      </div>
+  <section class="notes" aria-label="Method">
+    <div>
+      <h3>Score</h3>
+      <p><code>CRAP = cx² × (1 − cov)³ + cx</code>. Complexity that tests never reach grows the score fast; a fully covered function scores exactly its complexity.</p>
     </div>
-
-    <div class="footer">
-      ClassicCommander Code Risk Baseline &bull; Generated offline with standard xcrun llvm-cov and swift-demangle &bull; Target CRAP &le; {threshold:g} (Warning: {warning_threshold:g}&ndash;{threshold:g}, Error: &gt; {threshold:g})
+    <div>
+      <h3>Thresholds</h3>
+      <p>Healthy below %%W%%, warning %%W%%–%%T%%, over the limit above %%T%%. The common industry limit is 30; this project uses %%T%%.</p>
     </div>
-  </div>
+    <div>
+      <h3>Inputs</h3>
+      <p>Region coverage from <code>llvm-cov export</code>, cyclomatic complexity counted from source. %%SKIPPED%% compiler-generated implicit closures are left out.</p>
+    </div>
+  </section>
+</div>
 
-  <script>
-    const RAW_DATA = {funcs_json};
-    const THRESHOLD = {threshold};
-    const WARN_THRESHOLD = {warning_threshold};
+<script>
+const DATA = %%DATA%%;
+const LIMIT = %%T_JS%%;
+const WARN = %%W_JS%%;
+const SCALE = Math.max(LIMIT * 2, ...DATA.map(f => f.crap));
 
-    let state = {{
-      data: RAW_DATA,
-      filtered: [...RAW_DATA],
-      filterMode: 'all',
-      search: '',
-      dirFilter: '',
-      minCrap: 0,
-      sortCol: 'crap',
-      sortAsc: false,
-      pageSize: 50,
-      currentPage: 1
-    }};
+const $ = id => document.getElementById(id);
+const state = { q: '', risk: 'all', dir: '', file: '', min: 0, col: 'crap', asc: false, size: 50, page: 1, rows: DATA };
 
-    function applyFilters() {{
-      const q = state.search.toLowerCase().trim();
-      const dir = state.dirFilter;
-      const minC = state.minCrap;
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
-      state.filtered = state.data.filter(item => {{
-        // Filter button
-        if (state.filterMode === 'crap' && !item.is_crap) return false;
-        if (state.filterMode === 'warning' && (item.crap < WARN_THRESHOLD || item.crap > THRESHOLD)) return false;
-        if (state.filterMode === 'healthy' && item.crap >= WARN_THRESHOLD) return false;
-        if (state.filterMode === 'uncovered' && item.coverage > 0) return false;
+function level(f) {
+  if (f.is_crap) return 'crap';
+  return f.crap >= WARN ? 'warn' : 'ok';
+}
 
-        // Min CRAP
-        if (item.crap < minC) return false;
+// "closure #1 in static Foo.bar(_:)" -> context, type, member
+function splitName(name) {
+  const cut = Math.max(name.lastIndexOf(' in '), name.lastIndexOf(' of '));
+  let ctx = cut >= 0 ? name.slice(0, cut + 4) : '';
+  let main = cut >= 0 ? name.slice(cut + 4) : name;
+  const mod = main.match(/^(static |class )/);
+  if (mod) { ctx += mod[1]; main = main.slice(mod[1].length); }
+  const paren = main.indexOf('(');
+  const head = paren >= 0 ? main.slice(0, paren) : main;
+  const dot = paren >= 0 ? head.lastIndexOf('.') : head.indexOf('.');
+  return { ctx, typ: dot >= 0 ? main.slice(0, dot + 1) : '', mem: dot >= 0 ? main.slice(dot + 1) : main };
+}
 
-        // Directory
-        if (dir && !item.file.startsWith(dir)) return false;
+function matches(f) {
+  if (state.risk === 'crap' && !f.is_crap) return false;
+  if (state.risk === 'warning' && (f.is_crap || f.crap < WARN)) return false;
+  if (state.risk === 'healthy' && f.crap >= WARN) return false;
+  if (state.risk === 'uncovered' && f.coverage > 0) return false;
+  if (f.crap < state.min) return false;
+  if (state.file && f.file !== state.file) return false;
+  if (state.dir && !(f.file.startsWith(state.dir) && f.file.indexOf('/', state.dir.length) < 0)) return false;
+  if (state.q) {
+    const q = state.q;
+    return f.name.toLowerCase().includes(q) || f.file.toLowerCase().includes(q) || String(f.line) === q;
+  }
+  return true;
+}
 
-        // Search
-        if (q) {{
-          const inName = item.name.toLowerCase().includes(q);
-          const inFile = item.file.toLowerCase().includes(q);
-          const inLine = String(item.line).includes(q);
-          if (!inName && !inFile && !inLine) return false;
-        }}
+function update() {
+  const { col, asc } = state;
+  state.rows = DATA.filter(matches).sort((a, b) => {
+    const d = typeof a[col] === 'string' ? a[col].localeCompare(b[col]) : a[col] - b[col];
+    return (asc ? d : -d) || b.crap - a.crap;
+  });
+  state.page = 1;
+  render();
+}
 
-        return true;
-      }});
+function row(f) {
+  const lvl = level(f);
+  const n = splitName(f.name);
+  const fill = Math.min(100, f.crap / SCALE * 100);
+  const covCls = f.coverage === 0 ? 'cov-zero' : f.coverage < 50 ? 'cov-low' : '';
+  const label = lvl === 'crap' ? 'over limit' : lvl === 'warn' ? 'warning' : 'healthy';
+  return `<tr>
+    <td><div class="score lvl-${lvl}" title="${label}"><b>${f.crap.toFixed(1)}</b><span class="meter"><span style="width:${fill}%"></span><i style="left:${WARN / SCALE * 100}%"></i><i style="left:${LIMIT / SCALE * 100}%"></i></span></div></td>
+    <td class="r col-cx">${f.complexity}</td>
+    <td class="r ${covCls}">${f.coverage.toFixed(f.coverage % 1 ? 1 : 0)}<span class="muted">%</span></td>
+    <td><div class="fn"><span class="ctx">${esc(n.ctx)}</span><span class="typ">${esc(n.typ)}</span><span class="mem">${esc(n.mem)}</span></div>
+      <div class="loc">${esc(f.file.replace(/^Sources\/App\//, ''))}:${f.line}<span class="m-only"> · cx ${f.complexity}</span></div></td>
+  </tr>`;
+}
 
-      // Sort
-      state.filtered.sort((a, b) => {{
-        let vA = a[state.sortCol];
-        let vB = b[state.sortCol];
-        if (state.sortCol === 'status') {{
-          vA = a.crap;
-          vB = b.crap;
-        }}
-        if (typeof vA === 'string') {{
-          const cmp = vA.localeCompare(vB);
-          return state.sortAsc ? cmp : -cmp;
-        }}
-        return state.sortAsc ? (vA - vB) : (vB - vA);
-      }});
+function render() {
+  const total = state.rows.length;
+  const size = state.size === 'all' ? Math.max(total, 1) : state.size;
+  const pages = Math.max(1, Math.ceil(total / size));
+  state.page = Math.min(state.page, pages);
+  const start = (state.page - 1) * size;
+  const end = Math.min(start + size, total);
 
-      state.currentPage = 1;
-      render();
-    }}
+  $('rows').innerHTML = total
+    ? state.rows.slice(start, end).map(row).join('')
+    : '<tr class="empty"><td colspan="4">No functions match these filters.<button type="button" id="reset">Clear filters</button></td></tr>';
+  if (!total) $('reset').addEventListener('click', resetFilters);
 
-    function render() {{
-      const tbody = document.getElementById('tableBody');
-      const total = state.filtered.length;
-      const pageSize = state.pageSize === 'all' ? total : parseInt(state.pageSize, 10);
-      const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  $('range').textContent = total ? `${(start + 1).toLocaleString()}–${end.toLocaleString()} of ${total.toLocaleString()}` : '0 results';
+  $('pageNo').textContent = `${state.page} / ${pages}`;
+  $('prev').disabled = state.page <= 1;
+  $('next').disabled = state.page >= pages;
 
-      if (state.currentPage > totalPages) state.currentPage = totalPages;
-      const startIdx = (state.currentPage - 1) * pageSize;
-      const endIdx = Math.min(startIdx + pageSize, total);
-      const pageItems = state.filtered.slice(startIdx, endIdx);
+  document.querySelectorAll('thead th').forEach(th => {
+    if (th.dataset.col === state.col) th.setAttribute('aria-sort', state.asc ? 'ascending' : 'descending');
+    else th.removeAttribute('aria-sort');
+  });
+  document.querySelectorAll('[data-risk]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.risk === state.risk)));
+  document.querySelectorAll('.hs').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.file === state.file)));
+  $('fileChip').classList.toggle('on', !!state.file);
+  $('fileChipText').textContent = state.file.split('/').pop();
+}
 
-      let htmlRows = '';
-      for (const item of pageItems) {{
-        let statusBadge = '<span class="badge badge-good">OK</span>';
-        let scoreClass = 'score-good';
-        if (item.is_crap) {{
-          statusBadge = '<span class="badge badge-crap">CRAP</span>';
-          scoreClass = 'score-crap';
-        }} else if (item.crap >= WARN_THRESHOLD) {{
-          statusBadge = '<span class="badge badge-warning">WARN</span>';
-          scoreClass = 'score-warning';
-        }}
+function resetFilters() {
+  Object.assign(state, { q: '', risk: 'all', dir: '', file: '', min: 0 });
+  $('q').value = ''; $('dir').value = ''; $('min').value = 0;
+  update();
+}
 
-        let covFillClass = '';
-        if (item.coverage < 40) covFillClass = 'low';
-        else if (item.coverage < 80) covFillClass = 'mid';
+$('q').addEventListener('input', e => { state.q = e.target.value.trim().toLowerCase(); update(); });
+$('q').addEventListener('keydown', e => { if (e.key === 'Escape' && e.target.value) { e.target.value = ''; state.q = ''; update(); } });
+$('dir').addEventListener('change', e => { state.dir = e.target.value; update(); });
+$('min').addEventListener('input', e => { state.min = parseFloat(e.target.value) || 0; update(); });
+$('size').addEventListener('change', e => { state.size = e.target.value === 'all' ? 'all' : +e.target.value; update(); });
+$('prev').addEventListener('click', () => { state.page--; render(); });
+$('next').addEventListener('click', () => { state.page++; render(); });
+$('fileClear').addEventListener('click', () => { state.file = ''; update(); });
+document.querySelectorAll('[data-risk]').forEach(b => b.addEventListener('click', () => { state.risk = b.dataset.risk; update(); }));
+document.querySelectorAll('.hs').forEach(b => b.addEventListener('click', () => {
+  state.file = state.file === b.dataset.file ? '' : b.dataset.file;
+  update();
+  if (state.file) $('list').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}));
+document.querySelectorAll('thead th').forEach(th => th.querySelector('button').addEventListener('click', () => {
+  const col = th.dataset.col;
+  state.asc = state.col === col ? !state.asc : col === 'name' || col === 'coverage';
+  state.col = col;
+  update();
+}));
+document.addEventListener('keydown', e => {
+  if (e.key === '/' && !/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName)) {
+    e.preventDefault();
+    $('q').focus();
+  }
+});
 
-        htmlRows += `<tr>
-          <td>${{statusBadge}}</td>
-          <td class="score-cell ${{scoreClass}}">${{item.crap.toFixed(1)}}</td>
-          <td><span class="badge" style="background:var(--bg); border:1px solid var(--border); font-family:var(--font-mono);">${{item.complexity}}</span></td>
-          <td>
-            <div class="progress-bar"><div class="progress-fill ${{covFillClass}}" style="width:${{Math.min(100, item.coverage)}}%;"></div></div>
-            <span style="font-family:var(--font-mono); font-size:12px;">${{item.coverage.toFixed(1)}}%</span>
-          </td>
-          <td>
-            <div class="func-name">${{escapeHtml(item.name)}}</div>
-          </td>
-          <td>
-            <div class="func-file">${{escapeHtml(item.file)}}:${{item.line}}</div>
-          </td>
-        </tr>`;
-      }}
-
-      if (total === 0) {{
-        htmlRows = '<tr><td colspan="6" style="text-align:center; padding:30px; color:var(--text-muted);">No matching functions found</td></tr>';
-      }}
-
-      tbody.innerHTML = htmlRows;
-
-      // Update Pagination info
-      document.getElementById('pageInfo').textContent = total > 0
-        ? `Showing ${{startIdx + 1}}-${{endIdx}} of ${{total}}`
-        : 'Showing 0-0 of 0';
-      document.getElementById('pageCurrent').textContent = `${{state.currentPage}} / ${{totalPages}}`;
-      document.getElementById('prevBtn').disabled = state.currentPage <= 1;
-      document.getElementById('nextBtn').disabled = state.currentPage >= totalPages;
-
-      // Update Header Sort Arrows
-      document.querySelectorAll('th').forEach(th => {{
-        th.classList.remove('sorted-asc', 'sorted-desc');
-        if (th.getAttribute('data-col') === state.sortCol) {{
-          th.classList.add(state.sortAsc ? 'sorted-asc' : 'sorted-desc');
-        }}
-      }});
-    }}
-
-    function escapeHtml(str) {{
-      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    }}
-
-    // Event listeners
-    document.getElementById('searchInput').addEventListener('input', e => {{
-      state.search = e.target.value;
-      applyFilters();
-    }});
-
-    document.getElementById('filterDir').addEventListener('change', e => {{
-      state.dirFilter = e.target.value;
-      applyFilters();
-    }});
-
-    document.getElementById('minCrapInput').addEventListener('input', e => {{
-      state.minCrap = parseFloat(e.target.value) || 0;
-      applyFilters();
-    }});
-
-    document.getElementById('pageSizeSelect').addEventListener('change', e => {{
-      state.pageSize = e.target.value;
-      applyFilters();
-    }});
-
-    document.querySelectorAll('.filter-btn').forEach(btn => {{
-      btn.addEventListener('click', () => {{
-        document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        state.filterMode = btn.getAttribute('data-filter');
-        applyFilters();
-      }});
-    }});
-
-    document.querySelectorAll('th').forEach(th => {{
-      th.addEventListener('click', () => {{
-        const col = th.getAttribute('data-col');
-        if (state.sortCol === col) {{
-          state.sortAsc = !state.sortAsc;
-        }} else {{
-          state.sortCol = col;
-          state.sortAsc = (col === 'name' || col === 'file');
-        }}
-        applyFilters();
-      }});
-    }});
-
-    document.getElementById('prevBtn').addEventListener('click', () => {{
-      if (state.currentPage > 1) {{
-        state.currentPage--;
-        render();
-      }}
-    }});
-
-    document.getElementById('nextBtn').addEventListener('click', () => {{
-      state.currentPage++;
-      render();
-    }});
-
-    // Initial render
-    applyFilters();
-  </script>
+update();
+</script>
 </body>
 </html>
 """
