@@ -85,18 +85,22 @@ final class HeldMenu {
     func run() {
         for level in levels { level.window.orderFront(nil) }
         while !done {
-            if let event = NSApp.nextEvent(matching: .any, until: Date(timeIntervalSinceNow: 1.0 / 60),
-                                           inMode: .eventTracking, dequeue: true) {
-                handle(event)
-            } else {
-                // Panels that are not key may get no mouse-moved events: follow the mouse anyway.
-                let mouse = NSEvent.mouseLocation
-                if mouse != lastMouse { hover(at: mouse) }
-            }
+            stepEventLoop()
             if !isActive() { done = true }
         }
         close()
         perform()
+    }
+
+    private func stepEventLoop() {
+        if let event = NSApp.nextEvent(matching: .any, until: Date(timeIntervalSinceNow: 1.0 / 60),
+                                       inMode: .eventTracking, dequeue: true) {
+            handle(event)
+        } else {
+            // Panels that are not key may get no mouse-moved events: follow the mouse anyway.
+            let mouse = NSEvent.mouseLocation
+            if mouse != lastMouse { hover(at: mouse) }
+        }
     }
 
     // MARK: Events
@@ -106,13 +110,23 @@ final class HeldMenu {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             hover(at: Self.screenLocation(of: event))
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
-            // Inside: the item is picked on release. Outside: the click only closes the menu.
-            let point = Self.screenLocation(of: event)
-            if levels.contains(where: { $0.window.frame.contains(point) }) { hover(at: point) } else { done = true }
+            handleMouseDown(at: Self.screenLocation(of: event))
         case .leftMouseUp, .rightMouseUp, .otherMouseUp:
             release(at: Self.screenLocation(of: event))
         case .keyDown:
             key(event)
+        default:
+            handleOtherEvent(event)
+        }
+    }
+
+    private func handleMouseDown(at point: NSPoint) {
+        // Inside: the item is picked on release. Outside: the click only closes the menu.
+        if levels.contains(where: { $0.window.frame.contains(point) }) { hover(at: point) } else { done = true }
+    }
+
+    private func handleOtherEvent(_ event: NSEvent) {
+        switch event.type {
         case .appKitDefined where event.subtype == .applicationDeactivated:
             done = true
         case .keyUp, .flagsChanged, .scrollWheel, .cursorUpdate, .mouseEntered, .mouseExited:
@@ -126,10 +140,7 @@ final class HeldMenu {
     func hover(at point: NSPoint) {
         lastMouse = point
         guard let depth = levels.lastIndex(where: { $0.window.frame.contains(point) }) else {
-            // Outside every menu: the deepest menu loses its highlight (unless it leads to a submenu).
-            if let last = levels.last, last.highlighted.map({ last.items[$0].submenu == nil }) ?? false {
-                last.highlighted = nil
-            }
+            clearHighlightIfNoSubmenu()
             return
         }
         let level = levels[depth]
@@ -138,6 +149,13 @@ final class HeldMenu {
         closeLevels(after: depth)
         level.highlighted = row
         if let row = row, level.items[row].submenu != nil { openSubmenu(of: depth, row: row) }
+    }
+
+    private func clearHighlightIfNoSubmenu() {
+        // Outside every menu: the deepest menu loses its highlight (unless it leads to a submenu).
+        if let last = levels.last, last.highlighted.map({ last.items[$0].submenu == nil }) ?? false {
+            last.highlighted = nil
+        }
     }
 
     /// A button released over the highlighted item (the mouse moved onto it or pressed on it) picks
@@ -153,29 +171,38 @@ final class HeldMenu {
     func key(_ event: NSEvent) {
         let depth = levels.count - 1
         let level = levels[depth]
+        if handleNavigationKey(event.keyCode, level: level, depth: depth) { return }
         switch event.keyCode {
         case 53: done = true                                        // Esc
+        case 36, 76, 49: activateHighlightedItem(in: level)         // Return, Enter, Space
+        default: typeSelect(event.charactersIgnoringModifiers ?? "", in: level)
+        }
+    }
+
+    private func handleNavigationKey(_ keyCode: UInt16, level: Level, depth: Int) -> Bool {
+        switch keyCode {
         case 125: level.highlighted = step(level, from: level.highlighted, by: 1)   // ↓
         case 126: level.highlighted = step(level, from: level.highlighted, by: -1)  // ↑
-        case 124: enterSubmenu()                                    // →
-        case 123: if depth > 0 { closeLevels(after: depth - 1) }    // ←
-        case 36, 76, 49:                                            // Return, Enter, Space
-            guard let row = level.highlighted else { return }
-            if level.items[row].submenu != nil { enterSubmenu() } else { choose(level.items[row]) }
-        default:
-            typeSelect(event.charactersIgnoringModifiers ?? "", in: level)
+        case 124: enterSubmenu()                                                    // →
+        case 123: if depth > 0 { closeLevels(after: depth - 1) }                    // ←
+        default: return false
         }
+        return true
+    }
+
+    private func activateHighlightedItem(in level: Level) {
+        guard let row = level.highlighted else { return }
+        if level.items[row].submenu != nil { enterSubmenu() } else { choose(level.items[row]) }
     }
 
     /// The next selectable row in a direction (from nothing: the first, or the last going up).
     func step(_ level: Level, from row: Int?, by delta: Int) -> Int? {
-        let count = level.items.count
-        var index = row ?? (delta > 0 ? -1 : count)
-        repeat {
-            index += delta
-            if !level.items.indices.contains(index) { return row }
+        var index = (row ?? (delta > 0 ? -1 : level.items.count)) + delta
+        while level.items.indices.contains(index) {
             if level.selectable(index) { return index }
-        } while true
+            index += delta
+        }
+        return row
     }
 
     /// Opens the highlighted item's submenu (if it has one) and highlights its first item.
@@ -228,8 +255,7 @@ final class HeldMenu {
     func place(_ level: Level, topLeft: NSPoint, besides row: NSRect?) {
         let size = level.window.frame.size
         let anchor = row.map { NSPoint(x: $0.maxX, y: $0.maxY) } ?? topLeft
-        let visible = (NSScreen.screens.first { $0.frame.contains(anchor) } ?? NSScreen.main)?.visibleFrame
-            ?? NSRect(x: -1e5, y: -1e5, width: 2e5, height: 2e5)
+        let visible = screenVisibleFrame(near: anchor)
         let padding = HeldMenuView.padding
         var origin = row.map { NSPoint(x: $0.maxX + 5, y: $0.maxY + padding - size.height) }
             ?? NSPoint(x: topLeft.x, y: topLeft.y - size.height)
@@ -240,6 +266,11 @@ final class HeldMenu {
         origin.x = max(visible.minX, min(origin.x, visible.maxX - size.width))
         origin.y = max(visible.minY, min(origin.y, visible.maxY - size.height))
         level.window.setFrameOrigin(origin)
+    }
+
+    private func screenVisibleFrame(near anchor: NSPoint) -> NSRect {
+        (NSScreen.screens.first { $0.frame.contains(anchor) } ?? NSScreen.main)?.visibleFrame
+            ?? NSRect(x: -1e5, y: -1e5, width: 2e5, height: 2e5)
     }
 
     func close() {
@@ -301,37 +332,59 @@ final class HeldMenuView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         for (row, item) in items.enumerated() {
-            let rect = rows[row]
-            if item.isSeparatorItem {
-                NSColor.separatorColor.setFill()
-                NSRect(x: 10, y: rect.midY - 0.5, width: rect.width - 20, height: 1).fill()
-                continue
-            }
-            let lit = row == highlighted && item.isEnabled
-            if lit {
-                NSColor.selectedContentBackgroundColor.setFill()
-                NSBezierPath(roundedRect: rect.insetBy(dx: 5, dy: 0), xRadius: 4, yRadius: 4).fill()
-            }
-            let color: NSColor = !item.isEnabled ? .disabledControlTextColor : lit ? .selectedMenuItemTextColor : .labelColor
-            if let image = item.image {
-                image.draw(in: NSRect(x: 20, y: rect.midY - 8, width: 16, height: 16), from: .zero,
-                           operation: .sourceOver, fraction: item.isEnabled ? 1 : 0.5, respectFlipped: true, hints: nil)
-            }
-            let title = item.title as NSString
-            let size = title.size(withAttributes: [.font: Self.font])
-            title.draw(at: NSPoint(x: textX, y: rect.midY - size.height / 2),
-                       withAttributes: [.font: Self.font, .foregroundColor: color])
-            if item.submenu != nil {
-                let arrow = NSBezierPath()
-                arrow.move(to: NSPoint(x: rect.maxX - 18, y: rect.midY - 4))
-                arrow.line(to: NSPoint(x: rect.maxX - 14, y: rect.midY))
-                arrow.line(to: NSPoint(x: rect.maxX - 18, y: rect.midY + 4))
-                arrow.lineWidth = 1.5
-                arrow.lineCapStyle = .round
-                arrow.lineJoinStyle = .round
-                color.setStroke()
-                arrow.stroke()
-            }
+            drawItem(item, in: rows[row], row: row)
         }
+    }
+
+    private func drawItem(_ item: NSMenuItem, in rect: NSRect, row: Int) {
+        if item.isSeparatorItem {
+            drawSeparator(in: rect)
+            return
+        }
+        let lit = row == highlighted && item.isEnabled
+        if lit { drawHighlight(in: rect) }
+        let color = itemColor(enabled: item.isEnabled, lit: lit)
+        drawItemIcon(item.image, enabled: item.isEnabled, in: rect)
+        drawItemTitle(item.title, in: rect, color: color)
+        if item.submenu != nil { drawSubmenuArrow(in: rect, color: color) }
+    }
+
+    private func drawSeparator(in rect: NSRect) {
+        NSColor.separatorColor.setFill()
+        NSRect(x: 10, y: rect.midY - 0.5, width: rect.width - 20, height: 1).fill()
+    }
+
+    private func drawHighlight(in rect: NSRect) {
+        NSColor.selectedContentBackgroundColor.setFill()
+        NSBezierPath(roundedRect: rect.insetBy(dx: 5, dy: 0), xRadius: 4, yRadius: 4).fill()
+    }
+
+    private func itemColor(enabled: Bool, lit: Bool) -> NSColor {
+        if !enabled { return .disabledControlTextColor }
+        return lit ? .selectedMenuItemTextColor : .labelColor
+    }
+
+    private func drawItemIcon(_ image: NSImage?, enabled: Bool, in rect: NSRect) {
+        image?.draw(in: NSRect(x: 20, y: rect.midY - 8, width: 16, height: 16), from: .zero,
+                    operation: .sourceOver, fraction: enabled ? 1 : 0.5, respectFlipped: true, hints: nil)
+    }
+
+    private func drawItemTitle(_ text: String, in rect: NSRect, color: NSColor) {
+        let title = text as NSString
+        let size = title.size(withAttributes: [.font: Self.font])
+        title.draw(at: NSPoint(x: textX, y: rect.midY - size.height / 2),
+                   withAttributes: [.font: Self.font, .foregroundColor: color])
+    }
+
+    private func drawSubmenuArrow(in rect: NSRect, color: NSColor) {
+        let arrow = NSBezierPath()
+        arrow.move(to: NSPoint(x: rect.maxX - 18, y: rect.midY - 4))
+        arrow.line(to: NSPoint(x: rect.maxX - 14, y: rect.midY))
+        arrow.line(to: NSPoint(x: rect.maxX - 18, y: rect.midY + 4))
+        arrow.lineWidth = 1.5
+        arrow.lineCapStyle = .round
+        arrow.lineJoinStyle = .round
+        color.setStroke()
+        arrow.stroke()
     }
 }

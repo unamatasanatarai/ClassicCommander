@@ -113,10 +113,12 @@ public final class TransferProgressWindowController: NSWindowController {
         statusLabel.font = .systemFont(ofSize: 12, weight: .medium)
         statusLabel.alignment = .center
 
-        fromLabel.font = .systemFont(ofSize: 11)
-        fromLabel.lineBreakMode = .byTruncatingMiddle
-        toLabel.font = .systemFont(ofSize: 11)
-        toLabel.lineBreakMode = .byTruncatingMiddle
+        for lbl in [fromLabel, toLabel] {
+            lbl.font = .systemFont(ofSize: 11)
+            lbl.lineBreakMode = .byTruncatingMiddle
+            lbl.usesSingleLineMode = true
+            lbl.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        }
 
         fileProgress.isIndeterminate = false
         fileProgress.minValue = 0
@@ -202,6 +204,7 @@ public final class TransferProgressWindowController: NSWindowController {
         let root = NSView()
         root.addSubview(stack)
         NSLayoutConstraint.activate([
+            root.widthAnchor.constraint(equalToConstant: 480),
             stack.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             stack.topAnchor.constraint(equalTo: root.topAnchor),
@@ -218,40 +221,56 @@ public final class TransferProgressWindowController: NSWindowController {
     }
 
     public func update() {
-        guard let window = window, window.isVisible, !isPreparing, let job = job else { return }
+        guard let job = visibleJob else { return }
+        applyJobUpdate(job)
+    }
+
+    private func applyJobUpdate(_ job: TransferJob) {
+        updateStatusLabel(for: job)
+        updateCurrentFileProgress(for: job)
+        updateTotalProgress(for: job)
+        pauseButton.title = job.isPaused ? "Resume" : "Pause"
+    }
+
+    private var visibleJob: TransferJob? {
+        guard let window = window, window.isVisible, !isPreparing else { return nil }
+        return job
+    }
+
+    private func updateStatusLabel(for job: TransferJob) {
         let verb = job.isMove ? "Move" : "Copy"
         let speedStr = Self.formatSpeed(job.speed)
-        let remainingBytes = max(0, job.bytesTotal - job.bytesProcessed)
-        let timeStr = Self.formatETA(remainingBytes: remainingBytes, speed: job.speed)
+        let timeStr = Self.formatETA(remainingBytes: max(0, job.bytesTotal - job.bytesProcessed), speed: job.speed)
         statusLabel.stringValue = timeStr.isEmpty ? "\(verb): \(speedStr)" : "\(verb): \(speedStr), \(timeStr)"
+    }
 
-        if let idx = job.active.first, job.items.indices.contains(idx) {
-            let item = job.items[idx]
-            fromLabel.stringValue = "From: " + item.source.displayPath
-            toLabel.stringValue = "To: " + item.destination.displayPath
-            let fDone = job.partial[idx] ?? 0
-            let fPct = item.size > 0 ? min(100, Int((Double(fDone) / Double(item.size)) * 100)) : 0
-            fileProgress.doubleValue = Double(fPct)
-            filePercentLabel.stringValue = "\(fPct) %"
-        } else {
+    private func updateCurrentFileProgress(for job: TransferJob) {
+        guard let idx = job.active.first, job.items.indices.contains(idx) else {
             fromLabel.stringValue = "From: …"
             toLabel.stringValue = "To: …"
             fileProgress.doubleValue = 0
             filePercentLabel.stringValue = "0 %"
+            return
         }
+        let item = job.items[idx]
+        fromLabel.stringValue = "From: " + item.source.displayPath
+        toLabel.stringValue = "To: " + item.destination.displayPath
+        let fDone = job.partial[idx] ?? 0
+        let fPct = item.size > 0 ? min(100, Int((Double(fDone) / Double(item.size)) * 100)) : 0
+        fileProgress.doubleValue = Double(fPct)
+        filePercentLabel.stringValue = "\(fPct) %"
+    }
 
+    private func updateTotalProgress(for job: TransferJob) {
         let tDone = job.bytesProcessed
         let tTotal = job.bytesTotal
         let tPct = tTotal > 0 ? min(100, Int((Double(tDone) / Double(tTotal)) * 100)) : (job.processedCount == job.items.count ? 100 : 0)
         totalProgress.doubleValue = Double(tPct)
         totalPercentLabel.stringValue = "\(tPct) %"
-
         filesCountLabel.stringValue = job.skippedCount > 0
             ? "\(job.processedCount) / \(job.items.count)  (\(job.skippedCount) skipped)"
             : "\(job.processedCount) / \(job.items.count)"
         bytesCountLabel.stringValue = "\(EntryFormatter.shared.size(tDone, as: .readable)) / \(EntryFormatter.shared.size(tTotal, as: .readable))"
-
-        pauseButton.title = job.isPaused ? "Resume" : "Pause"
     }
 
     static func formatSpeed(_ speed: Double) -> String {

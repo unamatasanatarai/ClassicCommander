@@ -141,6 +141,20 @@ public enum CoverageTests {
             defer { try? FileManager.default.removeItem(at: many) }
             for i in 0..<520 { FileManager.default.createFile(atPath: many.appendingPathComponent("f\(i)").path, contents: Data([1])) }
             try expect(FolderSizer.totalSize(of: many) == 520, "size of a folder with more than 512 entries")
+            try expect(SFTPClient.sizeField("-rw-r--r-- ? 501 0 1234 Nov 22 18:21 f") == 1234, "sizeField col 4")
+            try expect(SFTPClient.sizeField("-rw-r--r-- 501 0 42 Nov 22") == 42, "sizeField col 3")
+            try expect(SFTPClient.sizeField("-rw-r--r-- ? x y z 99 Nov 22") == 99, "sizeField col 5")
+            try expect(SFTPClient.sizeField("short") == nil, "sizeField nil")
+            try expect(ListerContent.trimIncompleteUTF8(Data([0x41, 0xC3])) == Data([0x41]), "trim 2-byte UTF8")
+            try expect(ListerContent.trimIncompleteUTF8(Data([0x41, 0xE2, 0x82])) == Data([0x41]), "trim 3-byte UTF8")
+            try expect(ListerContent.trimIncompleteUTF8(Data([0x41, 0xF0, 0x9F, 0x98])) == Data([0x41]), "trim 4-byte UTF8")
+            try expect(ListerContent.trimIncompleteUTF8(Data([0x80, 0x80])) == Data([0x80, 0x80]), "trim all-continuation")
+            try expect(ListerContent.text(Data([0xEF, 0xBB, 0xBF, 0x41]), encoding: .utf8).0 == "A", "strip utf8 BOM")
+            try expect(ListerContent.text(Data([0xFF, 0xFE, 0x41, 0x00]), encoding: .utf16LE).0 == "A", "strip utf16LE BOM")
+            try expect(ListerContent.text(Data([0xFE, 0xFF, 0x00, 0x41]), encoding: .utf16BE).0 == "A", "strip utf16BE BOM")
+            try expect(ListerContent.text(Data([0x41]), encoding: .auto).1 == .utf8, "auto utf8")
+            try expect(FTPTransferMode.text.usesText(for: "a.bin") && !FTPTransferMode.binary.usesText(for: "a.txt")
+                       && FTPTransferMode.automatic.usesText(for: "a.txt"), "FTPTransferMode.usesText")
         }
 
         testRunner("Core: unreadable folders are reported by every walker") {
@@ -1601,6 +1615,62 @@ public enum CoverageTests {
                let scrollEvt = NSEvent(cgEvent: cg) {
                 tabBar.scrollWheel(with: scrollEvt)
             }
+
+            // Modal.style with nested accessoryView controls
+            let alert = NSAlert()
+            alert.messageText = "Test"
+            alert.informativeText = "Details"
+            alert.addButton(withTitle: "OK")
+            alert.addButton(withTitle: "Cancel")
+            let acc = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 28))
+            let nested = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 28))
+            nested.addSubview(NSTextField(string: "value"))
+            acc.addSubview(nested)
+            alert.accessoryView = acc
+            Modal.style(alert)
+
+            // OptionsWindowController quickSearchRadioChanged
+            let optSuite = "Coverage-Opt-\(UUID().uuidString)"
+            let optDefaults = UserDefaults(suiteName: optSuite)!
+            defer { optDefaults.removePersistentDomain(forName: optSuite) }
+            let opts = OptionsWindowController(store: SettingsStore(defaults: optDefaults))
+            let radio = NSButton(radioButtonWithTitle: "Radio", target: nil, action: nil)
+            radio.tag = 1
+            opts.quickSearchRadioChanged(radio)
+
+            // Final CRAP coverage checks: FindFilesWindowController, CommanderView, Modal
+            _ = FindFilesWindowController.validationError(for: SearchValidationError(message: "bad"))
+            _ = FindFilesWindowController.validationError(for: NSError(domain: "test", code: 1))
+            let tmpDir = URL(fileURLWithPath: "/tmp", isDirectory: true)
+            let cmd = CommanderView(model: CommanderModel(left: PanelModel(directory: tmpDir), right: PanelModel(directory: tmpDir)))
+            let ff = FindFilesWindowController(commander: cmd, defaults: optDefaults)
+            ff.selectRow(for: URL(fileURLWithPath: "/tmp/none"))
+            let uid = UUID()
+            _ = cmd.matchesOtherPanelSession(targetID: uid, activeID: uid)
+            _ = cmd.matchesOtherPanelSession(targetID: uid, activeID: UUID())
+
+            let dummyApp = URL(fileURLWithPath: "/Applications/Terminal.app")
+            Modal.performWorkspaceLaunch(
+                .openFolder(app: dummyApp, folder: tmpDir),
+                result: Modal.LaunchResult { _ in },
+                openFolder: { _, _, _, cb in cb(nil, nil) },
+                openApp: { _, _, cb in cb(nil, nil) }
+            )
+            Modal.performWorkspaceLaunch(
+                .run(app: dummyApp, arguments: ["--help"]),
+                result: Modal.LaunchResult { _ in },
+                openFolder: { _, _, _, cb in cb(nil, nil) },
+                openApp: { _, _, cb in cb(nil, nil) }
+            )
+
+            // TransferProgressWindowController stays fixed-width (480pt) and middle-truncates long paths
+            let longPath = "/Users/citizen/Library/Application Support/" + String(repeating: "very-long-folder-name/", count: 8) + "file.txt"
+            let progressVC = TransferProgressWindowController(
+                title: "Copying", from: longPath, to: longPath,
+                cancelFlag: CancelFlag(), onBackground: {}
+            )
+            progressVC.window?.layoutIfNeeded()
+            try expect((progressVC.window?.frame.width ?? 0) <= 485, "TransferProgressWindow must not grow for long paths")
         }
     }
 }

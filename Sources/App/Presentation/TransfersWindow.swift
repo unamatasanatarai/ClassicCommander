@@ -215,23 +215,35 @@ public final class TransfersWindowController: NSWindowController, NSTableViewDat
     }
 
     private func showDetails() {
-        guard let job = selectedJob else {
-            fileRows = []
-            files.reloadData()
-            cancelButton.isEnabled = false
-            cancelButton.title = "Cancel"
-            retryButton.isEnabled = false
-            updateAllDoneStatus()
-            return
-        }
+        guard let job = selectedJob else { clearDetails(); return }
         let hideDone = removeCompletedBox.state == .on
         fileRows = job.items.indices.filter { !(hideDone && job.results[$0] == .done) }
         files.reloadData()
-        let isCancelling = job.cancelFlag.isCancelled && job.state != .cancelled
-        cancelButton.isEnabled = TransferManager.isUnfinished(job) && !isCancelling
-        cancelButton.title = isCancelling ? "Cancelling…" : "Cancel"
-        retryButton.isEnabled = (job.state == .finished || job.state == .cancelled) && job.failedCount > 0
+        updateActionButtons(for: job)
+        updateAllDoneStatus()
+    }
 
+    private func updateActionButtons(for job: TransferJob) {
+        let cancelling = isCancelling(job)
+        cancelButton.isEnabled = TransferManager.isUnfinished(job) && !cancelling
+        cancelButton.title = cancelling ? "Cancelling…" : "Cancel"
+        retryButton.isEnabled = canRetry(job)
+    }
+
+    private func isCancelling(_ job: TransferJob) -> Bool {
+        job.cancelFlag.isCancelled && job.state != .cancelled
+    }
+
+    private func canRetry(_ job: TransferJob) -> Bool {
+        (job.state == .finished || job.state == .cancelled) && job.failedCount > 0
+    }
+
+    private func clearDetails() {
+        fileRows = []
+        files.reloadData()
+        cancelButton.isEnabled = false
+        cancelButton.title = "Cancel"
+        retryButton.isEnabled = false
         updateAllDoneStatus()
     }
 
@@ -258,20 +270,29 @@ public final class TransfersWindowController: NSWindowController, NSTableViewDat
     /// "Pending", "Copying 45 %", "Copied", "Moved", "Skipped: …", "Failed: …", "Not done".
     static func status(of job: TransferJob, at index: Int) -> (String, NSColor) {
         switch job.results[index] {
-        case .pending:
-            if job.active.contains(index) {
-                if job.cancelFlag.isCancelled {
-                    return ("Cancelling…", .systemOrange)
-                }
-                let size = job.items[index].size
-                let percent = size > 0 ? " \(Int(100 * Double(job.partial[index] ?? 0) / Double(size))) %" : "…"
-                return ((job.isMove ? "Moving" : "Copying") + percent, .systemBlue)
-            }
-            return (job.cancelFlag.isCancelled || job.state == .cancelled) ? ("Not done", .secondaryLabelColor) : ("Pending", .secondaryLabelColor)
-        case .done: return (job.items[index].isFolder ? "Created" : (job.isMove ? "Moved" : "Copied"), .systemGreen)
+        case .pending: return pendingStatus(of: job, at: index)
+        case .done: return (doneLabel(for: job, at: index), .systemGreen)
         case .skipped(let why): return ("Skipped: \(why)", .systemOrange)
         case .failed(let why): return ("Failed: \(why)", .systemRed)
         }
+    }
+
+    private static func doneLabel(for job: TransferJob, at index: Int) -> String {
+        if job.items[index].isFolder { return "Created" }
+        return job.isMove ? "Moved" : "Copied"
+    }
+
+    private static func pendingStatus(of job: TransferJob, at index: Int) -> (String, NSColor) {
+        if job.active.contains(index) { return activePendingStatus(of: job, at: index) }
+        let cancelled = job.cancelFlag.isCancelled || job.state == .cancelled
+        return (cancelled ? "Not done" : "Pending", .secondaryLabelColor)
+    }
+
+    private static func activePendingStatus(of job: TransferJob, at index: Int) -> (String, NSColor) {
+        if job.cancelFlag.isCancelled { return ("Cancelling…", .systemOrange) }
+        let size = job.items[index].size
+        let percent = size > 0 ? " \(Int(100 * Double(job.partial[index] ?? 0) / Double(size))) %" : "…"
+        return ((job.isMove ? "Moving" : "Copying") + percent, .systemBlue)
     }
 
     @objc func removeCompletedToggled() {
@@ -306,30 +327,47 @@ public final class TransfersWindowController: NSWindowController, NSTableViewDat
 
     public func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
         if tableView === files { return fileCell(column?.identifier.rawValue, row: row) }
-        let job = manager.jobs[row]
+        return jobCell(for: manager.jobs[row], columnID: column?.identifier.rawValue)
+    }
+
+    private static let jobCellBuilders: [String: (TransfersWindowController) -> (TransferJob) -> NSView] = [
+        "progress": { $0.makeProgressCell },
+        "status": { $0.makeStatusCell },
+        "speed": { $0.makeSpeedCell },
+    ]
+
+    private func jobCell(for job: TransferJob, columnID: String?) -> NSView {
+        if let id = columnID, let builder = Self.jobCellBuilders[id] { return builder(self)(job) }
+        return makeTitleCell(for: job)
+    }
+
+    private func makeStatusCell(for job: TransferJob) -> NSView {
+        let label = NSTextField(labelWithString: job.statusText)
+        if job.failedCount > 0 { label.textColor = .systemRed }
+        return AppWindows.centeredCell(label)
+    }
+
+    private func makeSpeedCell(for job: TransferJob) -> NSView {
+        let time = Int(job.elapsed)
+        let text = job.state == .queued ? "" : "\(EntryFormatter.shared.compact(Int64(job.speed)))/s · \(time / 60):\(String(format: "%02d", time % 60))"
+        return AppWindows.centeredCell(NSTextField(labelWithString: text))
+    }
+
+    private func makeTitleCell(for job: TransferJob) -> NSView {
         let f = EntryFormatter.shared
-        switch column?.identifier.rawValue {
-        case "progress":
-            let bar = NSProgressIndicator()
-            bar.isIndeterminate = false
-            bar.minValue = 0
-            bar.maxValue = Double(max(1, job.bytesTotal))
-            bar.doubleValue = job.state == .finished && job.failedCount == 0 ? bar.maxValue : Double(job.bytesProcessed)
-            bar.controlSize = .small
-            return bar
-        case "status":
-            let label = NSTextField(labelWithString: job.statusText)
-            if job.failedCount > 0 { label.textColor = .systemRed }
-            return AppWindows.centeredCell(label)
-        case "speed":
-            let time = Int(job.elapsed)
-            let text = job.state == .queued ? "" : "\(f.compact(Int64(job.speed)))/s · \(time / 60):\(String(format: "%02d", time % 60))"
-            return AppWindows.centeredCell(NSTextField(labelWithString: text))
-        default:
-            let label = NSTextField(labelWithString: "\(job.title)   (\(f.size(job.bytesProcessed, as: sizeFormat)) of \(f.size(job.bytesTotal, as: sizeFormat)))")
-            label.lineBreakMode = .byTruncatingMiddle
-            return AppWindows.centeredCell(label)
-        }
+        let label = NSTextField(labelWithString: "\(job.title)   (\(f.size(job.bytesProcessed, as: sizeFormat)) of \(f.size(job.bytesTotal, as: sizeFormat)))")
+        label.lineBreakMode = .byTruncatingMiddle
+        return AppWindows.centeredCell(label)
+    }
+
+    private func makeProgressCell(for job: TransferJob) -> NSProgressIndicator {
+        let bar = NSProgressIndicator()
+        bar.isIndeterminate = false
+        bar.minValue = 0
+        bar.maxValue = Double(max(1, job.bytesTotal))
+        bar.doubleValue = job.state == .finished && job.failedCount == 0 ? bar.maxValue : Double(job.bytesProcessed)
+        bar.controlSize = .small
+        return bar
     }
 
     /// One file of the selected job: its status, where it goes, and its size.

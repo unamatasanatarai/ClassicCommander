@@ -56,12 +56,7 @@ public enum MultiRename {
     /// The new name of each entry, with the problems that stop Start!.
     /// `existing`: names in the folder that are not being renamed (a new name may not take one).
     public static func preview(_ entries: [FileEntry], rules: RenameRules, existing: Set<String>) throws -> [Row] {
-        let searchRegex: NSRegularExpression?
-        if rules.regex && !rules.search.isEmpty {
-            searchRegex = try NSRegularExpression(pattern: rules.search, options: rules.caseSensitive ? [] : [.caseInsensitive])
-        } else {
-            searchRegex = nil
-        }
+        let searchRegex = try compileSearchRegex(rules)
         let ctx = RenameContext(rules: rules, searchRegex: searchRegex)
         let names = try entries.enumerated().map { i, e in try newName(for: e, index: i, context: ctx) }
         // The Mac's disks usually ignore case: "A.txt" and "a.txt" are one name.
@@ -70,26 +65,37 @@ public enum MultiRename {
         let taken = Set(existing.map { $0.lowercased() })
         let renamed = Set(entries.map { $0.name.lowercased() })
         return zip(entries, names).map { entry, name in
-            var problem: String?
-            if name.isEmpty || name == "." || name == ".." {
-                problem = "empty name"
-            } else if name.contains("/") || name.contains("\0") {
-                problem = "“/” is not allowed"
-            } else if counts[name.lowercased(), default: 0] > 1 {
-                problem = "two files would get this name"
-            } else if name.lowercased() != entry.name.lowercased(), taken.contains(name.lowercased()), !renamed.contains(name.lowercased()) {
-                problem = "a file with this name exists"
-            }
-            return Row(entry: entry, newName: name, problem: problem)
+            Row(entry: entry, newName: name, problem: rowProblem(name: name, entry: entry, counts: counts, taken: taken, renamed: renamed))
         }
+    }
+
+    private static func compileSearchRegex(_ rules: RenameRules) throws -> NSRegularExpression? {
+        guard rules.regex && !rules.search.isEmpty else { return nil }
+        return try NSRegularExpression(pattern: rules.search, options: rules.caseSensitive ? [] : [.caseInsensitive])
+    }
+
+    private static func rowProblem(
+        name: String, entry: FileEntry,
+        counts: [String: Int], taken: Set<String>, renamed: Set<String>
+    ) -> String? {
+        if let invalid = invalidNameMessage(name) { return invalid }
+        let lower = name.lowercased()
+        if counts[lower, default: 0] > 1 { return "two files would get this name" }
+        if lower != entry.name.lowercased(), taken.contains(lower), !renamed.contains(lower) {
+            return "a file with this name exists"
+        }
+        return nil
+    }
+
+    private static func invalidNameMessage(_ name: String) -> String? {
+        if name.isEmpty || name == "." || name == ".." { return "empty name" }
+        if name.contains("/") || name.contains("\0") { return "“/” is not allowed" }
+        return nil
     }
 
     /// One entry's new name (folders have no extension).
     public static func newName(for entry: FileEntry, index: Int, rules: RenameRules) throws -> String {
-        let searchRegex = rules.regex && !rules.search.isEmpty
-            ? try NSRegularExpression(pattern: rules.search, options: rules.caseSensitive ? [] : [.caseInsensitive])
-            : nil
-        let ctx = RenameContext(rules: rules, searchRegex: searchRegex)
+        let ctx = RenameContext(rules: rules, searchRegex: try compileSearchRegex(rules))
         return try newName(for: entry, index: index, context: ctx)
     }
 
@@ -102,14 +108,21 @@ public enum MultiRename {
         let values = Values(name: base, ext: ext, counter: counter, digits: rules.counterDigits, date: entry.modified)
         let newBase = expand(rules.nameMask, values)
         let newExt = isFile ? expand(rules.extensionMask, values) : ""
-        var result: String
-        if !rules.search.isEmpty && !rules.includeExtension {
-            result = try replace(in: newBase, context) + (newExt.isEmpty ? "" : "." + newExt)
-        } else {
-            result = newExt.isEmpty ? newBase : newBase + "." + newExt
-            if !rules.search.isEmpty { result = try replace(in: result, context) }
-        }
+        let result = try applySearchAndReplace(base: newBase, ext: newExt, context: context)
         return changeCase(result, rules.letterCase)
+    }
+
+    private static func applySearchAndReplace(base: String, ext: String, context: RenameContext) throws -> String {
+        let rules = context.rules
+        if !rules.search.isEmpty && !rules.includeExtension {
+            return joinName(try replace(in: base, context), ext: ext)
+        }
+        let combined = joinName(base, ext: ext)
+        return rules.search.isEmpty ? combined : try replace(in: combined, context)
+    }
+
+    private static func joinName(_ base: String, ext: String) -> String {
+        ext.isEmpty ? base : base + "." + ext
     }
 
     struct Values {
@@ -167,31 +180,49 @@ public enum MultiRename {
     private static func sliceToken(_ token: String, _ v: Values) -> String? {
         guard let kind = token.first, kind == "N" || kind == "E", token.count > 1 else { return nil }
         let source = Array(kind == "N" ? v.name : v.ext)
-        let spec = token.dropFirst()
-        let parts = spec.split(separator: "-", omittingEmptySubsequences: false)
-        guard parts.count <= 2, let from = Int(parts[0]), from >= 1 else { return nil }
-        let to: Int
-        if parts.count == 1 { to = from } else if parts[1].isEmpty { to = source.count } else if let n = Int(parts[1]) { to = n } else { return nil }
+        let parts = token.dropFirst().split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count <= 2, let from = Int(parts[0]), from >= 1,
+              let to = parseSliceEnd(parts, defaultEnd: source.count, from: from) else { return nil }
         guard to >= from else { return "" }
         let lower = min(from - 1, source.count), upper = min(to, source.count)
         return String(source[lower..<upper])
+    }
+
+    private static func parseSliceEnd(_ parts: [Substring], defaultEnd: Int, from: Int) -> Int? {
+        if parts.count == 1 { return from }
+        if parts[1].isEmpty { return defaultEnd }
+        return Int(parts[1])
     }
 
     /// Search & replace (plain or regular expression, with $1 for groups).
     static func replace(in text: String, _ context: RenameContext) throws -> String {
         let rules = context.rules
         if rules.regex {
-            guard let re = context.searchRegex ?? (try? NSRegularExpression(pattern: rules.search, options: rules.caseSensitive ? [] : [.caseInsensitive])) else {
-                return text
-            }
-            let whole = NSRange(text.startIndex..., in: text)
-            if rules.firstOnly {
-                guard let m = re.firstMatch(in: text, range: whole), let r = Range(m.range, in: text) else { return text }
-                let replacement = re.replacementString(for: m, in: text, offset: 0, template: rules.replace)
-                return text.replacingCharacters(in: r, with: replacement)
-            }
-            return re.stringByReplacingMatches(in: text, range: whole, withTemplate: rules.replace)
+            return replaceRegex(in: text, rules: rules, cached: context.searchRegex)
         }
+        return replacePlain(in: text, rules: rules)
+    }
+
+    private static func replaceRegex(in text: String, rules: RenameRules, cached: NSRegularExpression?) -> String {
+        guard let re = compiledRegex(for: rules, cached: cached) else { return text }
+        let whole = NSRange(text.startIndex..., in: text)
+        if rules.firstOnly { return replaceFirstRegexMatch(in: text, whole: whole, regex: re, template: rules.replace) }
+        return re.stringByReplacingMatches(in: text, range: whole, withTemplate: rules.replace)
+    }
+
+    private static func replaceFirstRegexMatch(
+        in text: String, whole: NSRange, regex: NSRegularExpression, template: String
+    ) -> String {
+        guard let m = regex.firstMatch(in: text, range: whole), let r = Range(m.range, in: text) else { return text }
+        let replacement = regex.replacementString(for: m, in: text, offset: 0, template: template)
+        return text.replacingCharacters(in: r, with: replacement)
+    }
+
+    private static func compiledRegex(for rules: RenameRules, cached: NSRegularExpression?) -> NSRegularExpression? {
+        cached ?? (try? NSRegularExpression(pattern: rules.search, options: rules.caseSensitive ? [] : [.caseInsensitive]))
+    }
+
+    private static func replacePlain(in text: String, rules: RenameRules) -> String {
         let options: String.CompareOptions = rules.caseSensitive ? [] : [.caseInsensitive]
         if rules.firstOnly {
             guard let r = text.range(of: rules.search, options: options) else { return text }
@@ -239,6 +270,10 @@ public enum MultiRename {
                 return ([], ["\(from.lastPathComponent): \(error.localizedDescription)"])
             }
         }
+        return finishMoves(temps, rename: rename)
+    }
+
+    private static func finishMoves(_ temps: [(URL, URL, URL)], rename: (URL, URL) throws -> Void) -> (done: [Move], errors: [String]) {
         var done: [Move] = [], errors: [String] = [], failed: [(URL, URL)] = []
         for (original, temp, to) in temps {
             do {

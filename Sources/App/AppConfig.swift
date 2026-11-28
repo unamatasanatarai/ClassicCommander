@@ -18,27 +18,25 @@ public enum AppConfig {
         return "com.local.\(appName)"
     }()
 
-    public static let version: String = {
-        if let ver = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, !ver.isEmpty {
-            return ver
+    private static func bundleOrResourceValue(infoKey: String, resource: String, fallback: String) -> String {
+        if let val = Bundle.main.object(forInfoDictionaryKey: infoKey) as? String, !val.isEmpty {
+            return val
         }
-        if let url = Bundle.main.url(forResource: "VERSION", withExtension: nil),
-           let fileVer = try? String(contentsOf: url, encoding: .utf8) {
-            let trimmed = fileVer.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { return trimmed }
-        }
-        return "1.0.0"
-    }()
+        return resourceString(named: resource) ?? fallback
+    }
 
-    public static let buildNumber: String = {
-        if let bnum = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String, !bnum.isEmpty {
-            return bnum
-        }
-        if let url = Bundle.main.url(forResource: "BUILD_NUMBER", withExtension: nil),
-           let fileBnum = try? String(contentsOf: url, encoding: .utf8) {
-            let trimmed = fileBnum.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { return trimmed }
-        }
-        return "1"
-    }()
+    private static func resourceString(named resource: String) -> String? {
+        guard let url = Bundle.main.url(forResource: resource, withExtension: nil),
+              let contents = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let trimmed = contents.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    public static let version: String = bundleOrResourceValue(
+        infoKey: "CFBundleShortVersionString", resource: "VERSION", fallback: "1.0.0"
+    )
+
+    public static let buildNumber: String = bundleOrResourceValue(
+        infoKey: "CFBundleVersion", resource: "BUILD_NUMBER", fallback: "1"
+    )
 }

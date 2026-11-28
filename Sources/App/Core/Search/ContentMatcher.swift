@@ -42,66 +42,99 @@ public struct ContentMatcher {
             mode = .bytes(bytes)
             overlap = bytes.count - 1
         } else {
-            guard !config.charsets.isEmpty else {
-                throw SearchValidationError(message: "Tick at least one charset for “Find text”.")
-            }
-            var pattern = config.useRegex ? config.expression : NSRegularExpression.escapedPattern(for: config.expression)
-            if config.wholeWordsOnly {
-                pattern = "(?<![\\p{L}\\p{N}_])(?:\(pattern))(?![\\p{L}\\p{N}_])"
-            }
-            let regex: NSRegularExpression
-            do {
-                regex = try NSRegularExpression(pattern: pattern, options: config.caseSensitive ? [] : [.caseInsensitive])
-            } catch {
-                throw SearchValidationError(message: "“Find text” is not a valid regular expression (untick RegEx (2) to search for it literally).")
-            }
-            let decoders = config.charsets.compactMap { cs in
-                cs.stringEncoding.map { Decoder(charset: cs, decode: Self.decoder(for: $0)) }
-            }
-            let longest = config.charsets.compactMap { $0.stringEncoding }
-                .map { config.expression.data(using: $0)?.count ?? config.expression.utf8.count * 4 }.max() ?? 16
-            // Literal text needs only its own length; a regex gets a generous 64 KB window. Kept even for UTF-16.
-            var carry = config.useRegex ? 64 * 1024 : max(longest * 2, 16)
-            carry += carry % 2
-            overlap = carry
-            mode = .text(regex, decoders: decoders, office: config.charsets.contains(.officeXML))
+            let built = try Self.buildTextMode(config)
+            mode = built.mode
+            overlap = built.overlap
         }
         var size = max(chunkSize, overlap + 16)
         size += size % 2
         self.chunkSize = size
     }
 
+    private static func buildTextMode(_ config: ContentSearchConfiguration) throws -> (mode: Mode, overlap: Int) {
+        guard !config.charsets.isEmpty else {
+            throw SearchValidationError(message: "Tick at least one charset for “Find text”.")
+        }
+        let regex = try compileSearchRegex(buildSearchPattern(for: config), caseSensitive: config.caseSensitive)
+        let decoders = buildDecoders(for: config.charsets)
+        let carry = computeCarry(for: config)
+        return (.text(regex, decoders: decoders, office: config.charsets.contains(.officeXML)), carry)
+    }
+
+    private static func buildSearchPattern(for config: ContentSearchConfiguration) -> String {
+        let pattern = config.useRegex ? config.expression : NSRegularExpression.escapedPattern(for: config.expression)
+        return config.wholeWordsOnly ? "(?<![\\p{L}\\p{N}_])(?:\(pattern))(?![\\p{L}\\p{N}_])" : pattern
+    }
+
+    private static func buildDecoders(for charsets: [ContentCharset]) -> [Decoder] {
+        charsets.compactMap { cs in cs.stringEncoding.map { Decoder(charset: cs, decode: decoder(for: $0)) } }
+    }
+
+    private static func computeCarry(for config: ContentSearchConfiguration) -> Int {
+        let longest = config.charsets.compactMap(\.stringEncoding)
+            .map { config.expression.data(using: $0)?.count ?? config.expression.utf8.count * 4 }.max() ?? 16
+        // Literal text needs only its own length; a regex gets a generous 64 KB window. Kept even for UTF-16.
+        var carry = config.useRegex ? 64 * 1024 : max(longest * 2, 16)
+        carry += carry % 2
+        return carry
+    }
+
+    private static func compileSearchRegex(_ pattern: String, caseSensitive: Bool) throws -> NSRegularExpression {
+        do {
+            return try NSRegularExpression(pattern: pattern, options: caseSensitive ? [] : [.caseInsensitive])
+        } catch {
+            throw SearchValidationError(message: "“Find text” is not a valid regular expression (untick RegEx (2) to search for it literally).")
+        }
+    }
+
     /// Searches one file. Throws when it cannot be read.
     public func search(_ url: URL, isCancelled: () -> Bool = { false }) throws -> Outcome {
         if case let .text(regex, _, office) = mode, Self.officeExtensions.contains(url.pathExtension.lowercased()) {
-            // Office files are zip archives: search their text when asked, otherwise they are binary.
-            guard office else { return .skipped }
-            let text = try Self.officeText(url)
-            return regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil ? .contains : .lacks
+            return try searchOffice(url, regex: regex, office: office)
         }
-
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
+        return try searchStream(handle: handle, isCancelled: isCancelled)
+    }
 
-        var activeDecoders: [Decoder] = []
+    private func searchStream(handle: FileHandle, isCancelled: () -> Bool) throws -> Outcome {
+        var activeDecoders: [Decoder]?
         var carry = Data()
-        var first = true
-        while true {
-            if isCancelled() { return .lacks }
+        while !isCancelled() {
             let chunk = try handle.read(upToCount: chunkSize) ?? Data()
             if chunk.isEmpty { return .lacks }
-            if first {
-                first = false
-                guard let decoders = initialDecoders(for: chunk) else { return .skipped }
-                activeDecoders = decoders
-            }
-            let window = carry + chunk
-            if matchesWindow(window, decoders: activeDecoders) { return .contains }
-            let keep = min(overlap, window.count)
-            var start = window.count - keep
-            if start % 2 != 0 { start -= 1 }   // keep UTF-16 code units aligned
-            carry = window.subdata(in: window.startIndex.advanced(by: max(0, start))..<window.endIndex)
+            if let outcome = checkChunk(chunk, carry: &carry, activeDecoders: &activeDecoders) { return outcome }
         }
+        return .lacks
+    }
+
+    private func checkChunk(_ chunk: Data, carry: inout Data, activeDecoders: inout [Decoder]?) -> Outcome? {
+        guard let decoders = resolveDecoders(current: &activeDecoders, firstChunk: chunk) else { return .skipped }
+        let window = carry + chunk
+        if matchesWindow(window, decoders: decoders) { return .contains }
+        carry = nextCarry(from: window)
+        return nil
+    }
+
+    private func resolveDecoders(current: inout [Decoder]?, firstChunk: Data) -> [Decoder]? {
+        if let existing = current { return existing }
+        guard let decoders = initialDecoders(for: firstChunk) else { return nil }
+        current = decoders
+        return decoders
+    }
+
+    private func searchOffice(_ url: URL, regex: NSRegularExpression, office: Bool) throws -> Outcome {
+        // Office files are zip archives: search their text when asked, otherwise they are binary.
+        guard office else { return .skipped }
+        let text = try Self.officeText(url)
+        return regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil ? .contains : .lacks
+    }
+
+    private func nextCarry(from window: Data) -> Data {
+        let keep = min(overlap, window.count)
+        var start = window.count - keep
+        if start % 2 != 0 { start -= 1 }   // keep UTF-16 code units aligned
+        return window.subdata(in: window.startIndex.advanced(by: max(0, start))..<window.endIndex)
     }
 
     private func initialDecoders(for firstChunk: Data) -> [Decoder]? {
@@ -164,17 +197,7 @@ public struct ContentMatcher {
             return { String(decoding: $0, as: UTF8.self) }
         case .utf16LittleEndian, .utf16BigEndian:
             let little = encoding == .utf16LittleEndian
-            return { data in
-                var units: [UInt16] = []
-                units.reserveCapacity(data.count / 2)
-                var i = data.startIndex
-                while i + 1 < data.endIndex {
-                    let a = UInt16(data[i]), b = UInt16(data[i + 1])
-                    units.append(little ? (a | b << 8) : (a << 8 | b))
-                    i += 2
-                }
-                return String(decoding: units, as: UTF16.self)
-            }
+            return { decodeUTF16($0, little: little) }
         default:
             // Single-byte charsets: a 256-entry table, so undefined bytes cannot make decoding fail.
             let table: [Character] = (0...255).map { b in
@@ -182,5 +205,17 @@ public struct ContentMatcher {
             }
             return { data in String(data.map { table[Int($0)] }) }
         }
+    }
+
+    private static func decodeUTF16(_ data: Data, little: Bool) -> String {
+        var units: [UInt16] = []
+        units.reserveCapacity(data.count / 2)
+        var i = data.startIndex
+        while i + 1 < data.endIndex {
+            let a = UInt16(data[i]), b = UInt16(data[i + 1])
+            units.append(little ? (a | b << 8) : (a << 8 | b))
+            i += 2
+        }
+        return String(decoding: units, as: UTF16.self)
     }
 }

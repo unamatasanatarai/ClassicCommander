@@ -103,23 +103,29 @@ public final class QuickSearchController: NSObject, NSTextFieldDelegate {
     /// Takes the new text if anything matches it; otherwise beeps and keeps the old text.
     private func apply(_ text: String) {
         guard let panel = panel else { return }
-        let model = panel.model
-        if text.isEmpty {
-            acceptedText = ""
-            if mode == .filter { model.setQuickFilter(nil, visibleRows: panel.visibleRows) }
-            panel.needsDisplay = true
-            return
-        }
-        switch mode {
-        case .search:
-            guard let i = model.quickSearchIndex(text, from: model.cursor) else { return reject() }
-            model.setCursor(i, visibleRows: panel.visibleRows)
-        case .filter:
-            guard model.quickFilterCount(text) > 0 else { return reject() }
-            model.setQuickFilter(text, visibleRows: panel.visibleRows)
-        }
+        if text.isEmpty { clearFilter(in: panel); return }
+        guard applyNonEmpty(text, to: panel) else { return reject() }
         acceptedText = text
         panel.needsDisplay = true
+    }
+
+    private func clearFilter(in panel: PanelView) {
+        acceptedText = ""
+        if mode == .filter { panel.model.setQuickFilter(nil, visibleRows: panel.visibleRows) }
+        panel.needsDisplay = true
+    }
+
+    private func applyNonEmpty(_ text: String, to panel: PanelView) -> Bool {
+        let model = panel.model
+        switch mode {
+        case .search:
+            guard let i = model.quickSearchIndex(text, from: model.cursor) else { return false }
+            model.setCursor(i, visibleRows: panel.visibleRows)
+        case .filter:
+            guard model.quickFilterCount(text) > 0 else { return false }
+            model.setQuickFilter(text, visibleRows: panel.visibleRows)
+        }
+        return true
     }
 
     private func reject() {
@@ -143,18 +149,16 @@ public final class QuickSearchController: NSObject, NSTextFieldDelegate {
     /// ⌃S inside the box switches between search and filter.
     private func installMonitor() {
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self = self, self.isOpen else { return event }
-            let combo = KeyCombo(event)
-            if combo == KeyCombo(KeyCode.s, .control) {
-                self.switchMode()
-                return nil
-            }
-            if combo == KeyCombo(KeyCode.returnKey, .control) {
-                self.jump(forward: true)
-                return nil
-            }
-            return event
+            guard let self = self, self.isOpen, self.handleMonitorKey(event) else { return event }
+            return nil
         }
+    }
+
+    private func handleMonitorKey(_ event: NSEvent) -> Bool {
+        let combo = KeyCombo(event)
+        if combo == KeyCombo(KeyCode.s, .control) { switchMode(); return true }
+        if combo == KeyCombo(KeyCode.returnKey, .control) { jump(forward: true); return true }
+        return false
     }
 
     // MARK: NSTextFieldDelegate
@@ -164,21 +168,27 @@ public final class QuickSearchController: NSObject, NSTextFieldDelegate {
     }
 
     public func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
-        switch selector {
-        case #selector(NSResponder.cancelOperation(_:)):
+        if selector == #selector(NSResponder.cancelOperation(_:)) {
             close(clearFilter: mode == .filter)
-        case #selector(NSResponder.insertNewline(_:)):
+            return true
+        }
+        if selector == #selector(NSResponder.insertNewline(_:)) {
             let opensEntry = mode == .search
             close(clearFilter: false)
             if opensEntry { commander?.perform(.open) }
-        case #selector(NSResponder.moveDown(_:)), #selector(NSResponder.insertLineBreak(_:)):
-            jump(forward: true)
-        case #selector(NSResponder.moveUp(_:)):
-            jump(forward: false)
-        default:
-            return false
+            return true
         }
-        return true
+        return handleNavigationSelector(selector)
+    }
+
+    private func handleNavigationSelector(_ selector: Selector) -> Bool {
+        if selector == #selector(NSResponder.moveDown(_:)) || selector == #selector(NSResponder.insertLineBreak(_:)) {
+            jump(forward: true); return true
+        }
+        if selector == #selector(NSResponder.moveUp(_:)) {
+            jump(forward: false); return true
+        }
+        return false
     }
 
     public func controlTextDidEndEditing(_ obj: Notification) {

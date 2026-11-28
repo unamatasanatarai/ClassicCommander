@@ -224,26 +224,36 @@ public final class PanelView: NSView {
     }
 
     private func drawDriveBar(_ l: Layout) {
-        var x: CGFloat = 4
-        if let remote = remote {
-            let icon = NSImage(named: NSImage.networkName) ?? NSImage()
-            icon.draw(in: NSRect(x: x, y: l.driveBar.midY - iconSize / 2, width: iconSize, height: iconSize),
-                      from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
-            x += iconSize + 6
-            let textRect = NSRect(x: x, y: l.driveBar.minY, width: max(0, l.downloadsButton.minX - x - 4), height: barHeight)
-            drawText(remote.status, in: textRect, color: remote.insecure ? .systemRed : palette.chromeText, font: PanelFont.bold)
-        } else if showsVolumeInfo {
-            let volume = volumeDetails()
-            volume.icon.draw(in: NSRect(x: x, y: l.driveBar.midY - iconSize / 2, width: iconSize, height: iconSize),
-                            from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
-            x += iconSize + 6
-            let textRect = NSRect(x: x, y: l.driveBar.minY, width: max(0, l.downloadsButton.minX - x - 4), height: barHeight)
-            drawText(volume.text, in: textRect, color: palette.chromeText, font: PanelFont.regular)
-        }
+        drawDriveLabel(in: l)
         drawDownloadsIcon(in: l.downloadsButton)
         for (rect, title) in [(l.homeButton, "~"), (l.rootButton, "\\")] {
             drawText(title, in: rect, color: palette.chromeText, font: PanelFont.regular, alignment: .center)
         }
+    }
+
+    private func drawDriveLabel(in l: Layout) {
+        guard let (icon, text, color, font) = driveLabelContent() else { return }
+        icon.draw(in: NSRect(x: 4, y: l.driveBar.midY - iconSize / 2, width: iconSize, height: iconSize),
+                  from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        let x = 4 + iconSize + 6
+        let textRect = NSRect(x: x, y: l.driveBar.minY, width: max(0, l.downloadsButton.minX - x - 4), height: barHeight)
+        drawText(text, in: textRect, color: color, font: font)
+    }
+
+    private func driveLabelContent() -> (NSImage, String, NSColor, NSFont)? {
+        if let remote = remote { return remoteDriveLabelContent(remote) }
+        guard showsVolumeInfo else { return nil }
+        let volume = volumeDetails()
+        return (volume.icon, volume.text, palette.chromeText, PanelFont.regular)
+    }
+
+    private func remoteDriveLabelContent(_ remote: (status: String, address: String, insecure: Bool)) -> (NSImage, String, NSColor, NSFont) {
+        (NSImage(named: NSImage.networkName) ?? NSImage(), remote.status,
+         remoteStatusColor(insecure: remote.insecure), PanelFont.bold)
+    }
+
+    private func remoteStatusColor(insecure: Bool) -> NSColor {
+        insecure ? .systemRed : palette.chromeText
     }
 
     private static var cachedDownloadsIcon: [String: NSImage] = [:]
@@ -278,16 +288,23 @@ public final class PanelView: NSView {
         let fg = isActive ? palette.activePathText : palette.inactivePathText
         bg.setFill()
         l.pathBar.fill()
-        let mask = model.showFilter.maskString
-        var header = model.virtualTitle.map { "[\($0)]   (.. returns to \(model.directory.path))" }
-            ?? EntryFormatter.header(for: model.directory, mask: mask)
-        if let remote = remote { header = remote.address + EntryFormatter.header(for: model.directory, mask: mask) }
-        if let filter = model.quickFilter { header += "    [filter: \(filter)]" }
-        if model.showsMarkedOnly { header += "    [selected only — Esc shows all]" }
         let textRect = NSRect(x: l.pathBar.minX + 6, y: l.pathBar.minY, width: max(0, l.hotlistButton.minX - l.pathBar.minX - 8),
                               height: l.pathBar.height)
-        drawText(header, in: textRect, color: fg, font: PanelFont.regular, truncation: .byTruncatingHead)
+        drawText(pathBarHeaderText(), in: textRect, color: fg, font: PanelFont.regular, truncation: .byTruncatingHead)
         drawText("▼", in: l.hotlistButton, color: fg, font: PanelFont.boldSmall, alignment: .center)
+    }
+
+    private func pathBarHeaderText() -> String {
+        var header = basePathBarHeader()
+        if let filter = model.quickFilter { header += "    [filter: \(filter)]" }
+        if model.showsMarkedOnly { header += "    [selected only — Esc shows all]" }
+        return header
+    }
+
+    private func basePathBarHeader() -> String {
+        let standard = EntryFormatter.header(for: model.directory, mask: model.showFilter.maskString)
+        if let remote = remote { return remote.address + standard }
+        return model.virtualTitle.map { "[\($0)]   (.. returns to \(model.directory.path))" } ?? standard
     }
 
     private func drawList(_ l: Layout) {
@@ -340,6 +357,26 @@ public final class PanelView: NSView {
         let isCursor = index == model.cursor
         let onBar = isCursor && isActive
 
+        drawRowDecorations(at: index, rowRect: rowRect, onBar: onBar)
+        let color = rowTextColor(for: entry, onBar: onBar)
+        drawRowColumns(for: entry, columns: l.columns, y: y, color: color)
+        if isCursor && !isActive { drawInactiveCursorFrame(rowRect) }
+    }
+
+    private func drawRowColumns(for entry: FileEntry, columns: [Column], y: CGFloat, color: NSColor) {
+        for col in columns { drawColumnCell(for: entry, column: col, y: y, color: color) }
+    }
+
+    private func drawInactiveCursorFrame(_ rowRect: NSRect) {
+        // Inactive panel: the cursor stays visible as a dotted frame in the cursor colour.
+        palette.cursorBackground.setStroke()
+        let path = NSBezierPath(rect: rowRect.insetBy(dx: 0.5, dy: 0.5))
+        path.lineWidth = 1
+        path.setLineDash([1, 2], count: 2, phase: 0)
+        path.stroke()
+    }
+
+    private func drawRowDecorations(at index: Int, rowRect: NSRect, onBar: Bool) {
         if onBar {
             palette.cursorBackground.setFill()
             rowRect.fill()
@@ -357,63 +394,65 @@ public final class PanelView: NSView {
             frame.lineWidth = 2
             frame.stroke()
         }
-
-        let color = rowTextColor(for: entry, onBar: onBar)
-        for col in l.columns {
-            drawColumnCell(for: entry, column: col, y: y, color: color)
-        }
-
-        if isCursor && !isActive {
-            // Inactive panel: the cursor stays visible as a dotted frame in the cursor colour.
-            palette.cursorBackground.setStroke()
-            let path = NSBezierPath(rect: rowRect.insetBy(dx: 0.5, dy: 0.5))
-            path.lineWidth = 1
-            path.setLineDash([1, 2], count: 2, phase: 0)
-            path.stroke()
-        }
     }
 
     private func rowTextColor(for entry: FileEntry, onBar: Bool) -> NSColor {
-        if model.isMarked(entry) {
-            return onBar ? palette.markOnCursorText : palette.markText
-        }
+        if model.isMarked(entry) { return onBar ? palette.markOnCursorText : palette.markText }
+        return unmarkedRowTextColor(for: entry, onBar: onBar)
+    }
+
+    private func unmarkedRowTextColor(for entry: FileEntry, onBar: Bool) -> NSColor {
         if onBar { return palette.cursorText }
         return entry.kind == .file ? palette.text : palette.directoryText
     }
 
     private func drawColumnCell(for entry: FileEntry, column col: Column, y: CGFloat, color: NSColor) {
-        let textFont = PanelFont.regular
-        let digitFont = PanelFont.digits
+        if let text = cellText(for: entry, column: col) {
+            drawCell(text, col, y, color, col.field == .ext ? PanelFont.regular : PanelFont.digits)
+            return
+        }
+        drawSpecialColumnCell(for: entry, column: col, y: y, color: color)
+    }
+
+    private func drawSpecialColumnCell(for entry: FileEntry, column col: Column, y: CGFloat, color: NSColor) {
+        if col.field == .name { drawNameCell(for: entry, column: col, y: y, color: color, font: PanelFont.regular) }
+        else if col.field == .size { drawSizeCell(for: entry, column: col, y: y, color: color, font: PanelFont.digits) }
+    }
+
+    private func cellText(for entry: FileEntry, column col: Column) -> String? {
         switch col.field {
-        case .name?:
-            let icon = IconProvider.shared.icon(for: entry, tint: color)
-            icon.draw(in: NSRect(x: col.x + 3, y: y + (rowHeight - iconSize) / 2, width: iconSize, height: iconSize),
-                      from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
-            let textX = col.x + 3 + iconSize + 4
-            drawText(formatter.name(entry, folderBrackets: display.showFolderBrackets),
-                     in: NSRect(x: textX, y: y, width: col.x + col.width - textX - 4, height: rowHeight),
-                     color: color, font: textFont)
-        case .ext?:
-            drawCell(EntryFormatter.visible(entry.displayExtension), col, y, color, textFont)
-        case .size?:
-            drawSizeCell(for: entry, column: col, y: y, color: color, font: digitFont)
-        case .date?:
-            drawCell(formatter.date(entry, includeTime: col.width >= Self.fullDateWidth), col, y, color, digitFont)
-        case .unsorted?:
-            break
-        case nil:
-            drawCell(formatter.attributes(entry), col, y, color, digitFont)
+        case .ext?: return EntryFormatter.visible(entry.displayExtension)
+        case .date?: return formatter.date(entry, includeTime: col.width >= Self.fullDateWidth)
+        case nil: return formatter.attributes(entry)
+        default: return nil
         }
     }
 
+    private func drawNameCell(for entry: FileEntry, column col: Column, y: CGFloat, color: NSColor, font: NSFont) {
+        let icon = IconProvider.shared.icon(for: entry, tint: color)
+        icon.draw(in: NSRect(x: col.x + 3, y: y + (rowHeight - iconSize) / 2, width: iconSize, height: iconSize),
+                  from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        let textX = col.x + 3 + iconSize + 4
+        drawText(formatter.name(entry, folderBrackets: display.showFolderBrackets),
+                 in: NSRect(x: textX, y: y, width: col.x + col.width - textX - 4, height: rowHeight),
+                 color: color, font: font)
+    }
+
     private func drawSizeCell(for entry: FileEntry, column col: Column, y: CGFloat, color: NSColor, font: NSFont) {
-        var sizeText = pendingSizes.contains(entry.name) && entry.kind == .directory
-            ? "…" : formatter.size(entry, folderSize: model.folderSize(for: entry))
-        let bytes = entry.kind == .file ? entry.size : model.folderSize(for: entry)
-        if let bytes = bytes, Self.textWidth(sizeText, font) > col.width - 10 {
+        var sizeText = formattedSizeText(for: entry)
+        if let bytes = entryByteCount(for: entry), Self.textWidth(sizeText, font) > col.width - 10 {
             sizeText = formatter.compact(bytes)
         }
         drawCell(sizeText, col, y, color, font)
+    }
+
+    private func entryByteCount(for entry: FileEntry) -> Int64? {
+        entry.kind == .file ? entry.size : model.folderSize(for: entry)
+    }
+
+    private func formattedSizeText(for entry: FileEntry) -> String {
+        if pendingSizes.contains(entry.name) && entry.kind == .directory { return "…" }
+        return formatter.size(entry, folderSize: model.folderSize(for: entry))
     }
 
     private func drawCell(_ text: String, _ col: Column, _ y: CGFloat, _ color: NSColor, _ font: NSFont) {
@@ -514,27 +553,21 @@ public final class PanelView: NSView {
 
     public override func mouseDown(with event: NSEvent) {
         // Control-click is the Mac's right click: select like a right click instead of a menu.
-        if event.modifierFlags.contains(.control) {
-            rightMouseDown(with: event)
-            return
-        }
+        if event.modifierFlags.contains(.control) { rightMouseDown(with: event); return }
         onActivate?()
         let point = convert(event.locationInWindow, from: nil)
-        let l = layoutInfo
         defer { needsDisplay = true }
+        if handleChromeClick(at: point, layout: layoutInfo, event: event) { return }
+        if let index = row(at: point) { handleRowMouseDown(at: index, point: point, event: event) }
+    }
 
-        if handleChromeClick(at: point, layout: l, event: event) { return }
-        guard let index = row(at: point) else { return }
+    private func handleRowMouseDown(at index: Int, point: NSPoint, event: NSEvent) {
         if event.modifierFlags.contains(.shift) {
             model.markRange(toRow: index, visibleRows: visibleRows)
             return
         }
         model.setCursor(index, visibleRows: visibleRows)
-        if event.clickCount == 2 {
-            onOpen?()
-        } else {
-            dragOrigin = (point, index)
-        }
+        if event.clickCount == 2 { onOpen?() } else { dragOrigin = (point, index) }
     }
 
     private func handleChromeClick(at point: NSPoint, layout l: Layout, event: NSEvent) -> Bool {
@@ -544,11 +577,15 @@ public final class PanelView: NSView {
             return true
         }
         if l.hotlistButton.contains(point) { onHotlist?(); return true }
+        if l.driveBar.contains(point) { onLocationMenu?(); return true }
+        return handleBarOrHeaderClick(at: point, layout: l, event: event)
+    }
+
+    private func handleBarOrHeaderClick(at point: NSPoint, layout l: Layout, event: NSEvent) -> Bool {
         if l.pathBar.contains(point) {
             if event.clickCount == 2 { beginEditPath() }
             return true
         }
-        if l.driveBar.contains(point) { onLocationMenu?(); return true }
         if l.header.contains(point) {
             if let col = l.columns.first(where: { point.x >= $0.x && point.x < $0.x + $0.width }), let field = col.field {
                 model.sort(by: field, visibleRows: visibleRows)
@@ -566,16 +603,13 @@ public final class PanelView: NSView {
     }
 
     private func runFallbackNav(_ action: CommandAction) {
-        switch action {
-        case .goDownloads:
-            if case .failed = model.goDownloads(visibleRows: visibleRows) { NSSound.beep() }
-        case .goHome:
-            if case .failed = model.goHome(visibleRows: visibleRows) { NSSound.beep() }
-        case .goRoot:
-            model.goToRoot(visibleRows: visibleRows)
-        default:
-            break
-        }
+        if case .failed = fallbackNavResult(for: action) { NSSound.beep() }
+    }
+
+    private func fallbackNavResult(for action: CommandAction) -> PanelModel.OpenResult? {
+        if action == .goRoot { model.goToRoot(visibleRows: visibleRows); return nil }
+        if action == .goDownloads { return model.goDownloads(visibleRows: visibleRows) }
+        return action == .goHome ? model.goHome(visibleRows: visibleRows) : nil
     }
 
     // MARK: Right-click selection
@@ -655,20 +689,23 @@ public final class PanelView: NSView {
     public override func mouseDragged(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         // Control-drag continues a control-click selection.
-        if lastDragRow != nil {
-            cancelHold()
-            return dragSelection(to: point)
-        }
-        if holdRow != nil, hypot(point.x - holdPoint.x, point.y - holdPoint.y) > 4 {
-            cancelHold()
-        }
+        if lastDragRow != nil { cancelHold(); return dragSelection(to: point) }
+        if holdRow != nil, movedEnough(from: holdPoint, to: point) { cancelHold() }
         // Otherwise dragging a row drags its files (once the mouse has moved a few points).
-        guard let origin = dragOrigin, hypot(point.x - origin.point.x, point.y - origin.point.y) > 4 else { return }
+        startFileDragIfReady(at: point, event: event)
+    }
+
+    private func startFileDragIfReady(at point: NSPoint, event: NSEvent) {
+        guard let origin = dragOrigin, movedEnough(from: origin.point, to: point) else { return }
         dragOrigin = nil
         let entries = draggedEntries(forRow: origin.row)
         guard !entries.isEmpty else { return }
         draggedEntries = entries
         Modal.drag(draggingItems(for: entries, from: origin.row), event: event, source: self)
+    }
+
+    private func movedEnough(from a: NSPoint, to b: NSPoint) -> Bool {
+        hypot(b.x - a.x, b.y - a.y) > 4
     }
 
     public override func rightMouseUp(with event: NSEvent) {
@@ -741,23 +778,31 @@ public final class PanelView: NSView {
     func dropTarget(_ info: NSDraggingInfo, move: Bool) -> PanelDrop? {
         guard model.virtualTitle == nil else { return nil }
         let source = info.draggingSource as? PanelView
-        let entries: [FileEntry]
-        if let source = source {
-            entries = source.draggedEntries
-        } else {
-            let urls = info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
-            entries = urls.compactMap(Self.droppedEntry)
-        }
+        let entries = droppedEntries(from: info, source: source)
         guard !entries.isEmpty else { return nil }
         // A folder row under the mouse (not one of the dragged folders) is the target; ".." is the parent.
-        var folderRow: Int?
-        if let row = row(at: convert(info.draggingLocation, from: nil)), model.entries[row].kind != .file,
-           !(source === self && entries.contains { $0.name == model.entries[row].name }) {
-            folderRow = row
-        }
+        let folderRow = droppedFolderRow(at: info.draggingLocation, source: source, entries: entries)
+        return makePanelDrop(entries: entries, source: source, folderRow: folderRow, move: move)
+    }
+
+    private func makePanelDrop(entries: [FileEntry], source: PanelView?, folderRow: Int?, move: Bool) -> PanelDrop? {
         if source === self && folderRow == nil { return nil }
         let folder = folderRow.map { model.entries[$0].url } ?? model.directory
         return PanelDrop(entries: entries, source: source, target: self, folder: folder, folderRow: folderRow, move: move)
+    }
+
+    private func droppedEntries(from info: NSDraggingInfo, source: PanelView?) -> [FileEntry] {
+        if let source = source { return source.draggedEntries }
+        let urls = info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        return urls.compactMap(Self.droppedEntry)
+    }
+
+    private func droppedFolderRow(at windowPoint: NSPoint, source: PanelView?, entries: [FileEntry]) -> Int? {
+        guard let row = row(at: convert(windowPoint, from: nil)), model.entries[row].kind != .file,
+              !(source === self && entries.contains { $0.name == model.entries[row].name }) else {
+            return nil
+        }
+        return row
     }
 
     /// A file dropped from Finder or another app (Finder passes file reference URLs: resolved to paths).
@@ -933,16 +978,9 @@ extension PanelView {
                           width: max(100, l.hotlistButton.minX - l.pathBar.minX - 4),
                           height: l.pathBar.height)
         let field = PathField(frame: rect)
-        var currentText = model.virtualTitle != nil ? "" : EntryFormatter.header(for: model.directory, mask: model.showFilter.maskString)
-        if let remote = remote { currentText = remote.address + EntryFormatter.header(for: model.directory, mask: model.showFilter.maskString) }
-        field.stringValue = currentText
+        field.stringValue = editablePathText()
         field.onDone = { [weak self, weak field] newPath in
-            field?.removeFromSuperview()
-            self?.pathField = nil
-            self?.needsDisplay = true
-            if let newPath = newPath {
-                self?.commitPath(newPath)
-            }
+            self?.finishEditingPath(field: field, newPath: newPath)
         }
         addSubview(field)
         pathField = field
@@ -950,38 +988,50 @@ extension PanelView {
         field.currentEditor()?.selectAll(nil)
     }
 
+    private func editablePathText() -> String {
+        let header = EntryFormatter.header(for: model.directory, mask: model.showFilter.maskString)
+        if let remote = remote { return remote.address + header }
+        return model.virtualTitle != nil ? "" : header
+    }
+
+    private func finishEditingPath(field: PathField?, newPath: String?) {
+        field?.removeFromSuperview()
+        pathField = nil
+        needsDisplay = true
+        if let newPath = newPath { commitPath(newPath) }
+    }
+
     /// Parses typed path text into (directory, optional mask).
     /// By default the mask is always *.* unless otherwise specified.
     public static func parsePathAndMask(_ text: String, currentDirectory: String) -> (directory: String, mask: String?) {
         let trimmed = normalizePathInput(text)
         guard !trimmed.isEmpty else { return (currentDirectory, nil) }
-
         if trimmed.contains("*") || trimmed.contains("?") {
-            if let lastSlash = trimmed.range(of: "/", options: .backwards) {
-                let dirPart = String(trimmed[..<lastSlash.lowerBound])
-                let maskPart = String(trimmed[lastSlash.upperBound...])
-                let dir = dirPart.isEmpty ? "/" : dirPart
-                let resolvedDir = resolveDirectory(dir, currentDirectory: currentDirectory)
-                return (resolvedDir, maskPart.isEmpty ? "*.*" : maskPart)
-            } else {
-                return (currentDirectory, trimmed)
-            }
+            return parseWildcardPath(trimmed, currentDirectory: currentDirectory)
         }
+        return (resolveDirectory(trimmed, currentDirectory: currentDirectory), nil)
+    }
 
-        let resolved = resolveDirectory(trimmed, currentDirectory: currentDirectory)
-        return (resolved, nil)
+    private static func parseWildcardPath(_ trimmed: String, currentDirectory: String) -> (String, String?) {
+        guard let lastSlash = trimmed.range(of: "/", options: .backwards) else { return (currentDirectory, trimmed) }
+        let dirPart = String(trimmed[..<lastSlash.lowerBound])
+        let maskPart = String(trimmed[lastSlash.upperBound...])
+        let resolvedDir = resolveDirectory(dirPart.isEmpty ? "/" : dirPart, currentDirectory: currentDirectory)
+        return (resolvedDir, maskPart.isEmpty ? "*.*" : maskPart)
     }
 
     private static func normalizePathInput(_ text: String) -> String {
-        var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if (trimmed.hasPrefix("\"") && trimmed.hasSuffix("\"")) || (trimmed.hasPrefix("'") && trimmed.hasSuffix("'")) {
-            trimmed = String(trimmed.dropFirst().dropLast())
-        }
+        let trimmed = stripSurroundingQuotes(text.trimmingCharacters(in: .whitespacesAndNewlines))
         if trimmed == "\\" { return "/" }
         if trimmed.contains("\\") && !trimmed.contains("/") {
             return trimmed.replacingOccurrences(of: "\\", with: "/")
         }
         return trimmed
+    }
+
+    private static func stripSurroundingQuotes(_ s: String) -> String {
+        let quoted = (s.hasPrefix("\"") && s.hasSuffix("\"")) || (s.hasPrefix("'") && s.hasSuffix("'"))
+        return quoted ? String(s.dropFirst().dropLast()) : s
     }
 
     private static func resolveDirectory(_ dir: String, currentDirectory: String) -> String {
@@ -1008,28 +1058,30 @@ extension PanelView {
 
         var isDir: ObjCBool = false
         if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) {
-            if isDir.boolValue {
-                let maskFilter: PanelShowFilter = (mask == nil || mask == "*.*" || mask == "*") ? .all : .mask(mask!)
-                model.setShowFilter(maskFilter, visibleRows: visibleRows)
-                let res = model.go(to: url, visibleRows: visibleRows)
-                if case .failed = res {
-                    NSSound.beep()
-                } else {
-                    invalidateVolumeInfo()
-                }
-            } else {
-                let parent = url.deletingLastPathComponent()
-                let fileName = url.lastPathComponent
-                model.setShowFilter(.all, visibleRows: visibleRows)
-                model.go(to: parent, visibleRows: visibleRows)
-                model.focus(name: fileName, visibleRows: visibleRows)
-                invalidateVolumeInfo()
-            }
+            navigateLocalCommittedPath(url, isDir: isDir.boolValue, mask: mask)
         } else {
             NSSound.beep()
             onShowHint?("“\(trimmed)” not found")
         }
         needsDisplay = true
+    }
+
+    private func navigateLocalCommittedPath(_ url: URL, isDir: Bool, mask: String?) {
+        if isDir {
+            model.setShowFilter(Self.showFilter(forMask: mask), visibleRows: visibleRows)
+            if case .failed = model.go(to: url, visibleRows: visibleRows) { NSSound.beep() }
+            else { invalidateVolumeInfo() }
+        } else {
+            model.setShowFilter(.all, visibleRows: visibleRows)
+            model.go(to: url.deletingLastPathComponent(), visibleRows: visibleRows)
+            model.focus(name: url.lastPathComponent, visibleRows: visibleRows)
+            invalidateVolumeInfo()
+        }
+    }
+
+    private static func showFilter(forMask mask: String?) -> PanelShowFilter {
+        guard let mask = mask, mask != "*.*", mask != "*" else { return .all }
+        return .mask(mask)
     }
 }
 

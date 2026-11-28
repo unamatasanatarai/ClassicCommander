@@ -272,15 +272,17 @@ public final class PanelModel {
         if !t.contains("*") && !t.contains("?") {
             return n.range(of: t, options: [.caseInsensitive, .anchored]) != nil
         }
+        return n.range(of: wildcardRegex(t), options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    private static func wildcardRegex(_ pattern: String) -> String {
         var expr = "^"
-        for ch in t {
-            switch ch {
-            case "*": expr += ".*"
-            case "?": expr += "."
-            default: expr += NSRegularExpression.escapedPattern(for: String(ch))
-            }
+        for ch in pattern {
+            if ch == "*" { expr += ".*" }
+            else if ch == "?" { expr += "." }
+            else { expr += NSRegularExpression.escapedPattern(for: String(ch)) }
         }
-        return n.range(of: expr, options: [.regularExpression, .caseInsensitive]) != nil
+        return expr
     }
 
     /// The next row (after `start` going `forward`, or before it going back) whose name matches;
@@ -289,12 +291,11 @@ public final class PanelModel {
         guard !entries.isEmpty else { return nil }
         let n = entries.count
         let first = includingStart ? 0 : 1
-        for step in first..<(n + first) {
-            let i = ((forward ? start + step : start - step) % n + n) % n
-            let e = entries[i]
-            if e.kind != .parent && Self.quickMatches(e.name, text) { return i }
+        return (first..<(n + first)).lazy.map { step in
+            ((forward ? start + step : start - step) % n + n) % n
+        }.first { i in
+            entries[i].kind != .parent && Self.quickMatches(entries[i].name, text)
         }
-        return nil
     }
 
     /// Quick Filter: shows only matching entries (".." stays). nil or "" shows everything again.
@@ -304,12 +305,8 @@ public final class PanelModel {
         let focused = currentEntry?.name
         quickFilter = (text?.isEmpty ?? true) ? nil : text
         entries = filtered(allEntries)
-        let firstMatch = entries.firstIndex { $0.kind != .parent }
-        if quickFilter != nil {
-            cursor = firstMatch ?? 0
-        } else {
-            cursor = focused.flatMap { n in entries.firstIndex { $0.name == n } } ?? firstMatch ?? 0
-        }
+        let firstMatch = entries.firstIndex { $0.kind != .parent } ?? 0
+        cursor = quickFilter != nil ? firstMatch : (focused.flatMap { n in entries.firstIndex { $0.name == n } } ?? firstMatch)
         ensureCursorVisible(visibleRows: visibleRows)
     }
 
@@ -319,10 +316,23 @@ public final class PanelModel {
     }
 
     private func filtered(_ list: [FileEntry]) -> [FileEntry] {
-        var shown = showFilter == .all ? list : list.filter { $0.kind != .file || showFilter.shows($0) }
-        if showsMarkedOnly { shown = shown.filter { $0.kind == .parent || marked.contains($0.name) } }
-        guard let f = quickFilter else { return shown }
-        return shown.filter { $0.kind == .parent || Self.quickMatches($0.name, f) }
+        list.filter { matchesActiveFilters($0) }
+    }
+
+    private func matchesActiveFilters(_ entry: FileEntry) -> Bool {
+        matchesShowFilter(entry) && matchesMarkedFilter(entry) && matchesQuickFilter(entry)
+    }
+
+    private func matchesShowFilter(_ entry: FileEntry) -> Bool {
+        showFilter == .all || entry.kind != .file || showFilter.shows(entry)
+    }
+
+    private func matchesMarkedFilter(_ entry: FileEntry) -> Bool {
+        !showsMarkedOnly || entry.kind == .parent || marked.contains(entry.name)
+    }
+
+    private func matchesQuickFilter(_ entry: FileEntry) -> Bool {
+        quickFilter.map { entry.kind == .parent || Self.quickMatches(entry.name, $0) } ?? true
     }
 
     /// View → Show: All files / Programs / Custom mask. Marks on files it hides are removed,
@@ -413,17 +423,23 @@ public final class PanelModel {
         case .parent:
             return goUp(visibleRows: visibleRows)
         case .directory:
-            let result = load(entry.url.normalizedLocation, focusing: nil)
-            ensureCursorVisible(visibleRows: visibleRows)
-            return result
+            return loadAndEnsureVisible(entry.url.normalizedLocation, visibleRows: visibleRows)
         case .file:
-            if entry.url.isFileURL, entry.url.pathExtension.lowercased() == "zip", !isInsideZip {
-                let result = load(entry.url.normalizedLocation, focusing: nil)
-                ensureCursorVisible(visibleRows: visibleRows)
-                return result
-            }
-            return .file(entry.url)
+            return openFileEntry(entry, visibleRows: visibleRows)
         }
+    }
+
+    private func openFileEntry(_ entry: FileEntry, visibleRows: Int) -> OpenResult {
+        if entry.url.isFileURL, entry.url.pathExtension.lowercased() == "zip", !isInsideZip {
+            return loadAndEnsureVisible(entry.url.normalizedLocation, visibleRows: visibleRows)
+        }
+        return .file(entry.url)
+    }
+
+    private func loadAndEnsureVisible(_ url: URL, visibleRows: Int) -> OpenResult {
+        let result = load(url, focusing: nil)
+        ensureCursorVisible(visibleRows: visibleRows)
+        return result
     }
 
     /// Right arrow: like Enter, but only for folders and ".."; on a file nothing happens.
@@ -452,17 +468,7 @@ public final class PanelModel {
 
     /// Re-reads the current directory, keeping the cursor on the same name when it still exists.
     public func reload(visibleRows: Int) {
-        if virtualTitle != nil {
-            // Search results: drop entries whose files are gone, refresh the rest.
-            let focus = currentEntry?.name
-            let kept = allEntries.filter { $0.kind == .parent || FileManager.default.fileExists(atPath: $0.url.path) }
-            allEntries = kept
-            entries = filtered(kept)
-            marked = marked.intersection(Set(kept.map(\.name)))
-            cursor = focus.flatMap { n in entries.firstIndex { $0.name == n } } ?? min(cursor, max(0, entries.count - 1))
-            ensureCursorVisible(visibleRows: visibleRows)
-            return
-        }
+        if virtualTitle != nil { reloadVirtual(visibleRows: visibleRows); return }
         let focus = currentEntry?.name
         let oldCursor = cursor
         if case .failed = load(directory, focusing: focus) { return }
@@ -472,23 +478,23 @@ public final class PanelModel {
         ensureCursorVisible(visibleRows: visibleRows)
     }
 
+    private func reloadVirtual(visibleRows: Int) {
+        // Search results: drop entries whose files are gone, refresh the rest.
+        let focus = currentEntry?.name
+        let kept = allEntries.filter { $0.kind == .parent || FileManager.default.fileExists(atPath: $0.url.path) }
+        allEntries = kept
+        entries = filtered(kept)
+        marked = marked.intersection(Set(kept.map(\.name)))
+        cursor = focus.flatMap { n in entries.firstIndex { $0.name == n } } ?? min(cursor, max(0, entries.count - 1))
+        ensureCursorVisible(visibleRows: visibleRows)
+    }
+
     /// "Feed to listbox": shows `files` (real paths) as the panel's listing. Names are shown relative
     /// to the current folder when inside it, else as full paths, so equal names stay apart.
     public func showSearchResults(_ files: [URL], title: String, visibleRows: Int) {
         let base = directory.path.hasSuffix("/") ? directory.path : directory.path + "/"
-        var list: [FileEntry] = []
         var seen = Set<String>()
-        for url in files {
-            var st = stat()
-            guard lstat(url.path, &st) == 0 else { continue }
-            let name = url.path.hasPrefix(base) ? String(url.path.dropFirst(base.count)) : url.path
-            guard seen.insert(name).inserted else { continue }
-            let isDir = (st.st_mode & S_IFMT) == S_IFDIR
-            list.append(FileEntry(name: name, url: url, kind: isDir ? .directory : .file,
-                                  size: isDir ? nil : Int64(st.st_size),
-                                  modified: Date(timeIntervalSince1970: TimeInterval(st.st_mtimespec.tv_sec)),
-                                  isSymlink: (st.st_mode & S_IFMT) == S_IFLNK, permissions: Int(st.st_mode & 0o777)))
-        }
+        let list = files.compactMap { Self.searchResultEntry(for: $0, base: base, seen: &seen) }
         virtualTitle = title
         quickFilter = nil
         showsMarkedOnly = false
@@ -501,6 +507,34 @@ public final class PanelModel {
         scrollTop = 0
         ensureCursorVisible(visibleRows: visibleRows)
         onDirectoryChange?()
+    }
+
+    private static func searchResultEntry(for url: URL, base: String, seen: inout Set<String>) -> FileEntry? {
+        guard let st = lstatInfo(at: url.path) else { return nil }
+        return insertUniqueResultEntry(name: relativeResultName(for: url, base: base), url: url, stat: st, seen: &seen)
+    }
+
+    private static func insertUniqueResultEntry(name: String, url: URL, stat st: stat, seen: inout Set<String>) -> FileEntry? {
+        seen.insert(name).inserted ? makeSearchResultEntry(name: name, url: url, stat: st) : nil
+    }
+
+    private static func lstatInfo(at path: String) -> stat? {
+        var st = stat()
+        return lstat(path, &st) == 0 ? st : nil
+    }
+
+    private static func relativeResultName(for url: URL, base: String) -> String {
+        url.path.hasPrefix(base) ? String(url.path.dropFirst(base.count)) : url.path
+    }
+
+    private static func makeSearchResultEntry(name: String, url: URL, stat st: stat) -> FileEntry {
+        let isDir = (st.st_mode & S_IFMT) == S_IFDIR
+        return FileEntry(
+            name: name, url: url, kind: isDir ? .directory : .file,
+            size: isDir ? nil : Int64(st.st_size),
+            modified: Date(timeIntervalSince1970: TimeInterval(st.st_mtimespec.tv_sec)),
+            isSymlink: (st.st_mode & S_IFMT) == S_IFLNK, permissions: Int(st.st_mode & 0o777)
+        )
     }
 
     @discardableResult
@@ -605,17 +639,21 @@ public enum PanelShowFilter: Equatable {
     public func shows(_ entry: FileEntry) -> Bool {
         switch self {
         case .all: return true
-        case .programs:
-            if let p = entry.permissions, p & 0o111 != 0 { return true }
-            return Self.programExtensions.contains((entry.name as NSString).pathExtension.lowercased())
-        case .mask(let text):
-            if let (cachedText, mask) = Self.cachedMask, cachedText == text {
-                return mask.matches(entry)
-            }
-            let m = FileMask(text)
-            Self.cachedMask = (text, m)
-            return m.matches(entry)
+        case .programs: return Self.isProgram(entry)
+        case .mask(let text): return Self.maskMatcher(for: text).matches(entry)
         }
+    }
+
+    private static func isProgram(_ entry: FileEntry) -> Bool {
+        if let p = entry.permissions, p & 0o111 != 0 { return true }
+        return programExtensions.contains((entry.name as NSString).pathExtension.lowercased())
+    }
+
+    private static func maskMatcher(for text: String) -> FileMask {
+        if let (cachedText, mask) = cachedMask, cachedText == text { return mask }
+        let mask = FileMask(text)
+        cachedMask = (text, mask)
+        return mask
     }
 
     /// Shown in the panel footer while active.

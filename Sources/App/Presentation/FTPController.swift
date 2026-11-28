@@ -121,14 +121,22 @@ public final class FTPController {
         let client = RemoteClients.make(profile, secret: password)
         panel.busyText = "Connecting to \(profile.hostAndPort)…"
         background({ try client.connect(cancel: nil) }) { [weak self] result in
-            guard let self = self else { return }
             panel.busyText = nil
-            switch result {
-            case .success(let listing):
-                self.handleConnectSuccess(listing: listing, client: client, profile: profile, side: side, panel: panel, commander: commander, completion: completion)
-            case .failure(let error):
-                self.handleConnectFailure(error: error, profile: profile, password: password, side: side, completion: completion)
-            }
+            self?.finishConnect(result, client: client, profile: profile, side: side, panel: panel,
+                                commander: commander, password: password, completion: completion)
+        }
+    }
+
+    private func finishConnect(
+        _ result: Result<[RemoteEntry], Error>, client: RemoteClient, profile: FTPProfile,
+        side: CommanderModel.Side, panel: PanelView, commander: CommanderView,
+        password: String?, completion: ((Result<Void, FTPError>) -> Void)?
+    ) {
+        switch result {
+        case .success(let listing):
+            handleConnectSuccess(listing: listing, client: client, profile: profile, side: side, panel: panel, commander: commander, completion: completion)
+        case .failure(let error):
+            handleConnectFailure(error: error, profile: profile, password: password, side: side, completion: completion)
         }
     }
 
@@ -143,20 +151,28 @@ public final class FTPController {
     ) {
         let session = RemoteSession(client: client)
         session.store(listing, for: client.startPath)
-        if !panel.model.isRemote { localBefore[side] = panel.model.directory }
-        else if let old = self.session(for: panel) { sessions[old.id] = nil; old.client.close() }
-        sessions[session.id] = session
+        replaceSession(in: panel, with: session, side: side)
         panel.model.switchSource(RemoteLister(session: session), to: session.url(for: client.startPath), visibleRows: panel.visibleRows)
         panel.remote = (session.statusLabel, session.addressLabel, !profile.isEncrypted)
-        if !profile.localDirectory.isEmpty {
-            let other = commander.view(for: side.other)
-            let url = URL(fileURLWithPath: (profile.localDirectory as NSString).expandingTildeInPath)
-            if !other.model.isRemote { other.model.go(to: url, visibleRows: other.visibleRows); other.needsDisplay = true }
-        }
+        openLocalStartDirectory(profile.localDirectory, side: side, commander: commander)
         commander.activate(side)
         commander.updateFunctionBar()
         panel.needsDisplay = true
         completion?(.success(()))
+    }
+
+    private func replaceSession(in panel: PanelView, with session: RemoteSession, side: CommanderModel.Side) {
+        if !panel.model.isRemote { localBefore[side] = panel.model.directory }
+        else if let old = self.session(for: panel) { sessions[old.id] = nil; old.client.close() }
+        sessions[session.id] = session
+    }
+
+    private func openLocalStartDirectory(_ path: String, side: CommanderModel.Side, commander: CommanderView) {
+        let other = commander.view(for: side.other)
+        guard !path.isEmpty, !other.model.isRemote else { return }
+        let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        other.model.go(to: url, visibleRows: other.visibleRows)
+        other.needsDisplay = true
     }
 
     private func handleConnectFailure(
@@ -193,10 +209,14 @@ public final class FTPController {
             }
             var pinned = profile
             pinned.pinnedPublicKey = cert.pin
-            if self.repository.profile(profile.id) != nil {
-                self.repository.save(pinned, password: password ?? self.repository.credentials.password(for: profile.id))
-            }
+            self.saveIfStored(pinned, password: password)
             self.connect(pinned, password: password, side: side, completion: completion)
+        }
+    }
+
+    private func saveIfStored(_ profile: FTPProfile, password: String?) {
+        if repository.profile(profile.id) != nil {
+            repository.save(profile, password: password ?? repository.credentials.password(for: profile.id))
         }
     }
 
@@ -218,25 +238,34 @@ public final class FTPController {
             }
             var trusted = profile
             trusted.trustedHostKeys = found.keys
-            if self.repository.profile(profile.id) != nil {
-                self.repository.save(trusted, password: password ?? self.repository.credentials.password(for: profile.id))
-            }
+            self.saveIfStored(trusted, password: password)
             self.connect(trusted, password: password, side: side, completion: completion)
         }
     }
 
     /// Ends the session in a panel and shows the local folder it came from.
     public func disconnect(_ side: CommanderModel.Side) {
-        guard let commander = commander else { return }
+        guard let commander = commander, let (panel, session) = activeRemotePanel(for: side, commander: commander) else { return }
+        closeSession(session, in: panel, side: side, commander: commander)
+    }
+
+    private func activeRemotePanel(for side: CommanderModel.Side, commander: CommanderView) -> (PanelView, RemoteSession)? {
         let panel = commander.view(for: side)
-        guard let session = session(for: panel) else { return NSSound.beep() }
+        guard let session = session(for: panel) else { NSSound.beep(); return nil }
+        return (panel, session)
+    }
+
+    private func closeSession(_ session: RemoteSession, in panel: PanelView, side: CommanderModel.Side, commander: CommanderView) {
         sessions[session.id] = nil
         session.client.close()
-        let back = localBefore[side] ?? FileManager.default.homeDirectoryForCurrentUser
-        panel.model.switchSource(commander.localLister, to: back, visibleRows: panel.visibleRows)
+        panel.model.switchSource(commander.localLister, to: localFolderBefore(side), visibleRows: panel.visibleRows)
         panel.remote = nil
         panel.needsDisplay = true
         commander.updateFunctionBar()
+    }
+
+    private func localFolderBefore(_ side: CommanderModel.Side) -> URL {
+        localBefore[side] ?? FileManager.default.homeDirectoryForCurrentUser
     }
 
     /// Swap panels: remote sessions (and where each panel was before connecting) change sides too.
@@ -253,61 +282,74 @@ public final class FTPController {
 
     // MARK: Navigation
 
-    /// Handles navigation in a remote panel (the listing is fetched first). Returns false for local panels.
     func navigate(_ panel: PanelView, _ action: CommandAction) -> Bool {
         guard let session = session(for: panel) else { return false }
-        let model = panel.model
+        if action == .open || action == .enterFolder {
+            return navigateOpenOrEnter(in: panel, session: session, action: action)
+        }
+        return navigateFolderAction(in: panel, session: session, action: action)
+    }
+
+    private func navigateFolderAction(in panel: PanelView, session: RemoteSession, action: CommandAction) -> Bool {
         let rows = panel.visibleRows
-        let current = RemoteSession.path(of: model.directory)
         switch action {
-        case .open, .enterFolder:
-            guard let entry = model.currentEntry else { return true }
-            return navigateEntry(entry, in: panel, session: session, action: action)
-        case .parentFolder:
-            guard current != "/" else { return true }
-            load(session, (current as NSString).deletingLastPathComponent, in: panel) { model.goUp(visibleRows: rows) }
-        case .goRoot:
-            load(session, "/", in: panel) { model.go(to: session.rootURL, visibleRows: rows) }
-        case .goHome:
-            // "~" is the Mac's home folder: leave the server.
-            disconnect(side(of: panel))
-            model.goHome(visibleRows: rows)
-        case .goDownloads:
-            // Downloads folder: leave the server.
-            disconnect(side(of: panel))
-            model.goDownloads(visibleRows: rows)
-        default:
-            return false
+        case .parentFolder: navigateToParent(in: panel, session: session)
+        case .goRoot: load(session, "/", in: panel) { panel.model.go(to: session.rootURL, visibleRows: rows) }
+        case .goHome, .goDownloads: disconnectAndGoLocal(panel, home: action == .goHome)
+        default: return false
         }
         return true
     }
 
+    private func navigateOpenOrEnter(in panel: PanelView, session: RemoteSession, action: CommandAction) -> Bool {
+        guard let entry = panel.model.currentEntry else { return true }
+        return navigateEntry(entry, in: panel, session: session, action: action)
+    }
+
+    private func navigateToParent(in panel: PanelView, session: RemoteSession) {
+        let current = RemoteSession.path(of: panel.model.directory)
+        guard current != "/" else { return }
+        let rows = panel.visibleRows
+        load(session, (current as NSString).deletingLastPathComponent, in: panel) { panel.model.goUp(visibleRows: rows) }
+    }
+
+    private func disconnectAndGoLocal(_ panel: PanelView, home: Bool) {
+        disconnect(side(of: panel))
+        if home { panel.model.goHome(visibleRows: panel.visibleRows) } else { panel.model.goDownloads(visibleRows: panel.visibleRows) }
+    }
+
     private func navigateEntry(_ entry: FileEntry, in panel: PanelView, session: RemoteSession, action: CommandAction) -> Bool {
-        let model = panel.model
         let rows = panel.visibleRows
         switch entry.kind {
-        case .parent:
-            return navigate(panel, .parentFolder)
-        case .directory:
-            load(session, RemoteSession.path(of: entry.url), in: panel) { model.openCurrent(visibleRows: rows) }
-        case .file where entry.isSymlink:
-            // A link: a link to a folder is entered, a link to a file is opened like a file.
-            let path = RemoteSession.path(of: entry.url)
-            panel.busyText = "Reading \(path)…"
-            background({ try session.fetch(path) }) { [weak self] result in
-                panel.busyText = nil
-                switch result {
-                case .success:
-                    model.go(to: session.url(for: path), visibleRows: rows)
-                    panel.needsDisplay = true
-                case .failure:
-                    if action == .open { self?.openRemoteFile(entry, session: session) } else { NSSound.beep() }
-                }
-            }
-        case .file:
-            if action == .open { openRemoteFile(entry, session: session) }
+        case .parent: return navigate(panel, .parentFolder)
+        case .directory: load(session, RemoteSession.path(of: entry.url), in: panel) { panel.model.openCurrent(visibleRows: rows) }
+        case .file: navigateFileEntry(entry, in: panel, session: session, open: action == .open)
         }
         return true
+    }
+
+    private func navigateFileEntry(_ entry: FileEntry, in panel: PanelView, session: RemoteSession, open: Bool) {
+        if entry.isSymlink {
+            navigateSymlink(entry, in: panel, session: session, openOnFailure: open)
+        } else if open {
+            openRemoteFile(entry, session: session)
+        }
+    }
+
+    private func navigateSymlink(_ entry: FileEntry, in panel: PanelView, session: RemoteSession, openOnFailure: Bool) {
+        // A link: a link to a folder is entered, a link to a file is opened like a file.
+        let path = RemoteSession.path(of: entry.url)
+        panel.busyText = "Reading \(path)…"
+        background({ try session.fetch(path) }) { [weak self] result in
+            panel.busyText = nil
+            switch result {
+            case .success:
+                panel.model.go(to: session.url(for: path), visibleRows: panel.visibleRows)
+                panel.needsDisplay = true
+            case .failure:
+                if openOnFailure { self?.openRemoteFile(entry, session: session) } else { NSSound.beep() }
+            }
+        }
     }
 
     /// Fetches a listing in the background, then runs `then` (which shows it).
@@ -330,12 +372,17 @@ public final class FTPController {
     func reveal(_ url: URL, in panel: PanelView) -> Bool {
         guard let session = session(for: panel), RemoteSession.sessionID(of: url) == session.id else { return false }
         let path = RemoteSession.path(of: url)
-        let folder = (path as NSString).deletingLastPathComponent
-        load(session, folder.isEmpty ? "/" : folder, in: panel) {
-            panel.model.go(to: session.url(for: folder.isEmpty ? "/" : folder), visibleRows: panel.visibleRows)
+        let folder = Self.parentFolderPath(of: path)
+        load(session, folder, in: panel) {
+            panel.model.go(to: session.url(for: folder), visibleRows: panel.visibleRows)
             panel.model.focus(name: (path as NSString).lastPathComponent, visibleRows: panel.visibleRows)
         }
         return true
+    }
+
+    private static func parentFolderPath(of path: String) -> String {
+        let raw = (path as NSString).deletingLastPathComponent
+        return raw.isEmpty ? "/" : raw
     }
 
     /// Finds the session of a `ccftp://` location, from a snapshot safe to use off the main thread.
@@ -353,10 +400,14 @@ public final class FTPController {
 
     func location(fromAddress text: String) -> URL? {
         for s in sessions.values where text.hasPrefix(s.addressLabel) {
-            let rest = String(text.dropFirst(s.addressLabel.count))
-            if rest.isEmpty || rest.hasPrefix("/") { return s.url(for: rest.isEmpty ? "/" : rest) }
+            if let url = Self.remoteURL(in: s, suffix: String(text.dropFirst(s.addressLabel.count))) { return url }
         }
         return nil
+    }
+
+    private static func remoteURL(in session: RemoteSession, suffix: String) -> URL? {
+        if suffix.isEmpty { return session.url(for: "/") }
+        return suffix.hasPrefix("/") ? session.url(for: suffix) : nil
     }
 
     /// Re-reads the remote folder (Refresh, and after transfers).
@@ -464,29 +515,50 @@ public final class FTPController {
         let (source, items, destination) = resolveRemoteTransferTarget(drop: drop, commander: commander)
         guard source?.model.isRemote == true || destination.isRemote else { return false }
         guard !items.isEmpty else { NSSound.beep(); return true }
+        startRemoteTransfer(items: items, source: source, destination: destination,
+                            move: move, prompts: prompts, commander: commander)
+        return true
+    }
 
+    private func startRemoteTransfer(
+        items: [FileEntry], source: PanelView?, destination: TransferLocation,
+        move: Bool, prompts: FileCommandPrompts, commander: CommanderView
+    ) {
         let verb = move ? "Move" : "Copy"
-        let what = FileCommands.describe(items)
-        let defaultText = destination.displayPath.hasSuffix("/") ? destination.displayPath : destination.displayPath + "/"
-        guard let answer = prompts.askTransfer(FileCommands.question(verb: verb, items: items, target: defaultText)) else { return true }
-        let typed = answer.target
+        guard let answer = askAndValidateRemoteTransfer(items: items, source: source, destination: destination,
+                                                        verb: verb, move: move, prompts: prompts) else { return }
+        runRemoteTransferPlan(sources: buildRemoteSources(items: items, in: source), what: FileCommands.describe(items),
+                              destination: destination, verb: verb, move: move, answer: answer, source: source, commander: commander)
+    }
 
-        // Typing just a new name for one item of a remote folder renames it on the server.
-        if move, tryRemoteRename(items: items, typed: typed, source: source) {
-            return true
-        }
-        guard typed == defaultText || typed == destination.displayPath else {
+    private func askAndValidateRemoteTransfer(
+        items: [FileEntry], source: PanelView?, destination: TransferLocation,
+        verb: String, move: Bool, prompts: FileCommandPrompts
+    ) -> TransferAnswer? {
+        let defaultText = Self.defaultRemoteTargetPath(for: destination)
+        guard let answer = prompts.askTransfer(FileCommands.question(verb: verb, items: items, target: defaultText)) else { return nil }
+        if move, tryRemoteRename(items: items, typed: answer.target, source: source) { return nil }
+        guard isValidRemoteTarget(answer.target, defaultText: defaultText, destination: destination, verb: verb) else { return nil }
+        return answer
+    }
+
+    private static func defaultRemoteTargetPath(for destination: TransferLocation) -> String {
+        destination.displayPath.hasSuffix("/") ? destination.displayPath : destination.displayPath + "/"
+    }
+
+    private func isValidRemoteTarget(_ target: String, defaultText: String, destination: TransferLocation, verb: String) -> Bool {
+        guard target == defaultText || target == destination.displayPath else {
             showMessage(verb, "For FTP, copies go into the other panel's folder. To rename on the server, use 6 and type only the new name.")
-            return true
+            return false
         }
+        return true
+    }
 
-        let sources = items.map {
+    private func buildRemoteSources(items: [FileEntry], in source: PanelView?) -> [TransferPlanner.Source] {
+        items.map {
             TransferPlanner.Source(location: location(for: $0, in: source), isFolder: $0.kind == .directory,
                                    size: $0.size ?? 0, modified: $0.modified)
         }
-        runRemoteTransferPlan(sources: sources, what: what, destination: destination,
-                              verb: verb, move: move, answer: answer, source: source, commander: commander)
-        return true
     }
 
     private func runRemoteTransferPlan(
@@ -589,26 +661,29 @@ public final class FTPController {
         commander.showHint("", duration: 0.01)
         switch result {
         case .failure(let e):
-            progressWindow?.close()
-            if !(e is FTPError && (e as? FTPError) == .cancelled) {
-                report(e, title: "\(verb) failed")
-            }
+            handlePlannedFailure(e, verb: verb, progressWindow: progressWindow)
         case .success(let plan):
-            if cancelFlag.isCancelled {
-                progressWindow?.close()
-                return
-            }
-            let job = TransferJob(
-                title: "\(verb) \(what): \(fromDisplay) → \(toDisplay)",
-                items: plan.items,
-                isMove: move,
-                sourceFoldersToRemove: move ? plan.foldersToRemove : []
-            )
-            job.verify = answer.verify
-            job.waitsInQueue = answer.queue
-            source?.model.clearMarks()
-            startJob(job, existingProgressWindow: progressWindow)
+            guard !cancelFlag.isCancelled else { progressWindow?.close(); return }
+            startPlannedJob(plan, title: "\(verb) \(what): \(fromDisplay) → \(toDisplay)",
+                            move: move, answer: answer, source: source, progressWindow: progressWindow)
         }
+    }
+
+    private func handlePlannedFailure(_ error: Error, verb: String, progressWindow: TransferProgressWindowController?) {
+        progressWindow?.close()
+        if (error as? FTPError) != .cancelled { report(error, title: "\(verb) failed") }
+    }
+
+    private func startPlannedJob(
+        _ plan: TransferPlanner.Plan, title: String, move: Bool, answer: TransferAnswer,
+        source: PanelView?, progressWindow: TransferProgressWindowController?
+    ) {
+        let job = TransferJob(title: title, items: plan.items, isMove: move,
+                              sourceFoldersToRemove: move ? plan.foldersToRemove : [])
+        job.verify = answer.verify
+        job.waitsInQueue = answer.queue
+        source?.model.clearMarks()
+        startJob(job, existingProgressWindow: progressWindow)
     }
 
     /// 8 in a remote panel: permanent deletion on the server, after confirmation naming the path.
@@ -621,62 +696,87 @@ public final class FTPController {
         guard prompts.confirm(title: "Delete on server",
                               message: "Permanently delete \(FileCommands.describe(items)) from \(place)?\nThis cannot be undone (there is no Trash on the server).",
                               okTitle: "Delete") else { return true }
-        background({ () -> [String] in
-            var problems: [String] = []
-            for entry in items {
-                let path = RemoteSession.path(of: entry.url)
-                do {
-                    if entry.kind == .directory {
-                        let tree = try session.walk(path)
-                        for f in tree.files {
-                            do { try session.client.deleteFile(f.path) } catch { problems.append("\(f.path): \((error as? FTPError)?.message ?? "\(error)")") }
-                        }
-                        for d in tree.folders.reversed() {
-                            do { try session.client.removeDirectory(d) } catch { problems.append("\(d): \((error as? FTPError)?.message ?? "\(error)")") }
-                        }
-                        try session.client.removeDirectory(path)
-                    } else {
-                        try session.client.deleteFile(path)
-                    }
-                } catch {
-                    problems.append("\(path): \((error as? FTPError)?.message ?? "\(error)")")
-                }
-            }
-            return problems
-        }) { [weak self] result in
-            if case .success(let problems) = result, !problems.isEmpty {
-                var report = OperationReport()
-                report.errors = problems
-                prompts.showProblems(title: "Some items were not deleted", report: report)
-            }
-            panel.model.clearMarks()
-            self?.refresh(panel)
+        background({ Self.deleteRemoteItems(items, session: session) }) { [weak self] result in
+            self?.finishRemoteDelete(result, panel: panel, prompts: prompts)
         }
         return true
+    }
+
+    private func finishRemoteDelete(_ result: Result<[String], Error>, panel: PanelView, prompts: FileCommandPrompts) {
+        if case .success(let problems) = result, !problems.isEmpty {
+            var report = OperationReport()
+            report.errors = problems
+            prompts.showProblems(title: "Some items were not deleted", report: report)
+        }
+        panel.model.clearMarks()
+        refresh(panel)
+    }
+
+    private static func deleteRemoteItems(_ items: [FileEntry], session: RemoteSession) -> [String] {
+        var problems: [String] = []
+        for entry in items {
+            let path = RemoteSession.path(of: entry.url)
+            do {
+                if entry.kind == .directory {
+                    try deleteRemoteDirectory(path, session: session, problems: &problems)
+                } else {
+                    try session.client.deleteFile(path)
+                }
+            } catch {
+                problems.append("\(path): \((error as? FTPError)?.message ?? "\(error)")")
+            }
+        }
+        return problems
+    }
+
+    private static func deleteRemoteDirectory(_ path: String, session: RemoteSession, problems: inout [String]) throws {
+        let tree = try session.walk(path)
+        for f in tree.files { deleteRemoteEntry(f.path, isDir: false, session: session, problems: &problems) }
+        for d in tree.folders.reversed() { deleteRemoteEntry(d, isDir: true, session: session, problems: &problems) }
+        try session.client.removeDirectory(path)
+    }
+
+    private static func deleteRemoteEntry(_ path: String, isDir: Bool, session: RemoteSession, problems: inout [String]) {
+        do {
+            if isDir { try session.client.removeDirectory(path) } else { try session.client.deleteFile(path) }
+        } catch {
+            problems.append("\(path): \((error as? FTPError)?.message ?? "\(error)")")
+        }
     }
 
     /// 7 in a remote panel: create a folder on the server.
     func newFolder(prompts: FileCommandPrompts) -> Bool {
         guard let commander = commander, let session = session(for: commander.activeView) else { return false }
         let panel = commander.activeView
-        guard let name = prompts.askText(title: "New Folder", message: "New folder (directory) on the server:",
-                                         defaultValue: "", okTitle: "Create")?.trimmingCharacters(in: .whitespaces),
-              !name.isEmpty else { return true }
-        guard FTPListingParser.isSafeName(name.replacingOccurrences(of: "/", with: "_")) else {
-            showMessage("New Folder", "That name is not allowed.")
-            return true
-        }
+        guard let name = askValidatedFolderName(prompts: prompts) else { return true }
         let path = RemoteSession.normalize(RemoteSession.path(of: panel.model.directory) + "/" + name)
         background({ try session.client.makeDirectory(path) }) { [weak self] result in
-            if case .failure(let e) = result { self?.report(e, title: "Cannot create the folder") }
-            self?.refresh(panel)
-            if case .success = result {
-                DispatchQueue.main.asyncAfter(deadline: .now() + (self?.runSynchronously == true ? 0 : 0.6)) {
-                    panel.model.focus(name: (name as NSString).pathComponents.first ?? name, visibleRows: panel.visibleRows)
-                    panel.needsDisplay = true
-                }
-            }
+            self?.handleMakeDirectoryResult(result, name: name, in: panel)
         }
         return true
+    }
+
+    private func handleMakeDirectoryResult(_ result: Result<Void, Error>, name: String, in panel: PanelView) {
+        if case .failure(let e) = result { report(e, title: "Cannot create the folder") }
+        refresh(panel)
+        if case .success = result { focusCreatedFolder(name, in: panel) }
+    }
+
+    private func askValidatedFolderName(prompts: FileCommandPrompts) -> String? {
+        guard let raw = prompts.askText(title: "New Folder", message: "New folder (directory) on the server:",
+                                        defaultValue: "", okTitle: "Create")?.trimmingCharacters(in: .whitespaces),
+              !raw.isEmpty else { return nil }
+        guard FTPListingParser.isSafeName(raw.replacingOccurrences(of: "/", with: "_")) else {
+            showMessage("New Folder", "That name is not allowed.")
+            return nil
+        }
+        return raw
+    }
+
+    private func focusCreatedFolder(_ name: String, in panel: PanelView) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + (runSynchronously ? 0 : 0.6)) {
+            panel.model.focus(name: (name as NSString).pathComponents.first ?? name, visibleRows: panel.visibleRows)
+            panel.needsDisplay = true
+        }
     }
 }

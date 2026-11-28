@@ -211,38 +211,182 @@ enum TransferTests {
             try expect(view.ftp.transfers.jobs.last?.failedCount == 1, "a vanished file fails in the queue")
         }
 
-        testRunner("Chunked local copy: progress reporting, cancellation, and cleanup") {
-            let dir = try CoverageTests.tempDir("ChunkedTest")
-            defer { try? FileManager.default.removeItem(at: dir) }
+        testRunner("Local copy (copyfile): progress, clone, metadata, links, atomic replace, cancel") {
+            let fm = FileManager.default
+            let dir = try CoverageTests.tempDir("LocalCopyTest")
+            defer { _ = try? Process.run(URL(fileURLWithPath: "/usr/bin/chflags"), arguments: ["-R", "nouchg", dir.path]).waitUntilExit()
+                    try? fm.removeItem(at: dir) }
             let src = dir.appendingPathComponent("large.bin")
-            let dst = dir.appendingPathComponent("large_copy.bin")
-
-            // 9MB test file to test multiple 4MB chunks
             let testSize = 9 * 1024 * 1024
-            let testData = Data(repeating: 0x42, count: testSize)
-            try testData.write(to: src)
-
-            var progressCalls: [Int64] = []
-            try TransferManager.copyLocalChunked(from: src, to: dst, cancel: nil, job: nil) { bytes in
-                progressCalls.append(bytes)
+            try Data(repeating: 0x42, count: testSize).write(to: src)
+            let modified = Date(timeIntervalSince1970: 1_000_000_000)
+            try fm.setAttributes([.modificationDate: modified, .posixPermissions: 0o640], ofItemAtPath: src.path)
+            try expect(setxattr(src.path, "com.example.tag", "blue", 4, 0, 0) == 0, "xattr set on source")
+            func xattr(_ url: URL) -> String? {
+                var buf = [CChar](repeating: 0, count: 16)
+                let n = getxattr(url.path, "com.example.tag", &buf, 16, 0, XATTR_NOFOLLOW)
+                return n < 0 ? nil : String(decoding: buf.prefix(n).map { UInt8(bitPattern: $0) }, as: UTF8.self)
             }
-            try expect(progressCalls.count >= 2, "Progress was called multiple times: \(progressCalls)")
-            try expect(progressCalls.last == Int64(testSize), "Final progress equals testSize")
-            try expect(FileManager.default.fileExists(atPath: dst.path), "Target exists")
-            try expect((try? FileComparison.fileSize(dst)) == Int64(testSize), "Target size matches")
+            func leftovers() throws -> [String] { try fm.contentsOfDirectory(atPath: dir.path).filter { $0.hasPrefix(".cc-copy-") } }
 
-            // Test cancellation
+            // Data copied (no clone): progress in steps, pause is asked, metadata kept.
+            let dst = dir.appendingPathComponent("large_copy.bin")
+            var progressCalls: [Int64] = []
+            var pauseAsked = 0
+            try LocalCopy.copy(from: src, to: dst, clone: false, cancel: nil, isPaused: { pauseAsked += 1; return false }) {
+                progressCalls.append($0)
+            }
+            try expect(progressCalls.count >= 2 && pauseAsked > 0, "progress in steps: \(progressCalls), pause asked \(pauseAsked)")
+            try expect(progressCalls.last == Int64(testSize), "final progress equals the size")
+            try expect(fm.contentsEqual(atPath: src.path, andPath: dst.path), "same data")
+            let attrs = try fm.attributesOfItem(atPath: dst.path)
+            try expect(attrs[.modificationDate] as? Date == modified, "date kept")
+            try expect((attrs[.posixPermissions] as? NSNumber)?.intValue == 0o640, "permissions kept")
+            try expect(xattr(dst) == "blue", "extended attribute kept")
+
+            // Default: a clone (APFS) — one progress report, same result; the default isPaused is used.
+            let cloned = dir.appendingPathComponent("cloned.bin")
+            var cloneCalls: [Int64] = []
+            try LocalCopy.copy(from: src, to: cloned, cancel: nil) { cloneCalls.append($0) }
+            try expect(cloneCalls == [Int64(testSize)], "clone reports once: \(cloneCalls)")
+            try expect(fm.contentsEqual(atPath: src.path, andPath: cloned.path) && xattr(cloned) == "blue", "clone identical")
+            let noClone = try LocalCopy.copy(from: src, to: dir.appendingPathComponent("plain.bin"), clone: false, cancel: nil, progress: nil)
+            try expect(noClone == Int64(testSize), "returns the size")
+            try expect(LocalCopy.flags(clone: true) & copyfile_flags_t(COPYFILE_CLONE) != 0
+                       && LocalCopy.flags(clone: false) & copyfile_flags_t(COPYFILE_CLONE) == 0, "clone flag")
+
+            // Replacing an existing file: the target is never removed first (same inode replaced by rename).
+            let small = dir.appendingPathComponent("small.txt")
+            try Data("new".utf8).write(to: small)
+            try Data("old contents".utf8).write(to: dst)
+            try LocalCopy.copy(from: small, to: dst, clone: false, cancel: nil, progress: nil)
+            try expect(try String(contentsOf: dst, encoding: .utf8) == "new", "replaced")
+
+            // A folder in the way of a file is replaced too.
+            let folderInWay = dir.appendingPathComponent("inway")
+            try fm.createDirectory(at: folderInWay.appendingPathComponent("sub"), withIntermediateDirectories: true)
+            try LocalCopy.copy(from: small, to: folderInWay, cancel: nil, progress: nil)
+            var isDir: ObjCBool = true
+            try expect(fm.fileExists(atPath: folderInWay.path, isDirectory: &isDir) && !isDir.boolValue, "folder replaced by the file")
+
+            // A symbolic link (even a dangling one) is copied as a link; verify compares where it points.
+            let link = dir.appendingPathComponent("link")
+            try fm.createSymbolicLink(atPath: link.path, withDestinationPath: "../nowhere")
+            let linkCopy = dir.appendingPathComponent("sub/link")
+            try LocalCopy.copy(from: link, to: linkCopy, cancel: nil, progress: nil)
+            try expect(try fm.destinationOfSymbolicLink(atPath: linkCopy.path) == "../nowhere", "link copied as a link")
+            let linkItem = TransferItem(source: .local(link), destination: .local(linkCopy), size: 10, isFolder: false)
+            try TransferManager().verify(linkItem, at: .local(linkCopy))
+            try fm.removeItem(at: linkCopy)
+            try fm.createSymbolicLink(atPath: linkCopy.path, withDestinationPath: "elsewhere")
+            var verifyFailed = false
+            do { try TransferManager().verify(linkItem, at: .local(linkCopy)) } catch { verifyFailed = true }
+            try expect(verifyFailed, "a link pointing elsewhere fails verify")
+
+            // A locked file is copied locked (the lock is lifted only for the rename).
+            let locked = dir.appendingPathComponent("locked.txt")
+            try Data("keep".utf8).write(to: locked)
+            try fm.setAttributes([.immutable: true], ofItemAtPath: locked.path)
+            let lockedCopy = dir.appendingPathComponent("locked_copy.txt")
+            try LocalCopy.copy(from: locked, to: lockedCopy, cancel: nil, progress: nil)
+            try expect((try fm.attributesOfItem(atPath: lockedCopy.path))[.immutable] as? Bool == true, "copy is locked too")
+            try expect(try String(contentsOf: lockedCopy, encoding: .utf8) == "keep", "locked copy has the data")
+
+            // Cancelled before starting, and while copying: nothing is left behind, an old target stays.
             let cancelDst = dir.appendingPathComponent("cancelled.bin")
             let cancelFlag = CancelFlag()
             cancelFlag.cancel()
             var threw = false
+            do { try LocalCopy.copy(from: src, to: cancelDst, cancel: cancelFlag, progress: nil) } catch FTPError.cancelled { threw = true }
+            try expect(threw && !fm.fileExists(atPath: cancelDst.path), "cancelled up front")
+            try Data("old".utf8).write(to: cancelDst)
+            let midway = CancelFlag()
+            threw = false
             do {
-                try TransferManager.copyLocalChunked(from: src, to: cancelDst, cancel: cancelFlag, job: nil, progress: nil)
-            } catch {
-                threw = true
-            }
-            try expect(threw, "Cancellation threw error")
-            try expect(!FileManager.default.fileExists(atPath: cancelDst.path), "Cancelled file was cleaned up")
+                try LocalCopy.copy(from: src, to: cancelDst, clone: false, cancel: midway) { if $0 > 0 { midway.cancel() } }
+            } catch FTPError.cancelled { threw = true }
+            try expect(threw, "cancelled while copying")
+            try expect(try String(contentsOf: cancelDst, encoding: .utf8) == "old", "old target untouched")
+
+            // Errors: a missing source, a rename into a folder that is not there.
+            threw = false
+            do { try LocalCopy.copy(from: dir.appendingPathComponent("missing"), to: cancelDst, cancel: nil, progress: nil) }
+            catch let e as NSError { threw = e.domain == NSPOSIXErrorDomain && e.code == Int(ENOENT) }
+            try expect(threw, "missing source is an error")
+            threw = false
+            do { try LocalCopy.replace(dir.appendingPathComponent("no/such/dir/x"), with: small) }
+            catch let e as NSError { threw = e.code == Int(ENOENT) }
+            try expect(threw, "rename into a missing folder is an error")
+            try expect(try leftovers().isEmpty, "no temporary files left: \(try leftovers())")
+        }
+
+        testRunner("Symbolic links are copied and moved as links: selected, nested, cyclic, dangling, counted") {
+            defer { CoverageTests.resetAnswers() }
+            let fm = FileManager.default
+            let left = try CoverageTests.tempDir("LinkLeft"), right = try CoverageTests.tempDir("LinkRight")
+            defer { try? fm.removeItem(at: left); try? fm.removeItem(at: right) }
+            func target(_ url: URL) -> String? { try? fm.destinationOfSymbolicLink(atPath: url.path) }
+            func isLink(_ url: URL) -> Bool { target(url) != nil }
+
+            // Selected in a panel: a link to a folder is copied as the link, not as a copy of the folder.
+            try fm.createDirectory(at: left.appendingPathComponent("real/inner"), withIntermediateDirectories: true)
+            try Data("data".utf8).write(to: left.appendingPathComponent("real/inner/f.txt"))
+            try fm.createSymbolicLink(atPath: left.appendingPathComponent("dirlink").path, withDestinationPath: "real")
+            try fm.createSymbolicLink(atPath: left.appendingPathComponent("dangling").path, withDestinationPath: "nowhere")
+            try fm.createSymbolicLink(atPath: left.appendingPathComponent("filelink").path, withDestinationPath: "real/inner/f.txt")
+            let (view, prompts, window) = SelectTests.commander(left, right)
+            defer { window.close() }
+            view.fileCommands.runInBackground = false
+            view.leftView.model.markAll(true)
+            view.perform(.copy)
+            try expect(prompts.lastMessage.hasPrefix("Copy"), "the copy was asked")
+            try expect(target(right.appendingPathComponent("dirlink")) == "real", "link to a folder copied as a link")
+            try expect(target(right.appendingPathComponent("dangling")) == "nowhere", "dangling link copied as a link")
+            try expect(target(right.appendingPathComponent("filelink")) == "real/inner/f.txt", "link to a file copied as a link")
+            try expect(fm.fileExists(atPath: right.appendingPathComponent("real/inner/f.txt").path), "the real folder is copied too")
+
+            // Nested in a folder: links are items of their own and are never entered (a cycle ends too).
+            let tree = left.appendingPathComponent("tree")
+            try fm.createDirectory(at: tree.appendingPathComponent("sub"), withIntermediateDirectories: true)
+            try Data("x".utf8).write(to: tree.appendingPathComponent("sub/x.txt"))
+            try fm.createSymbolicLink(atPath: tree.appendingPathComponent("loop").path, withDestinationPath: ".")
+            try fm.createSymbolicLink(atPath: tree.appendingPathComponent("up").path, withDestinationPath: "../real")
+            let dest = right.appendingPathComponent("tree_copy")
+            let plan = try TransferPlanner.plan([.init(location: .local(tree), isFolder: true, size: 0)], into: .local(dest.deletingLastPathComponent()))
+            try expect(plan.items.filter { !$0.isFolder }.count == 3, "x.txt and two links: \(plan.items.map(\.source.displayPath))")
+            try expect(plan.items.filter { $0.source.name == "loop" || $0.source.name == "up" }.allSatisfy { !$0.isFolder && $0.size == 0 },
+                       "links are items without data")
+            let manager = TransferManager()
+            manager.runSynchronously = true
+            let job = TransferJob(title: "tree", items: plan.items, isMove: false)
+            job.verify = true
+            manager.enqueue(job)
+            let copied = right.appendingPathComponent("tree")
+            try expect(job.state == .finished && job.failedCount == 0, "tree copied and verified: \(job.statusText)")
+            try expect(target(copied.appendingPathComponent("loop")) == "." && target(copied.appendingPathComponent("up")) == "../real", "links kept")
+            try expect(fm.fileExists(atPath: copied.appendingPathComponent("sub/x.txt").path), "file copied")
+
+            // A move that has to copy (Verify) deletes the link only; what it pointed to is untouched.
+            let moveSrc = left.appendingPathComponent("dirlink")
+            let movePlan = try TransferPlanner.plan([.init(location: .local(moveSrc), isFolder: false, size: 0)],
+                                                    into: .local(right.appendingPathComponent("moved")), move: true)
+            let move = TransferJob(title: "move", items: movePlan.items, isMove: true)
+            move.verify = true
+            manager.enqueue(move)
+            try expect(move.state == .finished && move.failedCount == 0, "link moved: \(move.statusText)")
+            try expect(!isLink(moveSrc), "source link gone")
+            try expect(fm.fileExists(atPath: left.appendingPathComponent("real/inner/f.txt").path), "the target of the link is untouched")
+            try expect(target(right.appendingPathComponent("moved/dirlink")) == "real", "moved as a link")
+
+            // The Copy dialog counts a link as one file without data, whatever it points to.
+            let entries = [
+                FileEntry(name: "dirlink", url: left.appendingPathComponent("dirlink"), kind: .directory, size: nil, isSymlink: true),
+                FileEntry(name: "filelink", url: left.appendingPathComponent("filelink"), kind: .file, size: 999, isSymlink: true),
+            ]
+            let stats = TransferStats.count(entries, mask: nil, cancel: CancelFlag())
+            try expect(stats.files == 2 && stats.folders == 0 && stats.bytes == 0, "links counted as files: \(stats)")
+            let nested = TransferStats.count([FileEntry(name: "tree", url: tree, kind: .directory)], mask: nil, cancel: CancelFlag())
+            try expect(nested.files == 3 && nested.folders == 2 && nested.bytes == 1, "nested links are not entered: \(nested)")
         }
 
         testRunner("Skipped files: progress tracking, skippedBytes, and statusText") {
@@ -294,6 +438,7 @@ enum TransferTests {
             }
             let manager = TransferManager()
             manager.limits = TransferLimits(total: 4, locals: 4)   // several copy threads at once
+            manager.cloneLocalCopies = false   // copy the data, so pausing really happens mid-copy
             let job = TransferJob(title: "Big", items: items, isMove: false)
             var notified = 0
             manager.onChange = { _ in notified += 1 }

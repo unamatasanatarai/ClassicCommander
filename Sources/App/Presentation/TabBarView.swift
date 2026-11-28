@@ -177,80 +177,78 @@ final class TabBarView: NSView {
 
         // 1. Draw inactive tabs first
         for (i, r) in rects.enumerated() where i != activeIndex {
-            let tabRect = NSRect(x: r.minX, y: 3.5, width: r.width, height: bounds.height - 3.5)
-            let fillPath = tabPath(rect: tabRect, cornerRadius: 3.0)
-            fillPath.line(to: NSPoint(x: tabRect.minX, y: tabRect.maxY))
-            fillPath.close()
-
-            palette.chrome.setFill()
-            fillPath.fill()
-
-            let strokePath = tabPath(rect: tabRect.insetBy(dx: 0.5, dy: 0), cornerRadius: 3.0)
-            strokePath.line(to: NSPoint(x: tabRect.minX + 0.5, y: tabRect.maxY))
-            strokePath.close()
-            palette.chromeShadow.setStroke()
-            strokePath.lineWidth = 1
-            strokePath.stroke()
-
-            let title = EntryFormatter.visible(tabs.tabs[i].title) as NSString
-            let font = PanelFont.regular
-            let textHeight = ceil(font.ascender - font.descender)
-            let rightPad: CGFloat = (tabs.count > 1) ? 22 : 6
-            let textRect = NSRect(x: tabRect.minX + 6,
-                                  y: tabRect.minY + floor((tabRect.height - textHeight) / 2),
-                                  width: max(0, tabRect.width - 6 - rightPad),
-                                  height: textHeight)
-            title.draw(in: textRect,
-                       withAttributes: [.font: font, .foregroundColor: palette.chromeText, .paragraphStyle: Self.tabTextStyle])
-            if let cr = closeRect(for: i) {
-                drawCloseButton(in: cr, isHovered: hoveredCloseTab == i, isActiveTab: false, palette: palette)
-            }
+            drawInactiveTab(at: i, rect: r, palette: palette)
         }
 
         // 2. Draw active tab on top
         if rects.indices.contains(activeIndex) {
-            let r = rects[activeIndex]
-            // Active tab is taller and reaches all the way to the bottom edge, covering the baseline
-            let tabRect = NSRect(x: r.minX, y: 1.5, width: r.width, height: bounds.height - 1.5)
-            let fillPath = tabPath(rect: tabRect, cornerRadius: 3.5)
-            fillPath.line(to: NSPoint(x: tabRect.minX, y: tabRect.maxY))
-            fillPath.close()
-
-            // Configurable active tab color (default bright white, not teal)
-            let activeBg = isActive ? palette.activeTabBackground : (palette.chromeLight.blended(withFraction: 0.6, of: palette.activeTabBackground) ?? palette.activeTabBackground)
-            activeBg.setFill()
-            fillPath.fill()
-
-            // Stroke left, top-left, top, top-right, right (bottom is open to merge with the panel below)
-            let strokePath = tabPath(rect: tabRect.insetBy(dx: 0.5, dy: 0), cornerRadius: 3.5)
-            palette.chromeShadow.setStroke()
-            strokePath.lineWidth = 1
-            strokePath.stroke()
-
-            let title = EntryFormatter.visible(tabs.tabs[activeIndex].title) as NSString
-            let font = PanelFont.bold
-            let textHeight = ceil(font.ascender - font.descender)
-            let rightPad: CGFloat = (tabs.count > 1) ? 22 : 6
-            let textRect = NSRect(x: tabRect.minX + 6,
-                                  y: tabRect.minY + floor((tabRect.height - textHeight) / 2),
-                                  width: max(0, tabRect.width - 6 - rightPad),
-                                  height: textHeight)
-            let textColor = isActive ? palette.activeTabText : palette.chromeText
-            title.draw(in: textRect,
-                       withAttributes: [.font: font, .foregroundColor: textColor, .paragraphStyle: Self.tabTextStyle])
-            if let cr = closeRect(for: activeIndex) {
-                drawCloseButton(in: cr, isHovered: hoveredCloseTab == activeIndex, isActiveTab: true, palette: palette)
-            }
+            drawActiveTab(at: activeIndex, rect: rects[activeIndex], palette: palette)
         }
     }
 
+    private func drawInactiveTab(at i: Int, rect r: NSRect, palette: Palette) {
+        let tabRect = NSRect(x: r.minX, y: 3.5, width: r.width, height: bounds.height - 3.5)
+        let fillPath = tabPath(rect: tabRect, cornerRadius: 3.0)
+        fillPath.line(to: NSPoint(x: tabRect.minX, y: tabRect.maxY))
+        fillPath.close()
+
+        palette.chrome.setFill()
+        fillPath.fill()
+
+        let strokePath = tabPath(rect: tabRect.insetBy(dx: 0.5, dy: 0), cornerRadius: 3.0)
+        strokePath.line(to: NSPoint(x: tabRect.minX + 0.5, y: tabRect.maxY))
+        strokePath.close()
+        palette.chromeShadow.setStroke()
+        strokePath.lineWidth = 1
+        strokePath.stroke()
+
+        drawTabTitle(at: i, in: tabRect, font: PanelFont.regular, color: palette.chromeText)
+        if let cr = closeRect(for: i) {
+            drawCloseButton(in: cr, isHovered: hoveredCloseTab == i, isActiveTab: false, palette: palette)
+        }
+    }
+
+    private func drawActiveTab(at activeIndex: Int, rect r: NSRect, palette: Palette) {
+        // Active tab is taller and reaches all the way to the bottom edge, covering the baseline
+        let tabRect = NSRect(x: r.minX, y: 1.5, width: r.width, height: bounds.height - 1.5)
+        let fillPath = tabPath(rect: tabRect, cornerRadius: 3.5)
+        fillPath.line(to: NSPoint(x: tabRect.minX, y: tabRect.maxY))
+        fillPath.close()
+
+        let activeBg = isActive ? palette.activeTabBackground : (palette.chromeLight.blended(withFraction: 0.6, of: palette.activeTabBackground) ?? palette.activeTabBackground)
+        activeBg.setFill()
+        fillPath.fill()
+
+        // Stroke left, top-left, top, top-right, right (bottom is open to merge with the panel below)
+        let strokePath = tabPath(rect: tabRect.insetBy(dx: 0.5, dy: 0), cornerRadius: 3.5)
+        palette.chromeShadow.setStroke()
+        strokePath.lineWidth = 1
+        strokePath.stroke()
+
+        let textColor = isActive ? palette.activeTabText : palette.chromeText
+        drawTabTitle(at: activeIndex, in: tabRect, font: PanelFont.bold, color: textColor)
+        if let cr = closeRect(for: activeIndex) {
+            drawCloseButton(in: cr, isHovered: hoveredCloseTab == activeIndex, isActiveTab: true, palette: palette)
+        }
+    }
+
+    private func drawTabTitle(at index: Int, in tabRect: NSRect, font: NSFont, color: NSColor) {
+        let title = EntryFormatter.visible(tabs.tabs[index].title) as NSString
+        let textHeight = ceil(font.ascender - font.descender)
+        let rightPad: CGFloat = (tabs.count > 1) ? 22 : 6
+        let textRect = NSRect(x: tabRect.minX + 6,
+                              y: tabRect.minY + floor((tabRect.height - textHeight) / 2),
+                              width: max(0, tabRect.width - 6 - rightPad),
+                              height: textHeight)
+        title.draw(in: textRect,
+                   withAttributes: [.font: font, .foregroundColor: color, .paragraphStyle: Self.tabTextStyle])
+    }
+
     private func drawCloseButton(in cr: NSRect, isHovered: Bool, isActiveTab: Bool, palette: Palette) {
+        let baseColor = (isActiveTab && isActive) ? palette.activeTabText : palette.chromeText
         if isHovered {
             let bg = NSBezierPath(ovalIn: cr.insetBy(dx: -1, dy: -1))
-            let hoverBg = (isActiveTab && isActive)
-                ? palette.activeTabText.withAlphaComponent(0.18)
-                : palette.chromeText.withAlphaComponent(0.18)
-            hoverBg.setFill()
+            baseColor.withAlphaComponent(0.18).setFill()
             bg.fill()
         }
         let cross = NSBezierPath()
@@ -259,12 +257,7 @@ final class TabBarView: NSView {
         cross.line(to: NSPoint(x: cr.maxX - pad, y: cr.maxY - pad))
         cross.move(to: NSPoint(x: cr.minX + pad, y: cr.maxY - pad))
         cross.line(to: NSPoint(x: cr.maxX - pad, y: cr.minY + pad))
-        let strokeColor: NSColor
-        if isHovered {
-            strokeColor = (isActiveTab && isActive) ? palette.activeTabText : palette.chromeText
-        } else {
-            strokeColor = ((isActiveTab && isActive) ? palette.activeTabText : palette.chromeText).withAlphaComponent(0.65)
-        }
+        let strokeColor = isHovered ? baseColor : baseColor.withAlphaComponent(0.65)
         strokeColor.setStroke()
         cross.lineWidth = 1.3
         cross.lineCapStyle = .round

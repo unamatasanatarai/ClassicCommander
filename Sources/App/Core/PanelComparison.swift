@@ -41,28 +41,37 @@ public enum PanelComparison {
     ) {
         if a.kind != b.kind {
             // A file on one side, a folder on the other.
-            result.left.insert(name)
-            result.right.insert(name)
+            insertBoth(name, into: &result)
             return
         }
         guard a.kind == .file else { return }
-        let sizeDiffers = (a.size ?? 0) != (b.size ?? 0)
-        switch criterion {
-        case .size:
-            if sizeDiffers {
-                result.left.insert(name)
-                result.right.insert(name)
-            }
-        case .date:
-            let gap = (a.modified ?? .distantPast).timeIntervalSince(b.modified ?? .distantPast)
-            if gap > tolerance {
-                result.left.insert(name)
-            } else if gap < -tolerance {
-                result.right.insert(name)
-            } else if sizeDiffers {
-                result.left.insert(name)
-                result.right.insert(name)
-            }
+        if criterion == .date {
+            compareByDate(name: name, a: a, b: b, tolerance: tolerance, sizeDiffers: sizesDiffer(a, b), into: &result)
+        } else if sizesDiffer(a, b) {
+            insertBoth(name, into: &result)
+        }
+    }
+
+    private static func sizesDiffer(_ a: FileEntry, _ b: FileEntry) -> Bool {
+        (a.size ?? 0) != (b.size ?? 0)
+    }
+
+    private static func insertBoth(_ name: String, into result: inout Result) {
+        result.left.insert(name)
+        result.right.insert(name)
+    }
+
+    private static func compareByDate(
+        name: String, a: FileEntry, b: FileEntry, tolerance: TimeInterval, sizeDiffers: Bool, into result: inout Result
+    ) {
+        let gap = (a.modified ?? .distantPast).timeIntervalSince(b.modified ?? .distantPast)
+        if gap > tolerance {
+            result.left.insert(name)
+        } else if gap < -tolerance {
+            result.right.insert(name)
+        } else if sizeDiffers {
+            result.left.insert(name)
+            result.right.insert(name)
         }
     }
 }
@@ -80,26 +89,42 @@ public enum SelectionClipboard {
                             folderSize: (FileEntry) -> Int64? = { _ in nil }) -> String {
         let usePaths = format == .paths || format == .pathsWithDetails
         let detailed = format == .namesWithDetails || format == .pathsWithDetails
-        var lines: [String] = []
-        if detailed { lines.append([usePaths ? "Path" : "Name", "Size", "Date", "Attributes"].joined(separator: "\t")) }
+        var lines: [String] = detailed ? [headerLine(usePaths: usePaths)] : []
         for e in entries {
-            let name = usePaths ? path(e) : e.name
-            guard detailed else { lines.append(name); continue }
-            lines.append(formatDetailedRow(e, name: name, folderSize: folderSize))
+            lines.append(rowLine(e, usePaths: usePaths, detailed: detailed, path: path, folderSize: folderSize))
         }
-        return lines.joined(separator: "\n") + (lines.isEmpty ? "" : "\n")
+        return lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
+    }
+
+    private static func headerLine(usePaths: Bool) -> String {
+        [usePaths ? "Path" : "Name", "Size", "Date", "Attributes"].joined(separator: "\t")
+    }
+
+    private static func rowLine(
+        _ entry: FileEntry,
+        usePaths: Bool,
+        detailed: Bool,
+        path: (FileEntry) -> String,
+        folderSize: (FileEntry) -> Int64?
+    ) -> String {
+        let name = usePaths ? path(entry) : entry.name
+        return detailed ? formatDetailedRow(entry, name: name, folderSize: folderSize) : name
     }
 
     private static func formatDetailedRow(_ e: FileEntry, name: String, folderSize: (FileEntry) -> Int64?) -> String {
-        let size: String
-        if e.kind == .directory {
-            size = folderSize(e).map(String.init) ?? "<DIR>"
-        } else {
-            size = e.size.map(String.init) ?? ""
-        }
+        let size = formattedSize(for: e, folderSize: folderSize)
         let date = e.modified.map(dateFormatter.string(from:)) ?? ""
-        let attributes = e.permissions.map { (e.kind == .directory ? "d" : "-") + String($0, radix: 8) } ?? ""
+        let attributes = formattedAttributes(for: e)
         return [name, size, date, attributes].joined(separator: "\t")
+    }
+
+    private static func formattedSize(for entry: FileEntry, folderSize: (FileEntry) -> Int64?) -> String {
+        if entry.kind == .directory { return folderSize(entry).map(String.init) ?? "<DIR>" }
+        return entry.size.map(String.init) ?? ""
+    }
+
+    private static func formattedAttributes(for entry: FileEntry) -> String {
+        entry.permissions.map { (entry.kind == .directory ? "d" : "-") + String($0, radix: 8) } ?? ""
     }
 
     /// Year first, so spreadsheets read it as a date and it sorts as text.

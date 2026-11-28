@@ -209,25 +209,35 @@ public final class TransferJob {
 
     /// "Done", "3 failed", "Cancelled", "Running 4 of 10", "Queued".
     public var statusText: String {
+        if state == .queued { return waitsInQueue ? "Waiting in the queue" : "Queued" }
+        return nonQueuedStatusText
+    }
+
+    private var nonQueuedStatusText: String {
         switch state {
-        case .queued: return waitsInQueue ? "Waiting in the queue" : "Queued"
-        case .running, .finishing:
-            if cancelFlag.isCancelled {
-                return "Cancelling…"
-            }
-            let skipped = skippedCount > 0 ? " · \(skippedCount) skipped" : ""
-            return "Copying \(running) at once · \(processedCount) of \(items.count) done\(skipped)"
-        case .cancelled:
-            let skipped = skippedCount > 0 ? ", \(skippedCount) skipped" : ""
-            return "Cancelled (\(doneCount) done\(skipped))"
-        case .finished:
-            let skipped = skippedCount > 0 ? " · \(skippedCount) skipped" : ""
-            if failedCount == 0 {
-                return "Done (\(processedCount) of \(items.count)\(skipped))"
-            } else {
-                return "\(failedCount) failed, \(doneCount) done\(skipped)"
-            }
+        case .running, .finishing: return runningStatusText
+        case .cancelled: return cancelledStatusText
+        default: return finishedStatusText
         }
+    }
+
+    private var cancelledStatusText: String {
+        let skipped = skippedCount > 0 ? ", \(skippedCount) skipped" : ""
+        return "Cancelled (\(doneCount) done\(skipped))"
+    }
+
+    private var runningStatusText: String {
+        if cancelFlag.isCancelled { return "Cancelling…" }
+        let skipped = skippedCount > 0 ? " · \(skippedCount) skipped" : ""
+        return "Copying \(running) at once · \(processedCount) of \(items.count) done\(skipped)"
+    }
+
+    private var finishedStatusText: String {
+        let skipped = skippedCount > 0 ? " · \(skippedCount) skipped" : ""
+        if failedCount == 0 {
+            return "Done (\(processedCount) of \(items.count)\(skipped))"
+        }
+        return "\(failedCount) failed, \(doneCount) done\(skipped)"
     }
 
     public func cancel() { cancelFlag.cancel() }
@@ -262,11 +272,13 @@ public struct TransferLimits: Equatable {
 
     /// Whether one more transfer of this kind may start next to the running ones.
     func allows(_ kind: TransferKind, running: (total: Int, up: Int, down: Int, local: Int)) -> Bool {
-        guard running.total < total else { return false }
-        if kind.isLocal && running.local >= effectiveLocals { return false }
-        if kind.isUpload && running.up >= effectiveUploads { return false }
-        if kind.isDownload && running.down >= effectiveDownloads { return false }
-        return true
+        running.total < total && allowsByKind(kind, running: running)
+    }
+
+    private func allowsByKind(_ kind: TransferKind, running: (total: Int, up: Int, down: Int, local: Int)) -> Bool {
+        (!kind.isLocal || running.local < effectiveLocals)
+            && (!kind.isUpload || running.up < effectiveUploads)
+            && (!kind.isDownload || running.down < effectiveDownloads)
     }
 }
 
@@ -295,6 +307,8 @@ public final class TransferManager {
     public var onChange: ((TransferJob) -> Void)?
     /// Tests run jobs synchronously (one file after another).
     public var runSynchronously = false
+    /// Local copies on APFS share the original's blocks (instant). Off: the data is always copied.
+    var cloneLocalCopies = true
     /// Changing the limits takes effect for the next files to start.
     public var limits = TransferLimits() {
         didSet { schedule() }
@@ -336,14 +350,18 @@ public final class TransferManager {
 
     /// The next queued job, once the one before it is done.
     private func startNextInQueue() {
-        lock.lock()
-        let busy = jobs.contains { $0.waitsInQueue && !$0.isHeld && Self.isUnfinished($0) }
-        let next = busy ? nil : jobs.first { $0.isHeld && $0.state == .queued }
-        next?.isHeld = false
-        lock.unlock()
-        guard let job = next else { return }
+        guard let job = claimNextQueuedJob() else { return }
         if runSynchronously { runSerially(job); return }
         workers.async { [weak self] in self?.start(job) }
+    }
+
+    private func claimNextQueuedJob() -> TransferJob? {
+        lock.lock()
+        defer { lock.unlock() }
+        let busy = jobs.contains { $0.waitsInQueue && !$0.isHeld && Self.isUnfinished($0) }
+        guard !busy, let next = jobs.first(where: { $0.isHeld && $0.state == .queued }) else { return nil }
+        next.isHeld = false
+        return next
     }
 
     public func clearFinished() {
@@ -366,19 +384,9 @@ public final class TransferManager {
 
     /// Creates the job's folders (in order, so parents come first), then queues its files.
     private func start(_ job: TransferJob) {
-        lock.lock()
-        // Cancelled before it got going: it stays cancelled.
-        if job.state == .cancelled { lock.unlock(); return }
-        job.state = .running
-        job.started = Date()
-        lock.unlock()
+        guard beginJob(job) else { return }
         notify(job)
-        for (i, item) in job.items.enumerated() where item.isFolder {
-            if job.cancelFlag.isCancelled { break }
-            let result: TransferItemResult
-            do { try perform(item, job: job) { _ in }; result = .done } catch { result = Self.result(for: error) }
-            lock.lock(); job.results[i] = result; lock.unlock()
-        }
+        createFolders(for: job)
         lock.lock()
         waiting += job.items.indices.filter { !job.items[$0].isFolder }.map { (job, $0) }
         lock.unlock()
@@ -386,10 +394,54 @@ public final class TransferManager {
         finishIfDone(job)
     }
 
+    private func beginJob(_ job: TransferJob) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        // Cancelled before it got going: it stays cancelled.
+        guard job.state != .cancelled else { return false }
+        job.state = .running
+        job.started = Date()
+        return true
+    }
+
+    private func createFolders(for job: TransferJob) {
+        for (i, item) in job.items.enumerated() where item.isFolder && !job.cancelFlag.isCancelled {
+            performFolderItem(item, at: i, job: job)
+        }
+    }
+
+    private func performFolderItem(_ item: TransferItem, at index: Int, job: TransferJob) {
+        let result: TransferItemResult
+        do { try perform(item, job: job) { _ in }; result = .done } catch { result = Self.result(for: error) }
+        lock.lock(); job.results[index] = result; lock.unlock()
+    }
+
+    private func recordStart(kind: TransferKind, job: TransferJob) {
+        running.total += 1
+        if kind.isUpload { running.up += 1 }
+        if kind.isDownload { running.down += 1 }
+        if kind.isLocal { running.local += 1 }
+        peakConcurrency = max(peakConcurrency, running.total)
+        peakUploads = max(peakUploads, running.up)
+        peakDownloads = max(peakDownloads, running.down)
+        peakLocals = max(peakLocals, running.local)
+        job.running += 1
+    }
+
     /// Starts as many waiting files as the limits allow.
     private func schedule() {
         guard !runSynchronously else { return }
         lock.lock()
+        let (starting, dropped) = drainWaitingQueue()
+        lock.unlock()
+        for (job, index) in starting {
+            workers.async { [weak self] in self?.transfer(job, index) }
+        }
+        // Jobs whose remaining files were dropped by Cancel may be finished now.
+        for job in dropped { finishIfDone(job) }
+    }
+
+    private func drainWaitingQueue() -> ([(TransferJob, Int)], [TransferJob]) {
         var starting: [(TransferJob, Int)] = []
         var dropped: [TransferJob] = []
         var i = 0
@@ -397,32 +449,29 @@ public final class TransferManager {
             let (job, index) = waiting[i]
             if job.cancelFlag.isCancelled {
                 waiting.remove(at: i)
-                if !dropped.contains(where: { $0 === job }) { dropped.append(job) }
+                recordDropped(job, into: &dropped)
+            } else if tryStartWaitingItem(at: i, job: job, index: index, starting: &starting) {
                 continue
-            }
-            let kind = TransferKind(job.items[index])
-            if limits.allows(kind, running: running) {
-                waiting.remove(at: i)
-                running.total += 1
-                if kind.isUpload { running.up += 1 }
-                if kind.isDownload { running.down += 1 }
-                if kind.isLocal { running.local += 1 }
-                peakConcurrency = max(peakConcurrency, running.total)
-                peakUploads = max(peakUploads, running.up)
-                peakDownloads = max(peakDownloads, running.down)
-                peakLocals = max(peakLocals, running.local)
-                job.running += 1
-                starting.append((job, index))
             } else {
                 i += 1
             }
         }
-        lock.unlock()
-        for (job, index) in starting {
-            workers.async { [weak self] in self?.transfer(job, index) }
-        }
-        // Jobs whose remaining files were dropped by Cancel may be finished now.
-        for job in dropped { finishIfDone(job) }
+        return (starting, dropped)
+    }
+
+    private func recordDropped(_ job: TransferJob, into dropped: inout [TransferJob]) {
+        if !dropped.contains(where: { $0 === job }) { dropped.append(job) }
+    }
+
+    private func tryStartWaitingItem(
+        at i: Int, job: TransferJob, index: Int, starting: inout [(TransferJob, Int)]
+    ) -> Bool {
+        let kind = TransferKind(job.items[index])
+        guard limits.allows(kind, running: running) else { return false }
+        waiting.remove(at: i)
+        recordStart(kind: kind, job: job)
+        starting.append((job, index))
+        return true
     }
 
     /// Cancel a job: running files stop, waiting ones are dropped. A job still waiting in the
@@ -452,21 +501,28 @@ public final class TransferManager {
         waitWhilePaused(job)
         lock.lock(); job.active.insert(index); lock.unlock()
         notify(job)
+        return performItemWithRetries(item, job: job, index: index)
+    }
+
+    private func performItemWithRetries(_ item: TransferItem, job: TransferJob, index: Int) -> TransferItemResult {
         var lastNotify = Date.distantPast
         do {
             try perform(item, job: job) { [weak self] partial in
-                guard let self = self else { return }
-                self.lock.lock(); job.partial[index] = partial; self.lock.unlock()
-                if Date().timeIntervalSince(lastNotify) > 0.25 {
-                    lastNotify = Date()
-                    self.notify(job)
-                }
+                self?.recordPartial(partial, job: job, index: index, lastNotify: &lastNotify)
             }
             return .done
         } catch FTPError.cancelled {
             return .pending
         } catch {
             return Self.result(for: error)
+        }
+    }
+
+    private func recordPartial(_ partial: Int64, job: TransferJob, index: Int, lastNotify: inout Date) {
+        lock.lock(); job.partial[index] = partial; lock.unlock()
+        if Date().timeIntervalSince(lastNotify) > 0.25 {
+            lastNotify = Date()
+            notify(job)
         }
     }
 
@@ -480,24 +536,35 @@ public final class TransferManager {
         let item = job.items[index]
         let kind = TransferKind(item)
         let result = executeItem(item, job: job, index: index)
+        finishItemTransfer(job: job, index: index, item: item, kind: kind, result: result)
+        notify(job)
+        schedule()
+        finishIfDone(job)
+    }
+
+    private func finishItemTransfer(
+        job: TransferJob, index: Int, item: TransferItem, kind: TransferKind, result: TransferItemResult
+    ) {
         lock.lock()
+        defer { lock.unlock() }
         job.active.remove(index)
         job.partial[index] = nil
         job.results[index] = result
-        if result == .done {
-            job.completedBytes = job.completedBytes.addingSaturated(item.size)
-        } else if case .skipped = result {
-            job.skippedBytes = job.skippedBytes.addingSaturated(item.size)
-        }
+        recordCompletedBytes(item: item, result: result, on: job)
         job.running -= 1
+        decrementRunning(kind: kind)
+    }
+
+    private func recordCompletedBytes(item: TransferItem, result: TransferItemResult, on job: TransferJob) {
+        if result == .done { job.completedBytes = job.completedBytes.addingSaturated(item.size) }
+        else if case .skipped = result { job.skippedBytes = job.skippedBytes.addingSaturated(item.size) }
+    }
+
+    private func decrementRunning(kind: TransferKind) {
         running.total -= 1
         if kind.isUpload { running.up -= 1 }
         if kind.isDownload { running.down -= 1 }
         if kind.isLocal { running.local -= 1 }
-        lock.unlock()
-        notify(job)
-        schedule()
-        finishIfDone(job)
     }
 
     /// Finishes a job once none of its files is waiting or running.
@@ -511,15 +578,18 @@ public final class TransferManager {
     }
 
     private func complete(_ job: TransferJob) {
-        if job.isMove && !job.cancelFlag.isCancelled && job.failedCount == 0 {
-            for folder in job.sourceFoldersToRemove { removeFolder(folder) }
-        }
+        cleanupMovedSourceFolders(for: job)
         lock.lock()
         job.finished = Date()
         job.state = job.cancelFlag.isCancelled ? .cancelled : .finished
         lock.unlock()
         notify(job)
         if job.waitsInQueue { startNextInQueue() }
+    }
+
+    private func cleanupMovedSourceFolders(for job: TransferJob) {
+        guard job.isMove && !job.cancelFlag.isCancelled && job.failedCount == 0 else { return }
+        for folder in job.sourceFoldersToRemove { removeFolder(folder) }
     }
 
     static func result(for error: Error) -> TransferItemResult {
@@ -535,31 +605,33 @@ public final class TransferManager {
         notify(job)
         for (i, item) in job.items.enumerated() {
             if job.cancelFlag.isCancelled { break }
-            job.active.insert(i)
-            defer { job.active.remove(i) }
-            do {
-                try perform(item, job: job) { partial in job.partial[i] = partial }
-                job.results[i] = .done
-                job.completedBytes = job.completedBytes.addingSaturated(item.size)
-            } catch FTPError.cancelled {
-                break
-            } catch {
-                let res = Self.result(for: error)
-                job.results[i] = res
-                if case .skipped = res {
-                    job.skippedBytes = job.skippedBytes.addingSaturated(item.size)
-                }
-            }
-            job.partial[i] = nil
+            if !runSerialItem(item, index: i, job: job) { break }
         }
         job.state = .running
         job.running = 0
         complete(job)
     }
 
+    private func runSerialItem(_ item: TransferItem, index i: Int, job: TransferJob) -> Bool {
+        job.active.insert(i)
+        defer { job.active.remove(i); job.partial[i] = nil }
+        do {
+            try perform(item, job: job) { partial in job.partial[i] = partial }
+            job.results[i] = .done
+            job.completedBytes = job.completedBytes.addingSaturated(item.size)
+            return true
+        } catch FTPError.cancelled {
+            return false
+        } catch {
+            let res = Self.result(for: error)
+            job.results[i] = res
+            if case .skipped = res { job.skippedBytes = job.skippedBytes.addingSaturated(item.size) }
+            return true
+        }
+    }
+
     /// Copies one item; for moves, deletes the source only after the copy was verified.
     private func perform(_ item: TransferItem, job: TransferJob, progress: @escaping (Int64) -> Void) throws {
-        let cancel = job.cancelFlag
         if item.isFolder {
             try createFolder(at: item.destination)
             progress(0)   // folders carry no bytes
@@ -567,6 +639,15 @@ public final class TransferManager {
         }
         // An existing target: ask (or follow an earlier "… all"); Skip and Cancel end here.
         guard let destination = try settle(item, job: job) else { throw TransferSkipped() }
+        try transferFile(item, to: destination, job: job, progress: progress)
+        if job.verify { try verify(item, at: destination) }
+        if job.isMove { try deleteSource(item.source) }
+    }
+
+    private func transferFile(
+        _ item: TransferItem, to destination: TransferLocation, job: TransferJob, progress: @escaping (Int64) -> Void
+    ) throws {
+        let cancel = job.cancelFlag
         switch (item.source, destination) {
         case let (.local(url), .remote(session, path)):
             try session.client.upload(url, to: path, resume: job.resume, cancel: cancel, progress: progress)
@@ -578,8 +659,6 @@ public final class TransferManager {
         case let (.local(src), .local(dst)):
             try performLocalToLocal(from: src, to: dst, item: item, job: job, progress: progress)
         }
-        if job.verify { try verify(item, at: destination) }
-        if job.isMove { try deleteSource(item.source) }
     }
 
     private func createFolder(at destination: TransferLocation) throws {
@@ -587,20 +666,27 @@ public final class TransferManager {
         case .local(let url):
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         case let .remote(session, path):
-            do { try session.client.makeDirectory(path) } catch {
-                // An existing folder is fine. Missing parents are created (FTP's MKD makes one level).
-                if (try? session.client.list(path, cancel: nil)) == nil {
-                    var parent = ""
-                    for part in path.split(separator: "/").dropLast() {
-                        parent += "/" + part
-                        try? session.client.makeDirectory(parent)
-                    }
-                    do { try session.client.makeDirectory(path) } catch {
-                        if (try? session.client.list(path, cancel: nil)) == nil { throw error }
-                    }
-                }
-            }
+            try createRemoteFolder(path, session: session)
             session.invalidate((path as NSString).deletingLastPathComponent)
+        }
+    }
+
+    private func createRemoteFolder(_ path: String, session: RemoteSession) throws {
+        do { try session.client.makeDirectory(path) } catch {
+            // An existing folder is fine. Missing parents are created (FTP's MKD makes one level).
+            guard (try? session.client.list(path, cancel: nil)) == nil else { return }
+            try createRemoteParentsAndTarget(path, session: session)
+        }
+    }
+
+    private func createRemoteParentsAndTarget(_ path: String, session: RemoteSession) throws {
+        var parent = ""
+        for part in path.split(separator: "/").dropLast() {
+            parent += "/" + part
+            try? session.client.makeDirectory(parent)
+        }
+        do { try session.client.makeDirectory(path) } catch {
+            if (try? session.client.list(path, cancel: nil)) == nil { throw error }
         }
     }
 
@@ -626,20 +712,41 @@ public final class TransferManager {
     private func performLocalToLocal(
         from src: URL, to dst: URL, item: TransferItem, job: TransferJob, progress: @escaping (Int64) -> Void
     ) throws {
-        let fm = FileManager.default
-        let sameVolume = Self.isSameVolume(src, dst)
-        if job.isMove && (item.isWholeFolder || (!job.verify && sameVolume)) {
-            do {
-                if Self.exists(dst) { try fm.removeItem(at: dst) }
-                try fm.moveItem(at: src, to: dst)
-                progress(item.size)
-                return
-            } catch {
-                if item.isWholeFolder { throw error }
-            }
+        if try tryDirectLocalMove(from: src, to: dst, item: item, job: job) {
+            progress(item.size)
+            return
         }
-        try Self.copyLocalChunked(from: src, to: dst, cancel: job.cancelFlag, job: job, progress: progress)
+        try LocalCopy.copy(from: src, to: dst, clone: cloneLocalCopies, cancel: job.cancelFlag,
+                           isPaused: { job.isPaused }, progress: progress)
         progress(item.size)
+    }
+
+    private func tryDirectLocalMove(from src: URL, to dst: URL, item: TransferItem, job: TransferJob) throws -> Bool {
+        guard canDirectLocalMove(from: src, to: dst, item: item, job: job) else { return false }
+        return try replaceAndMoveLocal(from: src, to: dst, isWholeFolder: item.isWholeFolder)
+    }
+
+    private func replaceAndMoveLocal(from src: URL, to dst: URL, isWholeFolder: Bool) throws -> Bool {
+        do {
+            try Self.removeExistingDestination(dst)
+            try FileManager.default.moveItem(at: src, to: dst)
+            return true
+        } catch {
+            return try Self.handleDirectMoveError(error, isWholeFolder: isWholeFolder)
+        }
+    }
+
+    private static func handleDirectMoveError(_ error: Error, isWholeFolder: Bool) throws -> Bool {
+        if isWholeFolder { throw error }
+        return false
+    }
+
+    private static func removeExistingDestination(_ dst: URL) throws {
+        if exists(dst) { try FileManager.default.removeItem(at: dst) }
+    }
+
+    private func canDirectLocalMove(from src: URL, to dst: URL, item: TransferItem, job: TransferJob) -> Bool {
+        job.isMove && (item.isWholeFolder || (!job.verify && Self.isSameVolume(src, dst)))
     }
 
     private static func isSameVolume(_ src: URL, _ dst: URL) -> Bool {
@@ -647,71 +754,6 @@ public final class TransferManager {
         let r2 = try? dst.deletingLastPathComponent().resourceValues(forKeys: [.volumeIdentifierKey])
         guard let v1 = r1?.volumeIdentifier, let v2 = r2?.volumeIdentifier else { return false }
         return (v1 as AnyObject).isEqual(v2)
-    }
-
-    /// Copies a file in chunks, providing granular progress, pause and cancel support,
-    /// and replacing destination atomically on completion.
-    static func copyLocalChunked(from src: URL, to dst: URL, cancel: CancelFlag?, job: TransferJob?, progress: ((Int64) -> Void)?) throws {
-        let fm = FileManager.default
-        let parent = dst.deletingLastPathComponent()
-        try fm.createDirectory(at: parent, withIntermediateDirectories: true)
-        let temp = parent.appendingPathComponent(".cc-copy-\(UUID().uuidString)")
-
-        do {
-            let srcHandle = try FileHandle(forReadingFrom: src)
-            defer { try? srcHandle.close() }
-
-            guard fm.createFile(atPath: temp.path, contents: nil) else {
-                throw FTPError.localDiskFull
-            }
-            let dstHandle = try FileHandle(forWritingTo: temp)
-            defer { try? dstHandle.close() }
-
-            var copied: Int64 = 0
-            let bufferSize = 1024 * 1024  // 1 MB buffer for prompt cancellation response
-
-            while true {
-                if cancel?.isCancelled == true {
-                    throw FTPError.cancelled
-                }
-                while job?.isPaused == true && cancel?.isCancelled != true {
-                    Thread.sleep(forTimeInterval: 0.1)
-                }
-
-                let chunk: Data = try autoreleasepool {
-                    return try srcHandle.read(upToCount: bufferSize) ?? Data()
-                }
-                if cancel?.isCancelled == true {
-                    throw FTPError.cancelled
-                }
-                if chunk.isEmpty { break }
-                try dstHandle.write(contentsOf: chunk)
-                copied += Int64(chunk.count)
-                progress?(copied)
-            }
-
-            try dstHandle.synchronize()
-            try dstHandle.close()
-            try srcHandle.close()
-
-            if let attrs = try? fm.attributesOfItem(atPath: src.path) {
-                try? fm.setAttributes(attrs, ofItemAtPath: temp.path)
-            }
-
-            if exists(dst) {
-                try? fm.removeItem(at: dst)
-            }
-            try fm.moveItem(at: temp, to: dst)
-            progress?(copied)
-        } catch {
-            try? fm.removeItem(at: temp)
-            throw error
-        }
-    }
-
-    /// Copies a file, replacing what is there only once the copy is complete.
-    static func copyLocal(_ src: URL, to dst: URL) throws {
-        try copyLocalChunked(from: src, to: dst, cancel: nil, job: nil, progress: nil)
     }
 
     static func exists(_ url: URL) -> Bool {
@@ -739,24 +781,36 @@ public final class TransferManager {
         // Local targets are checked now; server targets were checked when the job was planned.
         var check = !target.isRemote || item.conflict
         while check, let found = Self.existing(target) {
-            let conflict = TransferConflict(source: item.source, target: target, sourceSize: item.size, sourceDate: item.modified,
-                                            targetSize: found.size, targetDate: found.date)
-            switch decide(conflict, job: job) {
-            case .replace, .replaceAll: return target
-            case .skip, .skipAll: return nil
-            case .replaceAllOlder:
-                // Replace only what is older than the file being copied.
-                let older = (found.date ?? .distantPast) < (item.modified ?? .distantFuture)
-                return older ? target : nil
-            case .rename(let name):
+            let decision = decide(TransferConflict(source: item.source, target: target, sourceSize: item.size,
+                                                   sourceDate: item.modified, targetSize: found.size, targetDate: found.date), job: job)
+            if case .rename(let name) = decision {
                 target = target.sibling(named: name)
                 check = true
-            case .cancel:
-                job.cancel()
-                throw FTPError.cancelled
+                continue
             }
+            return try applySettleDecision(decision, target: target, foundDate: found.date, itemModified: item.modified, job: job)
         }
         return target
+    }
+
+    private func applySettleDecision(
+        _ decision: ConflictDecision, target: TransferLocation, foundDate: Date?, itemModified: Date?, job: TransferJob
+    ) throws -> TransferLocation? {
+        switch decision {
+        case .skip, .skipAll:
+            return nil
+        case .cancel:
+            job.cancel()
+            throw FTPError.cancelled
+        case .replaceAllOlder:
+            return Self.isTargetOlder(foundDate, than: itemModified) ? target : nil
+        default:
+            return target
+        }
+    }
+
+    private static func isTargetOlder(_ foundDate: Date?, than itemModified: Date?) -> Bool {
+        (foundDate ?? .distantPast) < (itemModified ?? .distantFuture)
     }
 
     /// The job's "… all" answer, or the user's (asked on the main thread, one dialog at a time).
@@ -779,22 +833,28 @@ public final class TransferManager {
     func verify(_ item: TransferItem, at destination: TransferLocation) throws {
         let ok: Bool
         switch (item.source, destination) {
-        case let (.local(src), .local(dst)):
-            do {
-                guard Self.exists(src) else {
-                    ok = Self.exists(dst) && (try? FileComparison.fileSize(dst)) == item.size
-                    break
-                }
-                ok = try FileComparison.fileSize(src) == FileComparison.fileSize(dst) && FileComparison.firstDifference(src, dst) == nil
-            } catch {
-                ok = false
-            }
-        case (_, .local(let dst)):
-            ok = (try? FileComparison.fileSize(dst)) == item.size
-        case (_, .remote):
-            ok = Self.existing(destination)?.size == item.size
+        case let (.local(src), .local(dst)): ok = verifyLocalCopy(src: src, dst: dst, size: item.size)
+        case (_, .local(let dst)): ok = (try? FileComparison.fileSize(dst)) == item.size
+        case (_, .remote): ok = Self.existing(destination)?.size == item.size
         }
         if !ok { throw FTPError.verificationFailed("the copy differs from \(item.source.displayPath)") }
+    }
+
+    private func verifyLocalCopy(src: URL, dst: URL, size: Int64) -> Bool {
+        guard Self.exists(src) else { return Self.verifyMissingSourceCopy(dst: dst, size: size) }
+        // A symbolic link is copied as a link: the copy must point where the original points.
+        if let link = try? FileManager.default.destinationOfSymbolicLink(atPath: src.path) {
+            return (try? FileManager.default.destinationOfSymbolicLink(atPath: dst.path)) == link
+        }
+        do {
+            return try FileComparison.fileSize(src) == FileComparison.fileSize(dst) && FileComparison.firstDifference(src, dst) == nil
+        } catch {
+            return false
+        }
+    }
+
+    private static func verifyMissingSourceCopy(dst: URL, size: Int64) -> Bool {
+        exists(dst) && (try? FileComparison.fileSize(dst)) == size
     }
 
     private func deleteSource(_ location: TransferLocation) throws {
@@ -867,34 +927,47 @@ public enum TransferPlanner {
             mask.map { $0.matches(FileEntry(name: name, url: URL(fileURLWithPath: "/" + name), kind: .file)) } ?? true
         }
         for (source, target) in pairs {
-            if !source.isFolder {
-                if keep(source.location.name) {
-                    plan.items.append(TransferItem(source: source.location, destination: target, size: source.size, isFolder: false,
-                                                   modified: source.modified))
-                }
-                continue
-            }
-            if move, mask == nil, case let .local(from) = source.location, case let .local(to) = target,
-               !TransferManager.exists(to), sameVolume(from, to.deletingLastPathComponent()) {
-                plan.items.append(TransferItem(source: source.location, destination: target, size: 0, isFolder: false,
-                                               modified: source.modified, isWholeFolder: true))
-                continue
-            }
-            var (tree, removeLater) = try walkFolderTree(sourceLocation: source.location, target: target, cancel: cancel)
-            if mask != nil {
-                // Only matching files, and only the folders they end up in.
-                tree = tree.filter { $0.isFolder || keep($0.source.name) }
-                let filePaths = tree.filter { !$0.isFolder }.map { $0.destination.displayPath }
-                tree = tree.filter { item in
-                    !item.isFolder || filePaths.contains { $0.hasPrefix(item.destination.displayPath + "/") }
-                }
-            }
-            plan.items += tree
-            plan.foldersToRemove += removeLater.reversed()
+            try appendPlannedPair(source: source, target: target, move: move, mask: mask, keep: keep, cancel: cancel, into: &plan)
         }
         plan.conflicts = try findConflicts(plan.items)
         for i in plan.conflicts { plan.items[i].conflict = true }
         return plan
+    }
+
+    private static func appendPlannedPair(
+        source: Source, target: TransferLocation, move: Bool, mask: FileMask?,
+        keep: (String) -> Bool, cancel: CancelFlag?, into plan: inout Plan
+    ) throws {
+        if !source.isFolder {
+            if keep(source.location.name) {
+                plan.items.append(TransferItem(source: source.location, destination: target, size: source.size, isFolder: false,
+                                               modified: source.modified))
+            }
+            return
+        }
+        if isWholeFolderMove(source: source, target: target, move: move, mask: mask) {
+            plan.items.append(TransferItem(source: source.location, destination: target, size: 0, isFolder: false,
+                                           modified: source.modified, isWholeFolder: true))
+            return
+        }
+        var (tree, removeLater) = try walkFolderTree(sourceLocation: source.location, target: target, cancel: cancel)
+        if mask != nil { tree = filterTree(tree, keep: keep) }
+        plan.items += tree
+        plan.foldersToRemove += removeLater.reversed()
+    }
+
+    private static func isWholeFolderMove(source: Source, target: TransferLocation, move: Bool, mask: FileMask?) -> Bool {
+        guard move, mask == nil, case let .local(from) = source.location, case let .local(to) = target else { return false }
+        return !TransferManager.exists(to) && sameVolume(from, to.deletingLastPathComponent())
+    }
+
+    private static func filterTree(_ tree: [TransferItem], keep: (String) -> Bool) -> [TransferItem] {
+        // Only matching files, and only the folders they end up in.
+        let matching = tree.filter { $0.isFolder || keep($0.source.name) }
+        let filePaths = matching.filter { !$0.isFolder }.map { $0.destination.displayPath }
+        return matching.filter { item in
+            !item.isFolder || filePaths.contains { $0.hasPrefix(item.destination.displayPath + "/") }
+        }
     }
 
     private static func walkFolderTree(
@@ -906,38 +979,60 @@ public enum TransferPlanner {
         var removeLater: [TransferLocation] = [sourceLocation]
         switch sourceLocation {
         case .local(let root):
-            // Walk the real path (e.g. /private/var/… for /var/…) so relative paths are cut correctly.
-            let real = FileSystemLister.realPath(of: root)
-            let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
-            let walker = FileManager.default.enumerator(at: real, includingPropertiesForKeys: keys)
-            let prefix = real.path + "/"
-            while let found = walker?.nextObject() as? URL {
-                if cancel?.isCancelled == true { throw FTPError.cancelled }
-                guard found.path.hasPrefix(prefix) else { continue }
-                let rel = String(found.path.dropFirst(prefix.count))
-                let v = try? found.resourceValues(forKeys: Set(keys))
-                let isDir = v?.isDirectory ?? false
-                let url = root.appendingPathComponent(rel, isDirectory: isDir)
-                tree.append(TransferItem(source: .local(url), destination: target.appending(rel, isDirectory: isDir),
-                                         size: isDir ? 0 : Int64(v?.fileSize ?? 0), isFolder: isDir,
-                                         modified: v?.contentModificationDate))
-                if isDir { removeLater.append(.local(url)) }
-            }
+            try walkLocalTree(root: root, target: target, cancel: cancel, tree: &tree, removeLater: &removeLater)
         case let .remote(session, root):
-            let walked = try session.walk(root, cancel: cancel)
-            for folder in walked.folders {
-                let rel = String(folder.dropFirst(root.count + 1))
-                tree.append(TransferItem(source: .remote(session, folder), destination: target.appending(rel, isDirectory: true),
-                                         size: 0, isFolder: true))
-                removeLater.append(.remote(session, folder))
-            }
-            for file in walked.files {
-                let rel = String(file.path.dropFirst(root.count + 1))
-                tree.append(TransferItem(source: .remote(session, file.path), destination: target.appending(rel),
-                                         size: file.size, isFolder: false, modified: file.modified))
-            }
+            try walkRemoteTree(session: session, root: root, target: target, cancel: cancel, tree: &tree, removeLater: &removeLater)
         }
         return (tree, removeLater)
+    }
+
+    private static func walkLocalTree(
+        root: URL, target: TransferLocation, cancel: CancelFlag?,
+        tree: inout [TransferItem], removeLater: inout [TransferLocation]
+    ) throws {
+        // Walk the real path (e.g. /private/var/… for /var/…) so relative paths are cut correctly.
+        let real = FileSystemLister.realPath(of: root)
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey]
+        let walker = FileManager.default.enumerator(at: real, includingPropertiesForKeys: keys)
+        let prefix = real.path + "/"
+        while let found = walker?.nextObject() as? URL {
+            if cancel?.isCancelled == true { throw FTPError.cancelled }
+            guard found.path.hasPrefix(prefix) else { continue }
+            let item = localTransferItem(found: found, root: root, prefix: prefix, target: target, keys: keys)
+            tree.append(item)
+            if item.isFolder { removeLater.append(item.source) }
+        }
+    }
+
+    private static func localTransferItem(
+        found: URL, root: URL, prefix: String, target: TransferLocation, keys: [URLResourceKey]
+    ) -> TransferItem {
+        let rel = String(found.path.dropFirst(prefix.count))
+        let v = try? found.resourceValues(forKeys: Set(keys))
+        let isDir = v?.isDirectory ?? false
+        let isLink = v?.isSymbolicLink ?? false   // a link is one item of its own (never entered), without data
+        let url = root.appendingPathComponent(rel, isDirectory: isDir)
+        return TransferItem(source: .local(url), destination: target.appending(rel, isDirectory: isDir),
+                            size: isDir || isLink ? 0 : Int64(v?.fileSize ?? 0), isFolder: isDir,
+                            modified: v?.contentModificationDate)
+    }
+
+    private static func walkRemoteTree(
+        session: RemoteSession, root: String, target: TransferLocation, cancel: CancelFlag?,
+        tree: inout [TransferItem], removeLater: inout [TransferLocation]
+    ) throws {
+        let walked = try session.walk(root, cancel: cancel)
+        for folder in walked.folders {
+            let rel = String(folder.dropFirst(root.count + 1))
+            tree.append(TransferItem(source: .remote(session, folder), destination: target.appending(rel, isDirectory: true),
+                                     size: 0, isFolder: true))
+            removeLater.append(.remote(session, folder))
+        }
+        for file in walked.files {
+            let rel = String(file.path.dropFirst(root.count + 1))
+            tree.append(TransferItem(source: .remote(session, file.path), destination: target.appending(rel),
+                                     size: file.size, isFolder: false, modified: file.modified))
+        }
     }
 
     /// Whether two local places are on the same volume (so a move is a rename).
@@ -958,18 +1053,27 @@ public enum TransferPlanner {
         for (i, item) in items.enumerated() where !item.isFolder {
             switch item.destination {
             case .local(let url):
-                let key = url.path.lowercased()
-                if FileManager.default.fileExists(atPath: url.path) || localTargets.contains(key) { result.append(i) }
-                localTargets.insert(key)
+                if hasLocalConflict(url, seen: &localTargets) { result.append(i) }
             case let .remote(session, path):
-                let dir = (path as NSString).deletingLastPathComponent
-                let key = session.id.uuidString + dir
-                if listings[key] == nil {
-                    listings[key] = Set(((try? session.fetch(dir, useCache: false)) ?? []).map(\.name))
-                }
-                if listings[key]!.contains((path as NSString).lastPathComponent) { result.append(i) }
+                if hasRemoteConflict(session: session, path: path, listings: &listings) { result.append(i) }
             }
         }
         return result
+    }
+
+    private static func hasLocalConflict(_ url: URL, seen localTargets: inout Set<String>) -> Bool {
+        let key = url.path.lowercased()
+        let conflict = FileManager.default.fileExists(atPath: url.path) || localTargets.contains(key)
+        localTargets.insert(key)
+        return conflict
+    }
+
+    private static func hasRemoteConflict(session: RemoteSession, path: String, listings: inout [String: Set<String>]) -> Bool {
+        let dir = (path as NSString).deletingLastPathComponent
+        let key = session.id.uuidString + dir
+        if listings[key] == nil {
+            listings[key] = Set(((try? session.fetch(dir, useCache: false)) ?? []).map(\.name))
+        }
+        return listings[key]!.contains((path as NSString).lastPathComponent)
     }
 }

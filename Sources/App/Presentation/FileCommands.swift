@@ -65,26 +65,55 @@ public final class FileCommands {
 
     /// Alt+F5: Pack selected items into an archive in the other panel's directory.
     public func pack() {
-        guard let commander = commander else { return NSSound.beep() }
-        let sourcePanel = commander.activeView
-        guard !sourcePanel.model.isRemote, !sourcePanel.model.isInsideZip else { NSSound.beep(); return }
-        let items = sourcePanel.model.operationTargets
-        guard !items.isEmpty else { NSSound.beep(); return }
-        let targetDir = commander.view(for: commander.model.activeSide.other).model.directory
-        guard !targetDir.isRemoteLocation, ZipArchive.split(targetDir) == nil else { NSSound.beep(); return }
-        let baseName = items.count == 1
-            ? items[0].url.deletingPathExtension().lastPathComponent
-            : sourcePanel.model.directory.lastPathComponent
-        let defaultArchive = targetDir.appendingPathComponent("\(baseName).zip").path
-        guard let answer = prompts.askText(
-            title: "Pack Files",
-            message: "Pack \(Self.describe(items)) to:",
-            defaultValue: defaultArchive,
-            okTitle: "Pack"
-        ) else { return }
-        let archiveURL = URL(fileURLWithPath: answer, isDirectory: false)
-        let sourceDir = sourcePanel.model.directory
+        guard let (sourcePanel, items, targetDir) = validatedPackContext() else { return NSSound.beep() }
+        let defaultArchive = Self.defaultPackArchivePath(items: items, sourceDir: sourcePanel.model.directory, targetDir: targetDir)
+        guard let answer = prompts.askText(title: "Pack Files", message: "Pack \(Self.describe(items)) to:",
+                                           defaultValue: defaultArchive, okTitle: "Pack") else { return }
+        runPackJob(items: items, from: sourcePanel.model.directory, to: URL(fileURLWithPath: answer, isDirectory: false), sourcePanel: sourcePanel)
+    }
 
+    private func validatedPackContext() -> (PanelView, [FileEntry], URL)? {
+        guard let commander = commander else { return nil }
+        let sourcePanel = commander.activeView
+        guard !sourcePanel.model.isRemote, !sourcePanel.model.isInsideZip else { return nil }
+        let items = sourcePanel.model.operationTargets
+        let targetDir = commander.view(for: commander.model.activeSide.other).model.directory
+        guard !items.isEmpty, !targetDir.isRemoteLocation, ZipArchive.split(targetDir) == nil else { return nil }
+        return (sourcePanel, items, targetDir)
+    }
+
+    private static func defaultPackArchivePath(items: [FileEntry], sourceDir: URL, targetDir: URL) -> String {
+        let baseName = items.count == 1 ? items[0].url.deletingPathExtension().lastPathComponent : sourceDir.lastPathComponent
+        return targetDir.appendingPathComponent("\(baseName).zip").path
+    }
+
+    private func runPackJob(items: [FileEntry], from sourceDir: URL, to archiveURL: URL, sourcePanel: PanelView) {
+        var runningProcess: Process?
+        var cancelled = false
+        let (progressWindow, cancelHandler) = makePackProgressWindow(archiveName: archiveURL.lastPathComponent) {
+            cancelled = true
+            runningProcess?.terminate()
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            var packError: Error?
+            do { try ZipArchive.pack(items: items, from: sourceDir, to: archiveURL) { runningProcess = $0 } }
+            catch { packError = error }
+            DispatchQueue.main.async {
+                _ = cancelHandler
+                progressWindow.orderOut(nil)
+                self.finishPackJob(error: packError, cancelled: cancelled, archiveURL: archiveURL, sourcePanel: sourcePanel)
+            }
+        }
+    }
+
+    private func finishPackJob(error: Error?, cancelled: Bool, archiveURL: URL, sourcePanel: PanelView) {
+        if cancelled { try? FileManager.default.removeItem(at: archiveURL); return }
+        if error != nil { NSSound.beep(); return }
+        sourcePanel.model.clearMarks()
+        commander?.reloadPanels()
+    }
+
+    private func makePackProgressWindow(archiveName: String, onCancel: @escaping () -> Void) -> (NSWindow, BlockAction) {
         let progressWindow = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 400, height: 116),
             styleMask: [.titled],
@@ -94,15 +123,13 @@ public final class FileCommands {
         progressWindow.title = AppWindows.title("Pack Files")
         AppWindows.style(progressWindow)
         let content = NSView()
-        let label = NSTextField(labelWithString: "Packing \(archiveURL.lastPathComponent)…")
+        let label = NSTextField(labelWithString: "Packing \(archiveName)…")
         label.font = .systemFont(ofSize: 12, weight: .medium)
         label.lineBreakMode = .byTruncatingMiddle
         let bar = NSProgressIndicator()
         bar.style = .bar
         bar.isIndeterminate = true
         bar.startAnimation(nil)
-        var runningProcess: Process?
-        var cancelled = false
         let cancelBtn = NSButton(title: "Cancel", target: nil, action: nil)
         cancelBtn.bezelStyle = .rounded
         cancelBtn.keyEquivalent = "\u{1b}"
@@ -129,65 +156,35 @@ public final class FileCommands {
         progressWindow.contentView = content
         AppWindows.place(progressWindow)
         progressWindow.makeKeyAndOrderFront(nil)
-
-        let cancelHandler = BlockAction {
-            cancelled = true
-            runningProcess?.terminate()
-        }
+        let cancelHandler = BlockAction(onCancel)
         cancelBtn.target = cancelHandler
         cancelBtn.action = #selector(BlockAction.invoke)
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            var packError: Error?
-            do {
-                try ZipArchive.pack(items: items, from: sourceDir, to: archiveURL) { proc in
-                    runningProcess = proc
-                }
-            } catch {
-                packError = error
-            }
-            DispatchQueue.main.async {
-                _ = cancelHandler
-                progressWindow.orderOut(nil)
-                if cancelled {
-                    try? FileManager.default.removeItem(at: archiveURL)
-                    return
-                }
-                if packError != nil {
-                    NSSound.beep()
-                    return
-                }
-                sourcePanel.model.clearMarks()
-                commander.leftView.model.reload(visibleRows: commander.leftView.visibleRows)
-                commander.rightView.model.reload(visibleRows: commander.rightView.visibleRows)
-                commander.leftView.needsDisplay = true
-                commander.rightView.needsDisplay = true
-            }
-        }
+        return (progressWindow, cancelHandler)
     }
 
     /// Alt+F9: Unpack the archive under the cursor into the other panel's directory.
     public func unpack() {
-        guard let commander = commander else { return NSSound.beep() }
-        let sourcePanel = commander.activeView
-        guard !sourcePanel.model.isRemote, !sourcePanel.model.isInsideZip,
-              let entry = sourcePanel.model.currentEntry, entry.kind == .file else {
-            NSSound.beep()
-            return
-        }
+        guard let commander = commander, let entry = unpackableEntry(in: commander) else { return NSSound.beep() }
         let targetDir = commander.view(for: commander.model.activeSide.other).model.directory
         guard !targetDir.isRemoteLocation, ZipArchive.split(targetDir) == nil else { NSSound.beep(); return }
         guard let answer = prompts.askUnpack(archiveName: entry.name, defaultTarget: targetDir.path) else { return }
-        let destURL = URL(fileURLWithPath: answer.target, isDirectory: true)
+        performUnpack(entry: entry, target: answer.target, overwrite: answer.overwrite, commander: commander)
+    }
+
+    private func performUnpack(entry: FileEntry, target: String, overwrite: Bool, commander: CommanderView) {
         do {
-            try ZipArchive.unpack(archive: entry.url, to: destURL, overwrite: answer.overwrite)
-            commander.leftView.model.reload(visibleRows: commander.leftView.visibleRows)
-            commander.rightView.model.reload(visibleRows: commander.rightView.visibleRows)
-            commander.leftView.needsDisplay = true
-            commander.rightView.needsDisplay = true
+            try ZipArchive.unpack(archive: entry.url, to: URL(fileURLWithPath: target, isDirectory: true), overwrite: overwrite)
+            commander.reloadPanels()
         } catch {
             NSSound.beep()
         }
+    }
+
+    private func unpackableEntry(in commander: CommanderView) -> FileEntry? {
+        let panel = commander.activeView
+        guard !panel.model.isRemote, !panel.model.isInsideZip,
+              let entry = panel.model.currentEntry, entry.kind == .file else { return nil }
+        return entry
     }
 
     /// Files dropped on a panel: 5 Copy (6 Move) of exactly those files into the drop's folder,
@@ -216,21 +213,38 @@ public final class FileCommands {
             return
         }
         if ZipArchive.split(folder) != nil { NSSound.beep(); return }
+        promptAndRunLocalTransfer(items: items, source: source, folder: folder, move: move)
+    }
 
+    private func promptAndRunLocalTransfer(items: [FileEntry], source: PanelView?, folder: URL, move: Bool) {
         let verb = move ? "Move" : "Copy"
-        let defaultTarget = folder.path == "/" ? "/" : folder.path + "/"
-        guard let answer = prompts.askTransfer(Self.question(verb: verb, items: items, target: defaultTarget)) else { return }
-
+        guard let answer = prompts.askTransfer(Self.question(verb: verb, items: items, target: Self.defaultLocalTarget(folder))) else { return }
         let (planned, create, title) = planLocalTransfer(items: items, target: answer.target, base: source?.model.directory ?? folder, move: move, verb: verb)
-        guard !planned.isEmpty else { return }
+        if !planned.isEmpty {
+            runNonEmptyLocalTransfer(planned, items: items, source: source, title: title, create: create, move: move, answer: answer)
+        }
+    }
+
+    private static func defaultLocalTarget(_ folder: URL) -> String {
+        folder.path == "/" ? "/" : folder.path + "/"
+    }
+
+    private func runNonEmptyLocalTransfer(
+        _ planned: [(TransferPlanner.Source, TransferLocation)], items: [FileEntry], source: PanelView?,
+        title: String, create: URL?, move: Bool, answer: TransferAnswer
+    ) {
         source?.model.clearMarks()   // Select → Restore Selection brings them back
+        startPlannedLocalTransfer(planned, items: items, title: title, create: create, move: move, answer: answer)
+    }
+
+    private func startPlannedLocalTransfer(
+        _ planned: [(TransferPlanner.Source, TransferLocation)], items: [FileEntry],
+        title: String, create: URL?, move: Bool, answer: TransferAnswer
+    ) {
         let cancelFlag = CancelFlag()
         let progressWindow = makeBackgroundProgress(
-            enabled: runInBackground && !answer.queue,
-            verb: verb,
-            fromDesc: items.first?.name ?? "",
-            toDesc: create?.path ?? answer.target,
-            cancelFlag: cancelFlag
+            enabled: runInBackground && !answer.queue, verb: move ? "Move" : "Copy",
+            fromDesc: items.first?.name ?? "", toDesc: create?.path ?? answer.target, cancelFlag: cancelFlag
         )
         runPlannedTransfer(planned, title: title, create: create, move: move, answer: answer,
                            progressWindow: progressWindow, cancelFlag: cancelFlag)
@@ -291,8 +305,9 @@ public final class FileCommands {
         var planned: [(TransferPlanner.Source, TransferLocation)] = []
         for (entry, pair) in zip(items, pairs) {
             if let problem = TransferTarget.problem(pair.0, pair.1, move: move) { problems.append(problem); continue }
-            planned.append((TransferPlanner.Source(location: .local(pair.0), isFolder: entry.kind == .directory,
-                                                   size: entry.size ?? 0, modified: entry.modified), .local(pair.1)))
+            // A symbolic link is copied or moved as the link (it has no data), never as what it points to.
+            planned.append((TransferPlanner.Source(location: .local(pair.0), isFolder: entry.kind == .directory && !entry.isSymlink,
+                                                   size: entry.isSymlink ? 0 : entry.size ?? 0, modified: entry.modified), .local(pair.1)))
         }
         if !problems.isEmpty {
             var report = OperationReport()
@@ -312,37 +327,37 @@ public final class FileCommands {
         commander: CommanderView
     ) {
         if move { NSSound.beep(); return }
-        let targetDir: URL
-        if isDrop {
-            targetDir = folder
-        } else {
-            let q = Self.question(verb: "Copy", items: items, target: folder.path)
-            guard let answer = prompts.askTransfer(q) else { return }
-            targetDir = URL(fileURLWithPath: answer.target, isDirectory: true)
-        }
-        guard ZipArchive.split(targetDir) == nil else { NSSound.beep(); return }
+        guard let targetDir = resolveZipExtractTarget(items: items, folder: folder, isDrop: isDrop),
+              ZipArchive.split(targetDir) == nil else { NSSound.beep(); return }
         do {
             try ZipArchive.extractItems(items, to: targetDir, resolveConflict: { [prompts] conflict in
                 prompts.resolveConflict(conflict)
             })
             source?.model.clearMarks()
-            commander.leftView.model.reload(visibleRows: commander.leftView.visibleRows)
-            commander.rightView.model.reload(visibleRows: commander.rightView.visibleRows)
-            commander.leftView.needsDisplay = true
-            commander.rightView.needsDisplay = true
+            reloadBothPanels(in: commander)
         } catch {
             NSSound.beep()
+        }
+    }
+
+    private func resolveZipExtractTarget(items: [FileEntry], folder: URL, isDrop: Bool) -> URL? {
+        if isDrop { return folder }
+        let q = Self.question(verb: "Copy", items: items, target: folder.path)
+        guard let answer = prompts.askTransfer(q) else { return nil }
+        return URL(fileURLWithPath: answer.target, isDirectory: true)
+    }
+
+    private func reloadBothPanels(in commander: CommanderView) {
+        for view in [commander.leftView, commander.rightView] {
+            view.model.reload(visibleRows: view.visibleRows)
+            view.needsDisplay = true
         }
     }
 
     /// Hands a planned copy or move to the queue (the queue window shows it if it takes a while).
     private func enqueue(_ result: Result<TransferPlanner.Plan, Error>, title: String, create: URL?, move: Bool, answer: TransferAnswer,
                          existingProgressWindow: TransferProgressWindowController? = nil, cancelFlag: CancelFlag? = nil) {
-        guard let commander = commander else {
-            existingProgressWindow?.close()
-            return
-        }
-        if cancelFlag?.isCancelled == true {
+        guard let commander = commander, cancelFlag?.isCancelled != true else {
             existingProgressWindow?.close()
             return
         }
@@ -351,24 +366,32 @@ public final class FileCommands {
             existingProgressWindow?.close()
             handlePlanFailure(error, move: move)
         case .success(let plan):
-            guard !plan.items.isEmpty else {
-                existingProgressWindow?.close()
-                commander.showHint("No files match “\(answer.mask)”", duration: 2)
-                return NSSound.beep()
-            }
-            var items = plan.items
-            if let folder = create {
-                items.insert(TransferItem(source: .local(folder), destination: .local(folder), size: 0, isFolder: true), at: 0)
-            }
-            let job = TransferJob(title: title, items: items, isMove: move, sourceFoldersToRemove: move ? plan.foldersToRemove : [])
-            job.verify = answer.verify
-            job.waitsInQueue = answer.queue
-            commander.ftp.startJob(job, synchronously: !runInBackground, existingProgressWindow: existingProgressWindow)
+            enqueuePlan(plan, title: title, create: create, move: move, answer: answer,
+                        commander: commander, existingProgressWindow: existingProgressWindow)
         }
     }
 
+    private func enqueuePlan(
+        _ plan: TransferPlanner.Plan, title: String, create: URL?, move: Bool, answer: TransferAnswer,
+        commander: CommanderView, existingProgressWindow: TransferProgressWindowController?
+    ) {
+        guard !plan.items.isEmpty else {
+            existingProgressWindow?.close()
+            commander.showHint("No files match “\(answer.mask)”", duration: 2)
+            return NSSound.beep()
+        }
+        var items = plan.items
+        if let folder = create {
+            items.insert(TransferItem(source: .local(folder), destination: .local(folder), size: 0, isFolder: true), at: 0)
+        }
+        let job = TransferJob(title: title, items: items, isMove: move, sourceFoldersToRemove: move ? plan.foldersToRemove : [])
+        job.verify = answer.verify
+        job.waitsInQueue = answer.queue
+        commander.ftp.startJob(job, synchronously: !runInBackground, existingProgressWindow: existingProgressWindow)
+    }
+
     private func handlePlanFailure(_ error: Error, move: Bool) {
-        guard !(error is FTPError && (error as? FTPError) == .cancelled) else { return }
+        if let ftpErr = error as? FTPError, ftpErr == .cancelled { return }
         var report = OperationReport()
         report.errors = [error.localizedDescription]
         prompts.showProblems(title: "\(move ? "Move" : "Copy") problems", report: report)
@@ -403,20 +426,19 @@ public final class FileCommands {
         if commander.ftp.delete(prompts: prompts) { return }
         let panel = commander.activeView
         let items = panel.model.operationTargets
-        guard !items.isEmpty else { return NSSound.beep() }
-        if panel.model.isInsideZip { NSSound.beep(); return }
-        let report: OperationReport
-        if permanently {
-            guard prompts.confirm(title: "Delete permanently",
-                                  message: "Permanently delete \(Self.describe(items))?\nThey don't go to the Trash and can't be restored.",
-                                  okTitle: "Delete Permanently") else { return }
-            report = remove(items.map(\.url))
-        } else {
-            guard prompts.confirm(title: "Delete", message: "Move \(Self.describe(items)) to the Trash?",
-                                  okTitle: "Move to Trash") else { return }
-            report = trash(items.map(\.url))
-        }
+        guard !items.isEmpty, !panel.model.isInsideZip else { return NSSound.beep() }
+        guard let report = confirmAndDelete(items: items, permanently: permanently) else { return }
         finish(report, title: "Delete problems", marksFrom: panel)
+    }
+
+    private func confirmAndDelete(items: [FileEntry], permanently: Bool) -> OperationReport? {
+        let title = permanently ? "Delete permanently" : "Delete"
+        let message = permanently
+            ? "Permanently delete \(Self.describe(items))?\nThey don't go to the Trash and can't be restored."
+            : "Move \(Self.describe(items)) to the Trash?"
+        let okTitle = permanently ? "Delete Permanently" : "Move to Trash"
+        guard prompts.confirm(title: title, message: message, okTitle: okTitle) else { return nil }
+        return (permanently ? remove : trash)(items.map(\.url))
     }
 
     // MARK: Shared

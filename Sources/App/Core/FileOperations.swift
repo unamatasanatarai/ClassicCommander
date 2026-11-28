@@ -18,16 +18,23 @@ public enum TransferTarget {
     public static func plan(sources: [URL], target: String, base: URL) -> (pairs: [(URL, URL)], createFolder: URL?) {
         var text = target.trimmingCharacters(in: .whitespaces)
         if text.hasSuffix("*.*") { text.removeLast(3) }
-        let expanded = (text as NSString).expandingTildeInPath
-        let url = expanded.hasPrefix("/") ? URL(fileURLWithPath: expanded) : base.appendingPathComponent(expanded)
-        let dest = url.standardizedFileURL
+        let dest = resolvedDestination(text: text, base: base)
         var isDir: ObjCBool = false
         let exists = FileManager.default.fileExists(atPath: dest.path, isDirectory: &isDir)
-        if (exists && isDir.boolValue) || text.hasSuffix("/") || sources.count > 1 {
-            let create = exists ? nil : dest
-            return (sources.map { ($0, dest.appendingPathComponent($0.lastPathComponent)) }, create)
+        if targetsDirectory(exists: exists, isDir: isDir.boolValue, text: text, sourceCount: sources.count) {
+            return (sources.map { ($0, dest.appendingPathComponent($0.lastPathComponent)) }, exists ? nil : dest)
         }
         return (sources.map { ($0, dest) }, nil)
+    }
+
+    private static func targetsDirectory(exists: Bool, isDir: Bool, text: String, sourceCount: Int) -> Bool {
+        (exists && isDir) || text.hasSuffix("/") || sourceCount > 1
+    }
+
+    private static func resolvedDestination(text: String, base: URL) -> URL {
+        let expanded = (text as NSString).expandingTildeInPath
+        let url = expanded.hasPrefix("/") ? URL(fileURLWithPath: expanded) : base.appendingPathComponent(expanded)
+        return url.standardizedFileURL
     }
 
     /// Why a pair can't be done (copying onto itself or into itself), or nil.
@@ -78,22 +85,33 @@ public struct TransferStats: Equatable {
     /// Counts entries of a panel: local folders are walked; server folders only counted.
     public static func count(_ entries: [FileEntry], mask: FileMask?, cancel: CancelFlag) -> TransferStats {
         var stats = TransferStats()
-        func file(_ name: String, _ size: Int64) {
-            guard mask.map({ $0.matches(FileEntry(name: name, url: URL(fileURLWithPath: "/" + name), kind: .file)) }) ?? true else { return }
-            stats.files += 1
-            stats.bytes = stats.bytes.addingSaturated(size)
-        }
         for entry in entries where !cancel.isCancelled {
-            if entry.kind == .file { file(entry.name, entry.size ?? 0); continue }
-            stats.folders += 1
-            guard entry.url.isFileURL else { stats.complete = false; continue }
-            let walker = FileManager.default.enumerator(at: entry.url, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey])
-            while let url = walker?.nextObject() as? URL, !cancel.isCancelled {
-                let v = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
-                if v?.isDirectory == true { stats.folders += 1 } else { file(url.lastPathComponent, Int64(v?.fileSize ?? 0)) }
+            if entry.kind == .file || entry.isSymlink {
+                addFile(entry.name, size: entry.isSymlink ? 0 : entry.size ?? 0, mask: mask, into: &stats)
+            } else {
+                countFolder(entry.url, mask: mask, cancel: cancel, into: &stats)
             }
         }
         return stats
+    }
+
+    private static func addFile(_ name: String, size: Int64, mask: FileMask?, into stats: inout TransferStats) {
+        if let mask = mask, !mask.matches(FileEntry(name: name, url: URL(fileURLWithPath: "/" + name), kind: .file)) {
+            return
+        }
+        stats.files += 1
+        stats.bytes = stats.bytes.addingSaturated(size)
+    }
+
+    private static func countFolder(_ folder: URL, mask: FileMask?, cancel: CancelFlag, into stats: inout TransferStats) {
+        stats.folders += 1
+        guard folder.isFileURL else { stats.complete = false; return }
+        let walker = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey])
+        while let url = walker?.nextObject() as? URL, !cancel.isCancelled {
+            let v = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey])
+            if v?.isDirectory == true { stats.folders += 1 }
+            else { addFile(url.lastPathComponent, size: v?.isSymbolicLink == true ? 0 : Int64(v?.fileSize ?? 0), mask: mask, into: &stats) }
+        }
     }
 }
 

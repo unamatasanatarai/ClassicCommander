@@ -32,57 +32,76 @@ enum Modal {
     /// left-aligned 48×48 icon + 17pt title/13pt subtitle header, optional detail panel or
     /// error list or input field, and right-aligned buttons (36pt tall, primary/danger accented).
     static func dialogWindow(for alert: NSAlert, onButton: @escaping (NSApplication.ModalResponse) -> Void) -> NSWindow {
-        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        let surfaceColor = isDark
-            ? NSColor(srgbRed: 36/255, green: 36/255, blue: 38/255, alpha: 1)
-            : NSColor(srgbRed: 244/255, green: 244/255, blue: 244/255, alpha: 1)
-        let panelColor = isDark
-            ? NSColor(srgbRed: 48/255, green: 48/255, blue: 52/255, alpha: 1)
-            : NSColor(srgbRed: 233/255, green: 233/255, blue: 233/255, alpha: 1)
-
+        let (surfaceColor, panelColor) = dialogSurfaceColors()
         let parsed = parseAlertBody(alert.informativeText)
-        let isWide = !parsed.kvPairs.isEmpty || !parsed.bullets.isEmpty || (alert.accessoryView?.frame.width ?? 0) > 400
-        let winWidth: CGFloat = isWide ? 460 : 440
-
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: winWidth, height: 150),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        win.title = AppWindows.title(alert.messageText.isEmpty ? "Alert" : alert.messageText)
-        win.backgroundColor = surfaceColor
-        win.isReleasedWhenClosed = false
+        let winWidth = dialogWindowWidth(hasDetails: !parsed.kvPairs.isEmpty || !parsed.bullets.isEmpty,
+                                         accessoryView: alert.accessoryView)
+        let win = makeBaseDialogWindow(title: alert.messageText, width: winWidth, surfaceColor: surfaceColor)
 
         let headerRow = makeDialogHeader(alert: alert, subtitle: parsed.subtitle)
-
         let margin: CGFloat = 20
-        let contentWidth = winWidth - margin * 2
         let (bodyViews, firstInput) = makeDialogBodyViews(
-            headerRow: headerRow,
-            kvPairs: parsed.kvPairs,
-            bullets: parsed.bullets,
-            remaining: parsed.remaining,
-            accessoryView: alert.accessoryView,
-            panelColor: panelColor,
-            contentWidth: contentWidth
+            headerRow: headerRow, kvPairs: parsed.kvPairs, bullets: parsed.bullets,
+            remaining: parsed.remaining, accessoryView: alert.accessoryView,
+            panelColor: panelColor, contentWidth: winWidth - margin * 2
         )
-        var allViews = bodyViews
-
         let handler = AlertButtonHandler(onButton: onButton)
-        let createdButtons = makeDialogButtons(for: alert, handler: handler)
-        let visualButtons = Array(createdButtons.reversed())
+        let visualButtons = Array(makeDialogButtons(for: alert, handler: handler).reversed())
         let buttonRow = NSStackView(views: [NSView()] + visualButtons)
         buttonRow.spacing = 12
-        allViews.append(buttonRow)
+        let stack = makeDialogStack(views: bodyViews + [buttonRow], margin: margin)
+        win.contentView = makeDialogRootView(
+            stack: stack, handler: handler, winWidth: winWidth, margin: margin,
+            headerRow: headerRow, buttonRow: buttonRow, accessoryView: alert.accessoryView
+        )
+        configureDialogFocus(firstInput: firstInput, buttons: visualButtons, in: win)
+        return win
+    }
 
-        let stack = NSStackView(views: allViews)
+    private static func dialogWindowWidth(hasDetails: Bool, accessoryView: NSView?) -> CGFloat {
+        let isWide = hasDetails || (accessoryView?.frame.width ?? 0) > 400
+        return isWide ? 460 : 440
+    }
+
+    private static func configureDialogFocus(firstInput: NSView?, buttons: [NSButton], in win: NSWindow) {
+        let inputs = firstInput.map { [$0] } ?? []
+        AppWindows.setTabOrder(inputs + buttons, in: win)
+        if let input = firstInput { win.initialFirstResponder = input }
+        AppWindows.styleButtons(in: win)
+    }
+
+    private static func makeBaseDialogWindow(title: String, width: CGFloat, surfaceColor: NSColor) -> NSWindow {
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 150),
+                           styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        win.title = AppWindows.title(title.isEmpty ? "Alert" : title)
+        win.backgroundColor = surfaceColor
+        win.isReleasedWhenClosed = false
+        return win
+    }
+
+    private static func makeDialogStack(views: [NSView], margin: CGFloat) -> NSStackView {
+        let stack = NSStackView(views: views)
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 16
         stack.edgeInsets = NSEdgeInsets(top: margin, left: margin, bottom: margin, right: margin)
         stack.translatesAutoresizingMaskIntoConstraints = false
+        return stack
+    }
 
+    private static func dialogSurfaceColors() -> (surface: NSColor, panel: NSColor) {
+        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        return isDark
+            ? (NSColor(srgbRed: 36 / 255, green: 36 / 255, blue: 38 / 255, alpha: 1),
+               NSColor(srgbRed: 48 / 255, green: 48 / 255, blue: 52 / 255, alpha: 1))
+            : (NSColor(srgbRed: 244 / 255, green: 244 / 255, blue: 244 / 255, alpha: 1),
+               NSColor(srgbRed: 233 / 255, green: 233 / 255, blue: 233 / 255, alpha: 1))
+    }
+
+    private static func makeDialogRootView(
+        stack: NSStackView, handler: AlertButtonHandler, winWidth: CGFloat, margin: CGFloat,
+        headerRow: NSView, buttonRow: NSView, accessoryView: NSView?
+    ) -> NSView {
         let root = AlertContainerView()
         root.handler = handler
         root.addSubview(stack)
@@ -95,15 +114,10 @@ enum Modal {
             headerRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -margin * 2),
             buttonRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -margin * 2),
         ])
-        if let acc = alert.accessoryView {
+        if let acc = accessoryView {
             acc.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -margin * 2).isActive = true
         }
-        win.contentView = root
-        let tabViews: [NSView] = (firstInput.map { [$0] } ?? []) + visualButtons
-        AppWindows.setTabOrder(tabViews, in: win)
-        if let input = firstInput { win.initialFirstResponder = input }
-        AppWindows.styleButtons(in: win)
-        return win
+        return root
     }
 
     private static func makeDialogBodyViews(
@@ -123,21 +137,26 @@ enum Modal {
             bodyViews.append(makeErrorListPanel(items: bullets, background: panelColor, width: contentWidth))
         }
         if !remaining.isEmpty {
-            let bodyLabel = NSTextField(wrappingLabelWithString: remaining.joined(separator: "\n"))
-            bodyLabel.font = .systemFont(ofSize: 14)
-            bodyLabel.isSelectable = false
-            bodyLabel.preferredMaxLayoutWidth = contentWidth
-            bodyViews.append(bodyLabel)
+            bodyViews.append(makeRemainingBodyLabel(remaining, contentWidth: contentWidth))
         }
-        var firstInput: NSView?
-        if let acc = accessoryView {
-            let h = acc.frame.height
-            acc.translatesAutoresizingMaskIntoConstraints = false
-            if h > 0 { acc.heightAnchor.constraint(equalToConstant: h).isActive = true }
-            bodyViews.append(acc)
-            firstInput = (acc as? NSTextField) ?? acc.subviews.first { $0 is NSTextField }
-        }
+        let firstInput = accessoryView.map { prepareAccessoryView($0, into: &bodyViews) } ?? nil
         return (bodyViews, firstInput)
+    }
+
+    private static func makeRemainingBodyLabel(_ remaining: [String], contentWidth: CGFloat) -> NSTextField {
+        let bodyLabel = NSTextField(wrappingLabelWithString: remaining.joined(separator: "\n"))
+        bodyLabel.font = .systemFont(ofSize: 14)
+        bodyLabel.isSelectable = false
+        bodyLabel.preferredMaxLayoutWidth = contentWidth
+        return bodyLabel
+    }
+
+    private static func prepareAccessoryView(_ acc: NSView, into bodyViews: inout [NSView]) -> NSView? {
+        let h = acc.frame.height
+        acc.translatesAutoresizingMaskIntoConstraints = false
+        if h > 0 { acc.heightAnchor.constraint(equalToConstant: h).isActive = true }
+        bodyViews.append(acc)
+        return (acc as? NSTextField) ?? acc.subviews.first { $0 is NSTextField }
     }
 
     private static func makeDialogHeader(alert: NSAlert, subtitle: String?) -> NSStackView {
@@ -181,29 +200,27 @@ enum Modal {
         remaining: [String]
     ) {
         let infoLines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        let hasKV = infoLines.contains { $0.contains(": ") && !$0.hasPrefix("•") }
-        let hasBullets = infoLines.contains { $0.hasPrefix("• ") }
-
-        var subtitle: String?
-        var kvPairs: [(String, String)] = []
-        var bulletItems: [String] = []
-        var remaining: [String] = []
-
-        if hasBullets {
-            for line in infoLines {
-                if line.hasPrefix("• ") {
-                    bulletItems.append(String(line.dropFirst(2)))
-                } else if !line.isEmpty {
-                    remaining.append(line)
-                }
-            }
-            if !remaining.isEmpty { subtitle = remaining.removeFirst() }
-        } else if hasKV {
-            (subtitle, kvPairs, remaining) = parseKVBody(infoLines)
-        } else if !text.isEmpty {
-            subtitle = text
+        if infoLines.contains(where: { $0.hasPrefix("• ") }) {
+            return parseBulletBody(infoLines)
         }
-        return (subtitle, kvPairs, bulletItems, remaining)
+        if infoLines.contains(where: { $0.contains(": ") && !$0.hasPrefix("•") }) {
+            let (subtitle, kvPairs, remaining) = parseKVBody(infoLines)
+            return (subtitle, kvPairs, [], remaining)
+        }
+        return (text.isEmpty ? nil : text, [], [], [])
+    }
+
+    private static func parseBulletBody(_ infoLines: [String]) -> (
+        subtitle: String?, kvPairs: [(String, String)], bullets: [String], remaining: [String]
+    ) {
+        var bullets: [String] = []
+        var remaining: [String] = []
+        for line in infoLines {
+            if line.hasPrefix("• ") { bullets.append(String(line.dropFirst(2))) }
+            else if !line.isEmpty { remaining.append(line) }
+        }
+        let subtitle = remaining.isEmpty ? nil : remaining.removeFirst()
+        return (subtitle, [], bullets, remaining)
     }
 
     private static func parseKVBody(_ infoLines: [String]) -> (String?, [(String, String)], [String]) {
@@ -216,33 +233,43 @@ enum Modal {
             idx = 1
         }
         for line in infoLines.dropFirst(idx) where !line.isEmpty {
-            if let colon = line.range(of: ": "), kvPairs.isEmpty || !line.hasSuffix("?") && !line.hasPrefix("Only ") {
-                let k = String(line[..<colon.lowerBound])
-                let v = String(line[colon.upperBound...])
-                if k.count <= 16 && !k.contains(".") {
-                    kvPairs.append((k, v))
-                    continue
-                }
+            if let pair = splitKVPair(line, allowAll: kvPairs.isEmpty) {
+                kvPairs.append(pair)
+            } else {
+                remaining.append(line)
             }
-            remaining.append(line)
         }
         return (subtitle, kvPairs, remaining)
     }
 
+    private static func splitKVPair(_ line: String, allowAll: Bool) -> (String, String)? {
+        guard let colon = line.range(of: ": "), isKVLineAllowed(line, allowAll: allowAll) else { return nil }
+        let key = String(line[..<colon.lowerBound])
+        guard key.count <= 16 && !key.contains(".") else { return nil }
+        return (key, String(line[colon.upperBound...]))
+    }
+
+    private static func isKVLineAllowed(_ line: String, allowAll: Bool) -> Bool {
+        allowAll || (!line.hasSuffix("?") && !line.hasPrefix("Only "))
+    }
+
     private static func makeDialogButtons(for alert: NSAlert, handler: AlertButtonHandler) -> [NSButton] {
         let titles = alert.buttons.isEmpty ? ["OK"] : alert.buttons.map(\.title)
-        return titles.enumerated().map { i, title in
-            let b = NSButton(title: title, target: handler, action: #selector(AlertButtonHandler.pressed(_:)))
-            b.tag = Int(NSApplication.ModalResponse.alertFirstButtonReturn.rawValue) + i
-            b.bezelStyle = .rounded
-            b.widthAnchor.constraint(greaterThanOrEqualToConstant: AppWindows.Layout.buttonMinWidth).isActive = true
-            if i == 0 {
-                b.keyEquivalent = "\r"
-                b.bezelColor = alert.alertStyle == .critical ? AppWindows.danger : AppWindows.accent
-            }
-            if i > 0 && title == "Cancel" { b.keyEquivalent = "\u{1b}" }
-            return b
+        return titles.enumerated().map { makeDialogButton(at: $0.offset, title: $0.element, alert: alert, handler: handler) }
+    }
+
+    private static func makeDialogButton(at i: Int, title: String, alert: NSAlert, handler: AlertButtonHandler) -> NSButton {
+        let b = NSButton(title: title, target: handler, action: #selector(AlertButtonHandler.pressed(_:)))
+        b.tag = Int(NSApplication.ModalResponse.alertFirstButtonReturn.rawValue) + i
+        b.bezelStyle = .rounded
+        b.widthAnchor.constraint(greaterThanOrEqualToConstant: AppWindows.Layout.buttonMinWidth).isActive = true
+        if i == 0 {
+            b.keyEquivalent = "\r"
+            b.bezelColor = alert.alertStyle == .critical ? AppWindows.danger : AppWindows.accent
+        } else if title == "Cancel" {
+            b.keyEquivalent = "\u{1b}"
         }
+        return b
     }
 
     private static func makeDetailPanel(pairs: [(String, String)], background: NSColor, width: CGFloat) -> NSView {
@@ -401,52 +428,39 @@ enum Modal {
         AppWindows.styleButtons(in: alert.window)
         let name = alert.window.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) ?? .aqua
         for button in alert.buttons { button.appearance = NSAppearance(named: name) }
+        if let content = alert.window.contentView { deselectLabels(in: content) }
+        configureAlertTabOrder(for: alert)
+    }
 
-        // Disable text selection on static label text fields inside the alert window
-        // to prevent unwanted selection highlights when opening.
-        func deselectLabels(in view: NSView) {
-            if let tf = view as? NSTextField, !tf.isEditable {
-                tf.isSelectable = false
-            }
-            view.subviews.forEach(deselectLabels(in:))
-        }
-        if let content = alert.window.contentView {
-            deselectLabels(in: content)
-        }
-
-        // Configure visual tab navigation order
+    private static func configureAlertTabOrder(for alert: NSAlert) {
         var tabViews: [NSView] = []
-        if let acc = alert.accessoryView {
-            var accControls: [NSView] = []
-            func findControls(in v: NSView) {
-                if (v is NSControl) || v.canBecomeKeyView {
-                    accControls.append(v)
-                } else {
-                    v.subviews.forEach(findControls(in:))
-                }
-            }
-            findControls(in: acc)
-            tabViews.append(contentsOf: accControls)
-        }
-
-        // Sort buttons by visual reading order:
-        // If vertical layout (different Y positions): top-to-bottom (descending Y)
-        // If horizontal layout: left-to-right (ascending X)
-        let sortedButtons = alert.buttons.sorted { b1, b2 in
-            let f1 = b1.convert(b1.bounds, to: nil)
-            let f2 = b2.convert(b2.bounds, to: nil)
-            if abs(f1.origin.y - f2.origin.y) > 5 {
-                return f1.origin.y > f2.origin.y
-            }
-            return f1.origin.x < f2.origin.x
-        }
-        tabViews.append(contentsOf: sortedButtons)
-
+        if let acc = alert.accessoryView { findControls(in: acc, into: &tabViews) }
+        tabViews.append(contentsOf: sortedAlertButtons(for: alert))
         if !tabViews.isEmpty {
             AppWindows.setTabOrder(tabViews, in: alert.window)
-            if let first = tabViews.first {
-                alert.window.initialFirstResponder = first
-            }
+            alert.window.initialFirstResponder = tabViews.first
+        }
+    }
+
+    private static func deselectLabels(in view: NSView) {
+        if let tf = view as? NSTextField, !tf.isEditable { tf.isSelectable = false }
+        for subview in view.subviews { deselectLabels(in: subview) }
+    }
+
+    private static func findControls(in view: NSView, into result: inout [NSView]) {
+        if (view is NSControl) || view.canBecomeKeyView {
+            result.append(view)
+        } else {
+            for subview in view.subviews { findControls(in: subview, into: &result) }
+        }
+    }
+
+    private static func sortedAlertButtons(for alert: NSAlert) -> [NSButton] {
+        alert.buttons.sorted { b1, b2 in
+            let f1 = b1.convert(b1.bounds, to: nil)
+            let f2 = b2.convert(b2.bounds, to: nil)
+            if abs(f1.origin.y - f2.origin.y) > 5 { return f1.origin.y > f2.origin.y }
+            return f1.origin.x < f2.origin.x
         }
     }
 
@@ -518,15 +532,27 @@ enum Modal {
     /// Starts an app (the terminal for "Open terminal here"); `failed` gets launch errors.
     static func launch(_ launch: TerminalLauncher.Launch, failed: @escaping (Error) -> Void) {
         if let launched = launched { launched(launch); return }
+        performWorkspaceLaunch(launch, result: LaunchResult(failed: failed))
+    }
+
+    static func performWorkspaceLaunch(
+        _ launch: TerminalLauncher.Launch,
+        result: LaunchResult,
+        openFolder: ([URL], URL, NSWorkspace.OpenConfiguration, @escaping (NSRunningApplication?, Error?) -> Void) -> Void = { urls, app, cfg, cb in
+            NSWorkspace.shared.open(urls, withApplicationAt: app, configuration: cfg, completionHandler: cb)
+        },
+        openApp: (URL, NSWorkspace.OpenConfiguration, @escaping (NSRunningApplication?, Error?) -> Void) -> Void = { app, cfg, cb in
+            NSWorkspace.shared.openApplication(at: app, configuration: cfg, completionHandler: cb)
+        }
+    ) {
         let config = NSWorkspace.OpenConfiguration()
-        let result = LaunchResult(failed: failed)
         switch launch {
         case let .openFolder(app, folder):
-            NSWorkspace.shared.open([folder], withApplicationAt: app, configuration: config, completionHandler: result.finished)
+            openFolder([folder], app, config, result.finished)
         case let .run(app, arguments):
             config.arguments = arguments
             config.createsNewApplicationInstance = true
-            NSWorkspace.shared.openApplication(at: app, configuration: config, completionHandler: result.finished)
+            openApp(app, config, result.finished)
         }
     }
 

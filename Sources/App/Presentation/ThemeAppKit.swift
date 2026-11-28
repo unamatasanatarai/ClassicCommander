@@ -79,24 +79,30 @@ final class IconProvider {
     }
 
     func icon(for entry: FileEntry, tint: NSColor) -> NSImage {
-        switch entry.kind {
-        case .parent:
-            return parentIcon(tint: tint)
-        case .directory:
-            let key = entry.url.path as NSString
-            if let cached = byPath.object(forKey: key) { return cached }
-            let exists = FileManager.default.fileExists(atPath: entry.url.path)
-            let image = exists ? NSWorkspace.shared.icon(forFile: entry.url.path) : NSWorkspace.shared.icon(for: .folder)
-            byPath.setObject(image, forKey: key)
-            return image
-        case .file:
-            let ext = (entry.name as NSString).pathExtension.lowercased()
-            if let cached = byExtension[ext] { return cached }
-            let type = UTType(filenameExtension: ext) ?? .data
-            let image = NSWorkspace.shared.icon(for: ext.isEmpty ? .data : type)
-            byExtension[ext] = image
-            return image
-        }
+        if entry.kind == .parent { return parentIcon(tint: tint) }
+        return entry.kind == .directory ? directoryIcon(for: entry.url) : fileIcon(for: entry.name)
+    }
+
+    private func directoryIcon(for url: URL) -> NSImage {
+        let key = url.path as NSString
+        if let cached = byPath.object(forKey: key) { return cached }
+        let exists = FileManager.default.fileExists(atPath: url.path)
+        let image = exists ? NSWorkspace.shared.icon(forFile: url.path) : NSWorkspace.shared.icon(for: .folder)
+        byPath.setObject(image, forKey: key)
+        return image
+    }
+
+    private func fileIcon(for name: String) -> NSImage {
+        let ext = (name as NSString).pathExtension.lowercased()
+        if let cached = byExtension[ext] { return cached }
+        let image = resolveFileIcon(forExtension: ext)
+        byExtension[ext] = image
+        return image
+    }
+
+    private func resolveFileIcon(forExtension ext: String) -> NSImage {
+        let type = ext.isEmpty ? .data : (UTType(filenameExtension: ext) ?? .data)
+        return NSWorkspace.shared.icon(for: type)
     }
 
     /// The up-arrow shown on the ".." row, drawn in the row's text colour.

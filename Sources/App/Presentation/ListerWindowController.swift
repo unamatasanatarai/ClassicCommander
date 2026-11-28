@@ -198,13 +198,17 @@ public final class ListerWindowController: NSWindowController, NSWindowDelegate,
 
     private func updateStatus() {
         let size = hexReader?.size ?? Int64(sample.count)
-        var parts = ["\(url.lastPathComponent)", "\(EntryFormatter.shared.grouped(size)) bytes", mode.title]
-        if mode == .text { parts[2] += " · \(shownEncoding.title)" }
+        let modeText = mode == .text ? "\(mode.title) · \(shownEncoding.title)" : mode.title
+        statusLabel.stringValue = statusParts(size: size, modeText: modeText).joined(separator: "   ·   ")
+    }
+
+    private func statusParts(size: Int64, modeText: String) -> [String] {
+        var parts = [url.lastPathComponent, "\(EntryFormatter.shared.grouped(size)) bytes", modeText]
         if truncated && (mode == .text || mode == .binary) {
             parts.append("first \(EntryFormatter.shared.compact(Int64(ListerContent.textLimit))) shown (Hex shows all)")
         }
         if files.count > 1 { parts.append("file \(index + 1) of \(files.count)  (n / p)") }
-        statusLabel.stringValue = parts.joined(separator: "   ·   ")
+        return parts
     }
 
     @objc private func modeClicked() {
@@ -256,29 +260,37 @@ public final class ListerWindowController: NSWindowController, NSWindowDelegate,
     /// Handles Lister's single-key commands; returns false for keys it does not use.
     func handleKey(_ event: NSEvent) -> Bool {
         let mods = event.modifierFlags.intersection([.command, .control, .option])
-        if event.keyCode == KeyCode.escape && mods.isEmpty { window?.performClose(nil); return true }
-        if event.keyCode == KeyCode.f7 && mods.isEmpty { showFind(); return true }
         guard mods.isEmpty else { return false }
-        if event.characters == "G" { scrollToBottom(); return true }
+        if handleSpecialKey(event) { return true }
         guard let ch = event.charactersIgnoringModifiers?.lowercased() else { return false }
-        if let raw = Int(ch), (1...4).contains(raw), let targetMode = ListerMode(rawValue: raw) {
-            show(mode: targetMode)
-            return true
-        }
+        if let targetMode = Self.modeForKey(ch) { show(mode: targetMode); return true }
         return handleLetterKey(ch)
     }
 
+    private func handleSpecialKey(_ event: NSEvent) -> Bool {
+        if event.keyCode == KeyCode.escape { window?.performClose(nil); return true }
+        if event.keyCode == KeyCode.f7 { showFind(); return true }
+        if event.characters == "G" { scrollToBottom(); return true }
+        return false
+    }
+
+    private static func modeForKey(_ ch: String) -> ListerMode? {
+        guard let raw = Int(ch), (1...4).contains(raw) else { return nil }
+        return ListerMode(rawValue: raw)
+    }
+
     private func handleLetterKey(_ ch: String) -> Bool {
-        switch ch {
-        case "n": step(1)
-        case "p": step(-1)
-        case "w": if mode == .text { setWrap(!wrap) }
-        case "q": window?.performClose(nil)
-        case "7": showFind()
-        case "d": scrollHalfPage(down: true)
-        case "u": scrollHalfPage(down: false)
-        default: return false
-        }
+        let handlers: [String: () -> Void] = [
+            "n": { self.step(1) },
+            "p": { self.step(-1) },
+            "w": { if self.mode == .text { self.setWrap(!self.wrap) } },
+            "q": { self.window?.performClose(nil) },
+            "7": { self.showFind() },
+            "d": { self.scrollHalfPage(down: true) },
+            "u": { self.scrollHalfPage(down: false) },
+        ]
+        guard let action = handlers[ch] else { return false }
+        action()
         return true
     }
 

@@ -55,15 +55,14 @@ public enum ContentCharset: String, Codable, CaseIterable {
 
     static var language: String { Locale.current.languageCode ?? "en" }
 
-    static var ansiCodePage: UInt32 {
-        switch language {
-        case "pl", "cs", "sk", "hu", "sl", "hr", "ro", "sq", "bs": return 1250
-        case "ru", "uk", "bg", "sr", "be", "mk": return 1251
-        case "el": return 1253
-        case "tr": return 1254
-        default: return 1252
-        }
-    }
+    private static let languageCodePages: [String: UInt32] = [
+        "pl": 1250, "cs": 1250, "sk": 1250, "hu": 1250, "sl": 1250, "hr": 1250, "ro": 1250, "sq": 1250, "bs": 1250,
+        "ru": 1251, "uk": 1251, "bg": 1251, "sr": 1251, "be": 1251, "mk": 1251,
+        "el": 1253,
+        "tr": 1254,
+    ]
+
+    static var ansiCodePage: UInt32 { languageCodePages[language] ?? 1252 }
 
     static var ansiName: String { "Windows-\(ansiCodePage)" }
 
@@ -87,18 +86,20 @@ public enum ContentCharset: String, Codable, CaseIterable {
         "CP866": .dosRussian,
     ]
 
+    private static let fixedStringEncodings: [ContentCharset: String.Encoding] = [
+        .utf16: .utf16LittleEndian,
+        .utf8: .utf8,
+    ]
+
     /// The String.Encoding used to decode bytes; nil for Office xml, which is unpacked instead.
     public var stringEncoding: String.Encoding? {
-        switch self {
-        case .ansi:
-            return Self.ansiEncodings[Self.ansiCodePage] ?? .windowsCP1252
-        case .ascii:
+        if let fixed = Self.fixedStringEncodings[self] { return fixed }
+        if self == .ansi { return Self.ansiEncodings[Self.ansiCodePage] ?? .windowsCP1252 }
+        if self == .ascii {
             let cfEncoding = Self.dosEncodings[Self.dosName] ?? .dosLatinUS
             return String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(cfEncoding.rawValue)))
-        case .utf16: return .utf16LittleEndian
-        case .utf8: return .utf8
-        case .officeXML: return nil
         }
+        return nil
     }
 }
 
@@ -118,14 +119,17 @@ public struct ContentSearchConfiguration: Codable, Equatable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
-        expression = try c.decodeIfPresent(String.self, forKey: .expression) ?? ""
-        caseSensitive = try c.decodeIfPresent(Bool.self, forKey: .caseSensitive) ?? false
-        wholeWordsOnly = try c.decodeIfPresent(Bool.self, forKey: .wholeWordsOnly) ?? false
-        useRegex = try c.decodeIfPresent(Bool.self, forKey: .useRegex) ?? false
-        hexadecimal = try c.decodeIfPresent(Bool.self, forKey: .hexadecimal) ?? false
-        invertMatch = try c.decodeIfPresent(Bool.self, forKey: .invertMatch) ?? false
-        charsets = (try? c.decodeIfPresent([ContentCharset].self, forKey: .charsets)).flatMap { $0 } ?? [.ansi, .utf8]
+        func opt<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T {
+            (try? c.decodeIfPresent(T.self, forKey: key)) ?? fallback
+        }
+        enabled = opt(.enabled, false)
+        expression = opt(.expression, "")
+        caseSensitive = opt(.caseSensitive, false)
+        wholeWordsOnly = opt(.wholeWordsOnly, false)
+        useRegex = opt(.useRegex, false)
+        hexadecimal = opt(.hexadecimal, false)
+        invertMatch = opt(.invertMatch, false)
+        charsets = opt(.charsets, [.ansi, .utf8])
     }
 }
 
@@ -156,15 +160,17 @@ public struct AgeFilter: Codable, Equatable {
 public enum ComparisonOperator: String, Codable, CaseIterable {
     case equal = "=", notEqual = "<>", less = "<", greater = ">", lessOrEqual = "<=", greaterOrEqual = ">="
 
+    private static let comparators: [ComparisonOperator: (Int64, Int64) -> Bool] = [
+        .equal: (==),
+        .notEqual: (!=),
+        .less: (<),
+        .greater: (>),
+        .lessOrEqual: (<=),
+        .greaterOrEqual: (>=),
+    ]
+
     func compare(_ a: Int64, _ b: Int64) -> Bool {
-        switch self {
-        case .equal: return a == b
-        case .notEqual: return a != b
-        case .less: return a < b
-        case .greater: return a > b
-        case .lessOrEqual: return a <= b
-        case .greaterOrEqual: return a >= b
-        }
+        Self.comparators[self]?(a, b) ?? false
     }
 }
 
@@ -208,30 +214,30 @@ public struct SizeFilter: Codable, Equatable {
 public enum FileAttribute: String, Codable, CaseIterable {
     case archive, hidden, system, readOnly, directory, compressed, encrypted
 
-    public var label: String {
-        switch self {
-        case .archive: return "Archive"
-        case .hidden: return "Hidden"
-        case .system: return "System"
-        case .readOnly: return "Read only"
-        case .directory: return "Directory"
-        case .compressed: return "Compressed"
-        case .encrypted: return "Encrypted"
-        }
-    }
+    private static let labels: [FileAttribute: String] = [
+        .archive: "Archive",
+        .hidden: "Hidden",
+        .system: "System",
+        .readOnly: "Read only",
+        .directory: "Directory",
+        .compressed: "Compressed",
+        .encrypted: "Encrypted",
+    ]
+
+    private static let meanings: [FileAttribute: String] = [
+        .archive: "The \"archived\" file flag (SF_ARCHIVED).",
+        .hidden: "Name starts with a dot, or the hidden flag is set (chflags hidden).",
+        .system: "Owned by root, or protected by the system (restricted/immutable flags).",
+        .readOnly: "The owner may not write it, or it is locked (chflags uchg).",
+        .directory: "A folder.",
+        .compressed: "Stored compressed by the file system (UF_COMPRESSED).",
+        .encrypted: "Not available on macOS: encryption is per volume (FileVault), not per file.",
+    ]
+
+    public var label: String { Self.labels[self] ?? "" }
 
     /// What the attribute means on macOS (shown as a tooltip).
-    public var macMeaning: String {
-        switch self {
-        case .archive: return "The \"archived\" file flag (SF_ARCHIVED)."
-        case .hidden: return "Name starts with a dot, or the hidden flag is set (chflags hidden)."
-        case .system: return "Owned by root, or protected by the system (restricted/immutable flags)."
-        case .readOnly: return "The owner may not write it, or it is locked (chflags uchg)."
-        case .directory: return "A folder."
-        case .compressed: return "Stored compressed by the file system (UF_COMPRESSED)."
-        case .encrypted: return "Not available on macOS: encryption is per volume (FileVault), not per file."
-        }
-    }
+    public var macMeaning: String { Self.meanings[self] ?? "" }
 
     /// Encrypted has no per-file meaning on macOS and cannot be used.
     public var isAvailable: Bool { self != .encrypted }

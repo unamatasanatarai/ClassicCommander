@@ -120,12 +120,20 @@ public struct SyncShowFilter: Equatable {
     public func shows(_ row: SyncRow) -> Bool {
         if row.onBothSides && !duplicates { return false }
         if !row.onBothSides && !singles { return false }
-        switch row.action {
+        return showsAction(row.action, state: row.state)
+    }
+
+    private func showsAction(_ action: SyncAction, state: SyncState) -> Bool {
+        switch action {
         case .copyToRight: return copyRight
         case .copyToLeft: return copyLeft
         case .deleteRight, .deleteLeft: return copyRight || copyLeft
-        case .none: return row.state == .identical ? equal : different
+        case .none: return showsUnchangedOrDifferent(state)
         }
+    }
+
+    private func showsUnchangedOrDifferent(_ state: SyncState) -> Bool {
+        state == .identical ? equal : different
     }
 }
 
@@ -158,27 +166,41 @@ public enum SyncEngine {
         let prefix = real.path.hasSuffix("/") ? real.path : real.path + "/"
         // When the folder path has no symlinks, the walker's own URLs are already the ones to show.
         let sameRoot = real.standardizedFileURL.path == root.standardizedFileURL.path
-        for case let url as URL in walker {
-            if isCancelled() { break }
-            let path = url.path
-            guard path.hasPrefix(prefix) else { continue }
-            let relative = String(path.dropFirst(prefix.count))
-            var st = stat()
-            guard lstat(path, &st) == 0 else { continue }
-            let item = readScannedItem(url: url, root: root, relative: relative, sameRoot: sameRoot, stat: st)
-            let top = String(relative.split(separator: "/").first ?? "")
-            if let only = config.onlyNames, !only.contains(top) {
-                // Only call skipDescendants on folders: on a file it would skip the last folder seen instead.
-                if item.isDirectory { walker.skipDescendants() }
-                continue
-            }
-            let info = SyncFileInfo(url: item.url, size: item.size,
-                                    modified: item.modified, isDirectory: item.isDirectory)
-            recordScannedEntry(info: info, name: item.name, relative: relative,
-                               config: config, names: names, walker: walker, into: &result)
+        for case let url as URL in walker where !isCancelled() {
+            visitLocalScannedURL(url, root: root, prefix: prefix, sameRoot: sameRoot,
+                                 config: config, names: names, walker: walker, into: &result)
         }
         errors += walkErrors
         return result
+    }
+
+    private static func visitLocalScannedURL(
+        _ url: URL, root: URL, prefix: String, sameRoot: Bool,
+        config: SyncConfiguration, names: NameMatcher,
+        walker: FileManager.DirectoryEnumerator, into result: inout Scanned
+    ) {
+        let path = url.path
+        guard path.hasPrefix(prefix) else { return }
+        let relative = String(path.dropFirst(prefix.count))
+        var st = stat()
+        guard lstat(path, &st) == 0 else { return }
+        let item = readScannedItem(url: url, root: root, relative: relative, sameRoot: sameRoot, stat: st)
+        if shouldSkipSubtree(relative: relative, isDirectory: item.isDirectory, onlyNames: config.onlyNames, walker: walker) {
+            return
+        }
+        let info = SyncFileInfo(url: item.url, size: item.size, modified: item.modified, isDirectory: item.isDirectory)
+        recordScannedEntry(info: info, name: item.name, relative: relative,
+                           config: config, names: names, walker: walker, into: &result)
+    }
+
+    private static func shouldSkipSubtree(
+        relative: String, isDirectory: Bool, onlyNames: Set<String>?, walker: FileManager.DirectoryEnumerator
+    ) -> Bool {
+        let top = String(relative.split(separator: "/").first ?? "")
+        guard let only = onlyNames, !only.contains(top) else { return false }
+        // Only call skipDescendants on folders: on a file it would skip the last folder seen instead.
+        if isDirectory { walker.skipDescendants() }
+        return true
     }
 
     private static func readScannedItem(url: URL, root: URL, relative: String, sameRoot: Bool, stat st: stat) -> SearchItem {
@@ -216,27 +238,45 @@ public enum SyncEngine {
         var queue = [""]
         var next = 0
         var count = 0
-        while next < queue.count {
+        while next < queue.count, !isCancelled() {
             let relativeDir = queue[next]
             next += 1
-            if isCancelled() { break }
-            if relativeDir.split(separator: "/").count > RemoteSession.maxDepth || count > RemoteSession.maxEntries {
-                errors.append("\(session.addressLabel)\(base): \(RemoteSession.tooLarge.message) Stopped reading there.")
-                break
-            }
-            let dir = relativeDir.isEmpty ? base : (base == "/" ? "/" : base + "/") + relativeDir
-            let listing: [RemoteEntry]
-            do { listing = try session.fetch(dir, useCache: false, store: false) } catch {
-                errors.append("\(session.addressLabel)\(dir): \((error as? FTPError)?.message ?? error.localizedDescription)")
-                continue
-            }
-            count += listing.count
-            for entry in listing {
-                processRemoteEntry(entry, relativeDir: relativeDir, dir: dir, session: session,
-                                   config: config, names: names, result: &result, queue: &queue, errors: &errors)
-            }
+            guard withinRemoteLimits(relativeDir: relativeDir, count: count, base: base, session: session, errors: &errors) else { break }
+            scanRemoteDirectory(relativeDir, base: base, session: session, config: config, names: names,
+                                count: &count, result: &result, queue: &queue, errors: &errors)
         }
         return result
+    }
+
+    private static func scanRemoteDirectory(
+        _ relativeDir: String, base: String, session: RemoteSession,
+        config: SyncConfiguration, names: NameMatcher,
+        count: inout Int, result: inout Scanned, queue: inout [String], errors: inout [String]
+    ) {
+        let dir = relativeDir.isEmpty ? base : (base == "/" ? "/" : base + "/") + relativeDir
+        guard let listing = fetchRemoteListing(dir, session: session, errors: &errors) else { return }
+        count += listing.count
+        for entry in listing {
+            processRemoteEntry(entry, relativeDir: relativeDir, dir: dir, session: session,
+                               config: config, names: names, result: &result, queue: &queue, errors: &errors)
+        }
+    }
+
+    private static func withinRemoteLimits(
+        relativeDir: String, count: Int, base: String, session: RemoteSession, errors: inout [String]
+    ) -> Bool {
+        if relativeDir.split(separator: "/").count > RemoteSession.maxDepth || count > RemoteSession.maxEntries {
+            errors.append("\(session.addressLabel)\(base): \(RemoteSession.tooLarge.message) Stopped reading there.")
+            return false
+        }
+        return true
+    }
+
+    private static func fetchRemoteListing(_ dir: String, session: RemoteSession, errors: inout [String]) -> [RemoteEntry]? {
+        do { return try session.fetch(dir, useCache: false, store: false) } catch {
+            errors.append("\(session.addressLabel)\(dir): \((error as? FTPError)?.message ?? error.localizedDescription)")
+            return nil
+        }
     }
 
     private static func processRemoteEntry(
@@ -251,26 +291,40 @@ public enum SyncEngine {
         errors: inout [String]
     ) {
         let relative = relativeDir.isEmpty ? entry.name : relativeDir + "/" + entry.name
-        let top = String(relative.split(separator: "/").first ?? "")
-        if let only = config.onlyNames, !only.contains(top) { return }
+        if let only = config.onlyNames, !only.contains(String(relative.split(separator: "/").first ?? "")) { return }
         if entry.isLink {
             errors.append("\(session.addressLabel)\(dir)/\(entry.name): a link on the server, not compared")
             return
         }
+        let info = remoteFileInfo(entry, dir: dir, session: session)
+        recordRemoteEntry(info: info, entry: entry, relative: relative, config: config, names: names, result: &result, queue: &queue)
+    }
+
+    private static func remoteFileInfo(_ entry: RemoteEntry, dir: String, session: RemoteSession) -> SyncFileInfo {
         let path = (dir == "/" ? "" : dir) + "/" + entry.name
-        let info = SyncFileInfo(url: session.url(for: path), size: entry.size,
-                                modified: entry.modified ?? .distantPast, isDirectory: entry.isDirectory,
-                                datePrecision: entry.datePrecision)
+        return SyncFileInfo(url: session.url(for: path), size: entry.size,
+                            modified: entry.modified ?? .distantPast, isDirectory: entry.isDirectory,
+                            datePrecision: entry.datePrecision)
+    }
+
+    private static func recordRemoteEntry(
+        info: SyncFileInfo, entry: RemoteEntry, relative: String,
+        config: SyncConfiguration, names: NameMatcher, result: inout Scanned, queue: inout [String]
+    ) {
         if entry.isDirectory {
             result.directories[relative] = info
             if config.subdirectories { queue.append(relative) }
         } else if names.matches(entry.name) {
-            result.files[relative] = info
-            var parent = (relative as NSString).deletingLastPathComponent
-            while !parent.isEmpty {
-                result.nonEmpty.insert(parent)
-                parent = (parent as NSString).deletingLastPathComponent
-            }
+            recordRemoteFile(info, relative: relative, into: &result)
+        }
+    }
+
+    private static func recordRemoteFile(_ info: SyncFileInfo, relative: String, into result: inout Scanned) {
+        result.files[relative] = info
+        var parent = (relative as NSString).deletingLastPathComponent
+        while !parent.isEmpty {
+            result.nonEmpty.insert(parent)
+            parent = (parent as NSString).deletingLastPathComponent
         }
     }
 
@@ -283,30 +337,12 @@ public enum SyncEngine {
         try validateFolders(config, sessions: sessions)
 
         var result = SyncComparison()
-        func read(_ url: URL) -> Scanned {
-            if let session = sessions(url) {
-                progress("Reading \(session.addressLabel)\(RemoteSession.path(of: url))")
-                return scanRemote(url, session: session, config: config, names: names, errors: &result.errors, isCancelled: isCancelled)
-            }
-            progress("Reading \(url.path)")
-            return scan(url, config: config, names: names, errors: &result.errors, isCancelled: isCancelled)
-        }
-        let left = read(config.left)
-        let right = read(config.right)
-        var contentConfig = config
-        if config.byContent && (config.left.isRemoteLocation || config.right.isRemoteLocation) {
-            // Comparing content would mean downloading every file pair.
-            contentConfig.byContent = false
-            result.errors.append("“by content” is not available for server folders: files were compared by size and date.")
-        }
-
-        var rows: [SyncRow] = []
-        for path in Set(left.files.keys).union(right.files.keys) {
-            if isCancelled() { break }
-            let a = left.files[path], b = right.files[path]
-            let (state, action) = decide(a, b, config: contentConfig, errors: &result.errors)
-            rows.append(SyncRow(path: path, left: a, right: b, state: state, action: action, recommended: action))
-        }
+        let left = readSide(config.left, config: config, names: names, sessions: sessions,
+                            isCancelled: isCancelled, progress: progress, errors: &result.errors)
+        let right = readSide(config.right, config: config, names: names, sessions: sessions,
+                             isCancelled: isCancelled, progress: progress, errors: &result.errors)
+        let contentConfig = resolveContentConfig(config, errors: &result.errors)
+        var rows = buildFileRows(left: left, right: right, config: contentConfig, isCancelled: isCancelled, errors: &result.errors)
         if config.emptyDirectories {
             rows += emptyDirectoryRows(left: left, right: right, config: config, errors: &result.errors)
         }
@@ -315,30 +351,83 @@ public enum SyncEngine {
         return result
     }
 
-    private static func validateFolders(_ config: SyncConfiguration, sessions: SyncSessionLookup) throws {
-        var fm: ObjCBool = false
-        for (side, url) in [("Left", config.left), ("Right", config.right)] {
-            if url.isRemoteLocation {
-                guard let session = sessions(url) else {
-                    throw SearchValidationError(message: "\(side): the server connection is closed. Connect again.")
-                }
-                let path = RemoteSession.path(of: url)
-                do { _ = try session.fetch(path, useCache: false) } catch {
-                    throw SearchValidationError(message: "\(side) folder “\(session.addressLabel)\(path)” cannot be read: \((error as? FTPError)?.message ?? error.localizedDescription)")
-                }
-            } else {
-                guard FileManager.default.fileExists(atPath: url.path, isDirectory: &fm), fm.boolValue else {
-                    throw SearchValidationError(message: "\(side) folder “\(url.path)” does not exist.")
-                }
-            }
+    private static func resolveContentConfig(_ config: SyncConfiguration, errors: inout [String]) -> SyncConfiguration {
+        var resolved = config
+        if config.byContent && (config.left.isRemoteLocation || config.right.isRemoteLocation) {
+            // Comparing content would mean downloading every file pair.
+            resolved.byContent = false
+            errors.append("“by content” is not available for server folders: files were compared by size and date.")
         }
+        return resolved
+    }
+
+    private static func readSide(
+        _ url: URL, config: SyncConfiguration, names: NameMatcher,
+        sessions: SyncSessionLookup, isCancelled: () -> Bool,
+        progress: (String) -> Void, errors: inout [String]
+    ) -> Scanned {
+        if let session = sessions(url) {
+            progress("Reading \(session.addressLabel)\(RemoteSession.path(of: url))")
+            return scanRemote(url, session: session, config: config, names: names, errors: &errors, isCancelled: isCancelled)
+        }
+        progress("Reading \(url.path)")
+        return scan(url, config: config, names: names, errors: &errors, isCancelled: isCancelled)
+    }
+
+    private static func buildFileRows(
+        left: Scanned, right: Scanned, config: SyncConfiguration,
+        isCancelled: () -> Bool, errors: inout [String]
+    ) -> [SyncRow] {
+        var rows: [SyncRow] = []
+        for path in Set(left.files.keys).union(right.files.keys) {
+            if isCancelled() { break }
+            let a = left.files[path], b = right.files[path]
+            let (state, action) = decide(a, b, config: config, errors: &errors)
+            rows.append(SyncRow(path: path, left: a, right: b, state: state, action: action, recommended: action))
+        }
+        return rows
+    }
+
+    private static func validateFolders(_ config: SyncConfiguration, sessions: SyncSessionLookup) throws {
+        for (side, url) in [("Left", config.left), ("Right", config.right)] {
+            try validateSingleFolder(side: side, url: url, sessions: sessions)
+        }
+        try ensureSeparateFolders(config.left, config.right)
+    }
+
+    private static func validateSingleFolder(side: String, url: URL, sessions: SyncSessionLookup) throws {
+        if url.isRemoteLocation {
+            guard let session = sessions(url) else {
+                throw SearchValidationError(message: "\(side): the server connection is closed. Connect again.")
+            }
+            let path = RemoteSession.path(of: url)
+            do { _ = try session.fetch(path, useCache: false) } catch {
+                throw SearchValidationError(message: "\(side) folder “\(session.addressLabel)\(path)” cannot be read: \((error as? FTPError)?.message ?? error.localizedDescription)")
+            }
+            return
+        }
+        var fm: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &fm), fm.boolValue else {
+            throw SearchValidationError(message: "\(side) folder “\(url.path)” does not exist.")
+        }
+    }
+
+    private static func ensureSeparateFolders(_ left: URL, _ right: URL) throws {
         // Same folder, or one inside the other (only possible on the same Mac or the same connection).
-        let l = config.left.isRemoteLocation ? config.left.normalizedLocation.absoluteString : FileSystemLister.realPath(of: config.left).path
-        let r = config.right.isRemoteLocation ? config.right.normalizedLocation.absoluteString : FileSystemLister.realPath(of: config.right).path
+        let l = folderIdentity(left)
+        let r = folderIdentity(right)
         if l == r { throw SearchValidationError(message: "Left and right are the same folder.") }
-        if l.hasPrefix(r.hasSuffix("/") ? r : r + "/") || r.hasPrefix(l.hasSuffix("/") ? l : l + "/") {
+        if isParentPath(r, of: l) || isParentPath(l, of: r) {
             throw SearchValidationError(message: "One folder is inside the other; choose two separate folders.")
         }
+    }
+
+    private static func folderIdentity(_ url: URL) -> String {
+        url.isRemoteLocation ? url.normalizedLocation.absoluteString : FileSystemLister.realPath(of: url).path
+    }
+
+    private static func isParentPath(_ parent: String, of child: String) -> Bool {
+        child.hasPrefix(parent.hasSuffix("/") ? parent : parent + "/")
     }
 
     private static func emptyDirectoryRows(
@@ -346,29 +435,31 @@ public enum SyncEngine {
     ) -> [SyncRow] {
         var rows: [SyncRow] = []
         for path in Set(left.directories.keys).union(right.directories.keys) {
+            guard isOneSidedEmptyDirectory(path: path, left: left, right: right) else { continue }
             let a = left.directories[path], b = right.directories[path]
-            let emptyL = a != nil && !left.nonEmpty.contains(path), emptyR = b != nil && !right.nonEmpty.contains(path)
-            if a != nil && b != nil { continue }
-            guard emptyL || emptyR else { continue }
             let (state, action) = decide(a, b, config: config, errors: &errors)
             rows.append(SyncRow(path: path, left: a, right: b, state: state, action: action, recommended: action))
         }
         return rows
     }
 
+    private static func isOneSidedEmptyDirectory(path: String, left: Scanned, right: Scanned) -> Bool {
+        let a = left.directories[path], b = right.directories[path]
+        guard a == nil || b == nil else { return false }
+        return isEmptyOnSide(a, path: path, in: left) || isEmptyOnSide(b, path: path, in: right)
+    }
+
+    private static func isEmptyOnSide(_ dir: SyncFileInfo?, path: String, in scanned: Scanned) -> Bool {
+        dir != nil && !scanned.nonEmpty.contains(path)
+    }
+
     /// The state of a pair and the recommended action (the ActionPlanner).
     static func decide(_ a: SyncFileInfo?, _ b: SyncFileInfo?, config: SyncConfiguration,
                        errors: inout [String]) -> (SyncState, SyncAction) {
-        switch (a, b) {
-        case (nil, nil):
-            return (.identical, .none)
-        case (_?, nil):
-            return (.leftOnly, .copyToRight)
-        case (nil, _?):
-            return (.rightOnly, config.asymmetric ? .deleteRight : .copyToLeft)
-        case let (a?, b?):
-            return decidePair(a, b, config: config, errors: &errors)
-        }
+        if let a = a, let b = b { return decidePair(a, b, config: config, errors: &errors) }
+        if a != nil { return (.leftOnly, .copyToRight) }
+        if b != nil { return (.rightOnly, config.asymmetric ? .deleteRight : .copyToLeft) }
+        return (.identical, .none)
     }
 
     private static func decidePair(_ a: SyncFileInfo, _ b: SyncFileInfo, config: SyncConfiguration,
@@ -380,6 +471,12 @@ public enum SyncEngine {
         if filesMatch(a, b, sameSize: a.size == b.size, sameDate: sameDate, config: config, errors: &errors) {
             return (.identical, .none)
         }
+        return decideDifferingPair(dateDelta: dateDelta, tolerance: tolerance, sameDate: sameDate, config: config)
+    }
+
+    private static func decideDifferingPair(
+        dateDelta: TimeInterval, tolerance: TimeInterval, sameDate: Bool, config: SyncConfiguration
+    ) -> (SyncState, SyncAction) {
         if config.asymmetric { return (dateDelta < -tolerance ? .rightNewer : .leftNewer, .copyToRight) }
         if config.ignoreDate || sameDate { return (.different, .none) }
         return dateDelta > 0 ? (.leftNewer, .copyToRight) : (.rightNewer, .copyToLeft)
@@ -390,14 +487,16 @@ public enum SyncEngine {
         sameSize: Bool, sameDate: Bool,
         config: SyncConfiguration, errors: inout [String]
     ) -> Bool {
-        if config.byContent && sameSize {
-            let same = DuplicateFinder.identical(a.url, b.url)
-            if !same && !FileManager.default.isReadableFile(atPath: a.url.path) {
-                errors.append("\(a.url.path): could not be read")
-            }
-            return same
-        }
+        if config.byContent && sameSize { return contentsMatch(a.url, b.url, errors: &errors) }
         return sameSize && (config.ignoreDate || sameDate)
+    }
+
+    private static func contentsMatch(_ a: URL, _ b: URL, errors: inout [String]) -> Bool {
+        let same = DuplicateFinder.identical(a, b)
+        if !same && !FileManager.default.isReadableFile(atPath: a.path) {
+            errors.append("\(a.path): could not be read")
+        }
+        return same
     }
 
     // MARK: Planning
@@ -433,22 +532,25 @@ public enum SyncEngine {
     }
 
     private static func compareRows(_ a: SyncRow, _ b: SyncRow, by key: SortKey) -> ComparisonResult {
-        func num<T: Comparable>(_ x: T?, _ y: T?) -> ComparisonResult {
-            switch (x, y) {
-            case let (x?, y?): return x < y ? .orderedAscending : (x > y ? .orderedDescending : .orderedSame)
-            case (nil, nil): return .orderedSame
-            case (nil, _): return .orderedAscending      // missing on that side sorts first
-            case (_, nil): return .orderedDescending
-            }
-        }
+        if key == .leftName || key == .rightName { return a.path.localizedStandardCompare(b.path) }
+        if key == .action { return (a.action.symbol + a.symbol).compare(b.action.symbol + b.symbol) }
+        return compareMetadataRows(a, b, by: key)
+    }
+
+    private static func compareMetadataRows(_ a: SyncRow, _ b: SyncRow, by key: SortKey) -> ComparisonResult {
         switch key {
-        case .leftName, .rightName: return a.path.localizedStandardCompare(b.path)
-        case .leftSize: return num(a.left?.size, b.left?.size)
-        case .rightSize: return num(a.right?.size, b.right?.size)
-        case .leftDate: return num(a.left?.modified, b.left?.modified)
-        case .rightDate: return num(a.right?.modified, b.right?.modified)
-        case .action: return (a.action.symbol + a.symbol).compare(b.action.symbol + b.symbol)
+        case .leftSize: return compareOptional(a.left?.size, b.left?.size)
+        case .rightSize: return compareOptional(a.right?.size, b.right?.size)
+        case .leftDate: return compareOptional(a.left?.modified, b.left?.modified)
+        default: return compareOptional(a.right?.modified, b.right?.modified)
         }
+    }
+
+    private static func compareOptional<T: Comparable>(_ x: T?, _ y: T?) -> ComparisonResult {
+        guard let x = x else { return y == nil ? .orderedSame : .orderedAscending }
+        guard let y = y else { return .orderedDescending }
+        if x == y { return .orderedSame }
+        return x < y ? .orderedAscending : .orderedDescending
     }
 
     /// The next choice after the current action (click on the middle column).
@@ -479,22 +581,32 @@ public struct SyncPlan: Equatable {
     public init(rows: [SyncRow], config: SyncConfiguration) {
         for row in rows {
             switch row.action {
-            case .none:
-                break
-            case .copyToRight, .copyToLeft:
-                let goesRight = row.action == .copyToRight
-                guard let src = goesRight ? row.left : row.right else { continue }
-                let dest = (goesRight ? config.right : config.left).appendingPathComponent(row.path)
-                let op = SyncOperation(kind: src.isDirectory ? .makeDirectory : .copy, row: row, source: src.url,
-                                       destination: dest, bytes: src.isDirectory ? 0 : src.size,
-                                       overwrites: (goesRight ? row.right : row.left) != nil)
-                if goesRight { toRight.append(op) } else { toLeft.append(op) }
-            case .deleteRight, .deleteLeft:
-                guard let target = row.action == .deleteRight ? row.right : row.left else { continue }
-                deletions.append(SyncOperation(kind: .delete, row: row, source: nil, destination: target.url,
-                                               bytes: target.size, overwrites: false))
+            case .none: break
+            case .copyToRight, .copyToLeft: addCopyOperation(row: row, config: config, goesRight: row.action == .copyToRight)
+            case .deleteRight, .deleteLeft: addDeleteOperation(row: row, deleteRight: row.action == .deleteRight)
             }
         }
+    }
+
+    private mutating func addCopyOperation(row: SyncRow, config: SyncConfiguration, goesRight: Bool) {
+        guard let src = goesRight ? row.left : row.right else { return }
+        let op = Self.makeCopyOperation(row: row, src: src, config: config, goesRight: goesRight)
+        if goesRight { toRight.append(op) } else { toLeft.append(op) }
+    }
+
+    private static func makeCopyOperation(
+        row: SyncRow, src: SyncFileInfo, config: SyncConfiguration, goesRight: Bool
+    ) -> SyncOperation {
+        let dest = (goesRight ? config.right : config.left).appendingPathComponent(row.path)
+        let overwrites = (goesRight ? row.right : row.left) != nil
+        return SyncOperation(kind: src.isDirectory ? .makeDirectory : .copy, row: row, source: src.url,
+                             destination: dest, bytes: src.isDirectory ? 0 : src.size, overwrites: overwrites)
+    }
+
+    private mutating func addDeleteOperation(row: SyncRow, deleteRight: Bool) {
+        guard let target = deleteRight ? row.right : row.left else { return }
+        deletions.append(SyncOperation(kind: .delete, row: row, source: nil, destination: target.url,
+                                       bytes: target.size, overwrites: false))
     }
 
     public var all: [SyncOperation] { toRight + toLeft + deletions }
@@ -535,37 +647,78 @@ public enum SyncExecutor {
                            trash: (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) })
         -> SyncReport {
         var report = SyncReport()
+        let ops = selectedOperations(from: plan, options: options)
+        var touched: [ObjectIdentifier: RemoteSession] = [:]
+        defer { for s in touched.values { s.invalidate() } }
+        let files = SyncFiles(sessions: sessions)
+        executeOperations(ops, options: options, files: files, sessions: sessions,
+                          touched: &touched, isCancelled: isCancelled, progress: progress, trash: trash, report: &report)
+        return report
+    }
+
+    private static func executeOperations(
+        _ ops: [SyncOperation], options: SyncRunOptions, files: SyncFiles,
+        sessions: SyncSessionLookup, touched: inout [ObjectIdentifier: RemoteSession],
+        isCancelled: @escaping () -> Bool, progress: (SyncOperation) -> Void,
+        trash: (URL) throws -> Void, report: inout SyncReport
+    ) {
+        for op in ops {
+            if isCancelled() { report.cancelled = true; break }
+            progress(op)
+            if executeUnchangedOperation(op, options: options, files: files, sessions: sessions,
+                                         touched: &touched, isCancelled: isCancelled, trash: trash, report: &report) {
+                break
+            }
+        }
+    }
+
+    private static func executeUnchangedOperation(
+        _ op: SyncOperation, options: SyncRunOptions, files: SyncFiles,
+        sessions: SyncSessionLookup, touched: inout [ObjectIdentifier: RemoteSession],
+        isCancelled: @escaping () -> Bool, trash: (URL) throws -> Void, report: inout SyncReport
+    ) -> Bool {
+        guard files.unchanged(op.row.left) && files.unchanged(op.row.right) else {
+            report.skipped.append("\(op.row.path): changed since the comparison")
+            return false
+        }
+        recordTouchedSessions(for: op, sessions: sessions, into: &touched)
+        return runSingleOperation(op, options: options, files: files, sessions: sessions,
+                                  isCancelled: isCancelled, trash: trash, report: &report)
+    }
+
+    private static func recordTouchedSessions(
+        for op: SyncOperation, sessions: SyncSessionLookup, into touched: inout [ObjectIdentifier: RemoteSession]
+    ) {
+        for url in [op.source, op.destination].compactMap({ $0 }) {
+            if let s = sessions(url) { touched[ObjectIdentifier(s)] = s }
+        }
+    }
+
+    private static func selectedOperations(from plan: SyncPlan, options: SyncRunOptions) -> [SyncOperation] {
         var ops: [SyncOperation] = []
         if options.leftToRight { ops += plan.toRight }
         if options.rightToLeft { ops += plan.toLeft }
         if options.delete { ops += plan.deletions }
-        var touched: [ObjectIdentifier: RemoteSession] = [:]
-        defer { for s in touched.values { s.invalidate() } }
-        let files = SyncFiles(sessions: sessions)
+        return ops
+    }
 
-        for op in ops {
-            if isCancelled() { report.cancelled = true; break }
-            progress(op)
-            guard files.unchanged(op.row.left) && files.unchanged(op.row.right) else {
-                report.skipped.append("\(op.row.path): changed since the comparison")
-                continue
-            }
-            for url in [op.source, op.destination].compactMap({ $0 }) {
-                if let s = sessions(url) { touched[ObjectIdentifier(s)] = s }
-            }
-            do {
-                try executeOperation(op, options: options, files: files, sessions: sessions,
-                                     isCancelled: isCancelled, trash: trash, report: &report)
-            } catch FTPError.cancelled {
-                report.cancelled = true
-                break
-            } catch let e as FTPError {
-                report.errors.append("\(op.row.path): \(e.message)")
-            } catch {
-                report.errors.append("\(op.row.path): \(error.localizedDescription)")
-            }
+    private static func runSingleOperation(
+        _ op: SyncOperation, options: SyncRunOptions, files: SyncFiles,
+        sessions: SyncSessionLookup, isCancelled: @escaping () -> Bool,
+        trash: (URL) throws -> Void, report: inout SyncReport
+    ) -> Bool {
+        do {
+            try executeOperation(op, options: options, files: files, sessions: sessions,
+                                 isCancelled: isCancelled, trash: trash, report: &report)
+        } catch FTPError.cancelled {
+            report.cancelled = true
+            return true
+        } catch let e as FTPError {
+            report.errors.append("\(op.row.path): \(e.message)")
+        } catch {
+            report.errors.append("\(op.row.path): \(error.localizedDescription)")
         }
-        return report
+        return false
     }
 
     private static func executeOperation(
@@ -583,25 +736,44 @@ public enum SyncExecutor {
             try files.makeDirectory(op.destination)
             report.created += 1
         case .copy:
-            guard let src = op.source else { return }
-            let exists = files.exists(op.destination)
-            if !op.overwrites && exists {
-                report.skipped.append("\(op.row.path): appeared at the destination since the comparison")
-                return
-            }
-            if exists && !options.overwrite { report.skipped.append("\(op.row.path): exists, not overwritten"); return }
-            let info = op.row.action == .copyToRight ? op.row.left : op.row.right
-            try files.copy(src, to: op.destination, info: info, replacing: exists, isCancelled: isCancelled)
-            report.copied += 1
+            try executeCopy(op, options: options, files: files, isCancelled: isCancelled, report: &report)
         case .delete:
-            if let session = sessions(op.destination) {
-                let path = RemoteSession.path(of: op.destination)
-                if op.row.isDirectory { try session.client.removeDirectory(path) } else { try session.client.deleteFile(path) }
-            } else {
-                try trash(op.destination)
-            }
-            report.deleted += 1
+            try executeDelete(op, sessions: sessions, trash: trash, report: &report)
         }
+    }
+
+    private static func executeCopy(
+        _ op: SyncOperation, options: SyncRunOptions, files: SyncFiles,
+        isCancelled: @escaping () -> Bool, report: inout SyncReport
+    ) throws {
+        guard let src = op.source else { return }
+        let exists = files.exists(op.destination)
+        if let reason = copySkipReason(op: op, exists: exists, options: options) {
+            report.skipped.append(reason)
+            return
+        }
+        let info = op.row.action == .copyToRight ? op.row.left : op.row.right
+        try files.copy(src, to: op.destination, info: info, replacing: exists, isCancelled: isCancelled)
+        report.copied += 1
+    }
+
+    private static func copySkipReason(op: SyncOperation, exists: Bool, options: SyncRunOptions) -> String? {
+        if !op.overwrites && exists { return "\(op.row.path): appeared at the destination since the comparison" }
+        if exists && !options.overwrite { return "\(op.row.path): exists, not overwritten" }
+        return nil
+    }
+
+    private static func executeDelete(
+        _ op: SyncOperation, sessions: SyncSessionLookup,
+        trash: (URL) throws -> Void, report: inout SyncReport
+    ) throws {
+        if let session = sessions(op.destination) {
+            let path = RemoteSession.path(of: op.destination)
+            if op.row.isDirectory { try session.client.removeDirectory(path) } else { try session.client.deleteFile(path) }
+        } else {
+            try trash(op.destination)
+        }
+        report.deleted += 1
     }
 
 }
@@ -630,14 +802,20 @@ final class SyncFiles {
     /// The side still looks as it did when compared.
     func unchanged(_ info: SyncFileInfo?) -> Bool {
         guard let info = info else { return true }
-        if let s = sessions(info.url) {
-            guard let now = remoteEntry(info.url, session: s) else { return false }
-            if info.isDirectory { return now.isDirectory }
-            return now.size == info.size && (now.modified ?? .distantPast) == info.modified
-        }
+        if let s = sessions(info.url) { return unchangedRemote(info, session: s) }
+        return unchangedLocal(info)
+    }
+
+    private func unchangedLocal(_ info: SyncFileInfo) -> Bool {
         guard let now = SearchItem.read(info.url) else { return false }
         if info.isDirectory { return now.isDirectory }
         return now.size == info.size && abs(now.modified.timeIntervalSince(info.modified)) < 0.001
+    }
+
+    private func unchangedRemote(_ info: SyncFileInfo, session: RemoteSession) -> Bool {
+        guard let now = remoteEntry(info.url, session: session) else { return false }
+        if info.isDirectory { return now.isDirectory }
+        return now.size == info.size && (now.modified ?? .distantPast) == info.modified
     }
 
     func makeDirectory(_ url: URL) throws {
@@ -662,33 +840,55 @@ final class SyncFiles {
 
     /// Copies a file (keeping its date where the protocol allows), replacing the destination if asked.
     func copy(_ src: URL, to dst: URL, info: SyncFileInfo?, replacing: Bool, isCancelled: @escaping () -> Bool) throws {
-        let fm = FileManager.default
         let cancel = CancelFlag()
         let watch = { if isCancelled() { cancel.cancel() } }
         switch (sessions(src), sessions(dst)) {
         case (nil, nil):
-            if replacing { try fm.removeItem(at: dst) }
-            try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try fm.copyItem(at: src, to: dst)   // keeps the modification date
+            try copyLocalToLocal(src, to: dst, replacing: replacing)
         case let (nil, to?):
-            watch()
-            try to.client.upload(src, to: RemoteSession.path(of: dst), resume: false, cancel: cancel, progress: { _ in watch() })
-            if let date = (try? src.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate {
-                try? to.client.setModificationDate(date, of: RemoteSession.path(of: dst))
-            }
+            try copyLocalToRemote(src, to: dst, session: to, cancel: cancel, watch: watch)
         case let (from?, nil):
-            try from.client.download(RemoteSession.path(of: src), to: dst, expectedSize: info?.size, resume: false,
-                                     cancel: cancel, progress: { _ in watch() })
-            if !from.profile.isSFTP, let date = info?.modified, date != .distantPast {
-                try? fm.setAttributes([.modificationDate: date], ofItemAtPath: dst.path)
-            }
+            try copyRemoteToLocal(src, to: dst, session: from, info: info, cancel: cancel, watch: watch)
         case let (from?, to?):
-            let temp = fm.temporaryDirectory.appendingPathComponent("cc-sync-\(UUID().uuidString)")
-            defer { try? fm.removeItem(at: temp) }
-            try from.client.download(RemoteSession.path(of: src), to: temp, expectedSize: info?.size, resume: false,
-                                     cancel: cancel, progress: { _ in watch() })
-            try to.client.upload(temp, to: RemoteSession.path(of: dst), resume: false, cancel: cancel, progress: { _ in watch() })
-            if let date = info?.modified, date != .distantPast { try? to.client.setModificationDate(date, of: RemoteSession.path(of: dst)) }
+            try copyRemoteToRemote(src, to: dst, from: from, toSession: to, info: info, cancel: cancel, watch: watch)
         }
+    }
+
+    private func copyLocalToLocal(_ src: URL, to dst: URL, replacing: Bool) throws {
+        let fm = FileManager.default
+        if replacing { try fm.removeItem(at: dst) }
+        try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fm.copyItem(at: src, to: dst)   // keeps the modification date
+    }
+
+    private func copyLocalToRemote(_ src: URL, to dst: URL, session: RemoteSession, cancel: CancelFlag, watch: @escaping () -> Void) throws {
+        watch()
+        try session.client.upload(src, to: RemoteSession.path(of: dst), resume: false, cancel: cancel, progress: { _ in watch() })
+        if let date = (try? src.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate {
+            try? session.client.setModificationDate(date, of: RemoteSession.path(of: dst))
+        }
+    }
+
+    private func copyRemoteToLocal(
+        _ src: URL, to dst: URL, session: RemoteSession, info: SyncFileInfo?, cancel: CancelFlag, watch: @escaping () -> Void
+    ) throws {
+        try session.client.download(RemoteSession.path(of: src), to: dst, expectedSize: info?.size, resume: false,
+                                    cancel: cancel, progress: { _ in watch() })
+        if !session.profile.isSFTP, let date = info?.modified, date != .distantPast {
+            try? FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: dst.path)
+        }
+    }
+
+    private func copyRemoteToRemote(
+        _ src: URL, to dst: URL, from: RemoteSession, toSession: RemoteSession,
+        info: SyncFileInfo?, cancel: CancelFlag, watch: @escaping () -> Void
+    ) throws {
+        let fm = FileManager.default
+        let temp = fm.temporaryDirectory.appendingPathComponent("cc-sync-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: temp) }
+        try from.client.download(RemoteSession.path(of: src), to: temp, expectedSize: info?.size, resume: false,
+                                 cancel: cancel, progress: { _ in watch() })
+        try toSession.client.upload(temp, to: RemoteSession.path(of: dst), resume: false, cancel: cancel, progress: { _ in watch() })
+        if let date = info?.modified, date != .distantPast { try? toSession.client.setModificationDate(date, of: RemoteSession.path(of: dst)) }
     }
 }

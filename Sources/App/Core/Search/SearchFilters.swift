@@ -54,17 +54,18 @@ public struct SearchItem: Equatable {
                           mode: UInt16(st.st_mode), flags: st.st_flags, ownerID: st.st_uid)
     }
 
+    private static let attributeChecks: [FileAttribute: (SearchItem) -> Bool] = [
+        .archive: { $0.flags & UInt32(SF_ARCHIVED) != 0 },
+        .hidden: { $0.name.hasPrefix(".") || $0.flags & UInt32(UF_HIDDEN) != 0 },
+        .system: { $0.ownerID == 0 || $0.flags & UInt32(SF_RESTRICTED | SF_IMMUTABLE | SF_NOUNLINK) != 0 },
+        .readOnly: { $0.mode & UInt16(S_IWUSR) == 0 || $0.flags & UInt32(UF_IMMUTABLE) != 0 },
+        .directory: { $0.isDirectory },
+        .compressed: { $0.flags & UInt32(UF_COMPRESSED) != 0 },
+        .encrypted: { _ in false },
+    ]
+
     public func has(_ attribute: FileAttribute) -> Bool {
-        switch attribute {
-        case .archive: return flags & UInt32(SF_ARCHIVED) != 0
-        case .hidden: return name.hasPrefix(".") || flags & UInt32(UF_HIDDEN) != 0
-        case .system:
-            return ownerID == 0 || flags & UInt32(SF_RESTRICTED | SF_IMMUTABLE | SF_NOUNLINK) != 0
-        case .readOnly: return mode & UInt16(S_IWUSR) == 0 || flags & UInt32(UF_IMMUTABLE) != 0
-        case .directory: return isDirectory
-        case .compressed: return flags & UInt32(UF_COMPRESSED) != 0
-        case .encrypted: return false
-        }
+        Self.attributeChecks[attribute]?(self) ?? false
     }
 }
 
@@ -97,40 +98,61 @@ public struct NameMatcher {
 
     public init(pattern: String, regex: Bool) throws {
         if regex {
-            do {
-                include = [try NSRegularExpression(pattern: pattern, options: [.caseInsensitive])]
-            } catch {
-                let looksLikeMask = pattern.hasPrefix("*") || pattern.contains("*.")
-                throw SearchValidationError(message: looksLikeMask
-                    ? "“\(pattern)” is a wildcard mask, but RegEx is ticked. Untick RegEx to search with wildcards."
-                    : "“Search for” is not a valid regular expression.")
-            }
+            include = [try Self.compileRegex(pattern)]
             exclude = []
             return
         }
+        (include, exclude, matchesEverything) = Self.parseWildcardMasks(pattern)
+    }
+
+    private static func parseWildcardMasks(_ pattern: String) -> ([NSRegularExpression], [NSRegularExpression], Bool) {
         let halves = pattern.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
-        let inc = Self.compileMasks(halves[0])
-        include = inc.isEmpty ? Self.compileMasks("*") : inc
-        exclude = halves.count > 1 ? Self.compileMasks(halves[1]) : []
-        let includeTexts = halves[0].split(whereSeparator: { $0 == ";" || $0 == " " }).map(String.init)
-        matchesEverything = exclude.isEmpty && (includeTexts.isEmpty || includeTexts.contains { $0 == "*" || $0 == "*.*" })
+        let inc = compileMasks(halves[0])
+        let include = inc.isEmpty ? compileMasks("*") : inc
+        let exclude = halves.count > 1 ? compileMasks(halves[1]) : []
+        return (include, exclude, matchesAllFiles(includeText: halves[0], exclude: exclude))
+    }
+
+    private static func matchesAllFiles(includeText: String, exclude: [NSRegularExpression]) -> Bool {
+        guard exclude.isEmpty else { return false }
+        let includeTexts = includeText.split(whereSeparator: { $0 == ";" || $0 == " " }).map(String.init)
+        return includeTexts.isEmpty || includeTexts.contains { $0 == "*" || $0 == "*.*" }
+    }
+
+    private static func compileRegex(_ pattern: String) throws -> NSRegularExpression {
+        do {
+            return try NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+        } catch {
+            let looksLikeMask = pattern.hasPrefix("*") || pattern.contains("*.")
+            throw SearchValidationError(message: looksLikeMask
+                ? "“\(pattern)” is a wildcard mask, but RegEx is ticked. Untick RegEx to search with wildcards."
+                : "“Search for” is not a valid regular expression.")
+        }
     }
 
     private static func compileMasks(_ text: String) -> [NSRegularExpression] {
-        text.split(whereSeparator: { $0 == ";" || $0 == " " }).map(String.init).filter { !$0.isEmpty }.map { raw in
-            var mask = normalize(raw)
-            if mask == "*.*" { mask = "*" }
-            if !mask.contains("*") && !mask.contains("?") { mask = "*\(mask)*" }
-            var expr = "^"
-            for ch in mask {
-                switch ch {
-                case "*": expr += ".*"
-                case "?": expr += "."
-                default: expr += NSRegularExpression.escapedPattern(for: String(ch))
-                }
+        text.split(whereSeparator: { $0 == ";" || $0 == " " })
+            .map(String.init)
+            .filter { !$0.isEmpty }
+            .map(compileSingleMask)
+    }
+
+    private static func compileSingleMask(_ raw: String) -> NSRegularExpression {
+        var mask = normalize(raw)
+        if mask == "*.*" { mask = "*" }
+        if !mask.contains("*") && !mask.contains("?") { mask = "*\(mask)*" }
+        let expr = "^" + wildcardBody(for: mask) + "$"
+        return try! NSRegularExpression(pattern: expr, options: [.caseInsensitive, .dotMatchesLineSeparators])
+    }
+
+    private static func wildcardBody(for mask: String) -> String {
+        mask.map { ch in
+            switch ch {
+            case "*": return ".*"
+            case "?": return "."
+            default: return NSRegularExpression.escapedPattern(for: String(ch))
             }
-            return try! NSRegularExpression(pattern: expr + "$", options: [.caseInsensitive, .dotMatchesLineSeparators])
-        }
+        }.joined()
     }
 
     /// File names come from disk in either Unicode form (e.g. "ó" as one or two code points).
@@ -149,53 +171,51 @@ public struct NameMatcher {
 public enum SearchQueryBuilder {
     public static func predicates(for config: FileSearchConfiguration, now: Date = Date(),
                                   calendar: Calendar = .current) throws -> [SearchPredicate] {
-        var result: [SearchPredicate] = []
-        let general = config.general
-        let advanced = config.advanced
-
-        let names = try NameMatcher(pattern: general.filenamePattern, regex: general.useRegex)
-        result.append(SearchPredicate("name") { names.matches($0.name) })
-        result += try datePredicates(for: advanced, now: now, calendar: calendar)
-        if advanced.fileSize.enabled {
-            let filter = advanced.fileSize
-            guard filter.value >= 0, filter.value.isFinite else {
-                throw SearchValidationError(message: "“File size” must be a number of 0 or more.")
-            }
-            let bytes = filter.bytes
-            // Folders have no size of their own, so a size filter finds files only.
-            result.append(SearchPredicate("size \(filter.comparison.rawValue) \(bytes)") {
-                !$0.isDirectory && filter.comparison.compare($0.size, bytes)
-            })
-        }
-        result += attributePredicates(for: advanced)
-        if advanced.duplicates.enabled {
-            let d = advanced.duplicates
-            guard d.sameName || d.sameSize || d.sameContents else {
-                throw SearchValidationError(message: "For duplicates, tick at least one of same name, size or contents.")
-            }
-            // Duplicates are files, never folders.
-            result.append(SearchPredicate("files only (duplicates)") { !$0.isDirectory })
-        }
-        if general.content.enabled {
-            // Text is searched in files only.
-            result.append(SearchPredicate("files only (content)") { !$0.isDirectory })
-        }
+        let names = try NameMatcher(pattern: config.general.filenamePattern, regex: config.general.useRegex)
+        var result = [SearchPredicate("name") { names.matches($0.name) }]
+        result += try datePredicates(for: config.advanced, now: now, calendar: calendar)
+        result += try optionalPredicates(for: config)
         return result
+    }
+
+    private static func optionalPredicates(for config: FileSearchConfiguration) throws -> [SearchPredicate] {
+        var result = attributePredicates(for: config.advanced)
+        result += try [sizePredicate(for: config.advanced.fileSize),
+                       duplicatePredicate(for: config.advanced.duplicates)].compactMap { $0 }
+        result += contentPredicates(for: config.general.content)
+        return result
+    }
+
+    private static func contentPredicates(for content: ContentSearchConfiguration) -> [SearchPredicate] {
+        // Text is searched in files only.
+        content.enabled ? [SearchPredicate("files only (content)") { !$0.isDirectory }] : []
+    }
+
+    private static func sizePredicate(for filter: SizeFilter) throws -> SearchPredicate? {
+        guard filter.enabled else { return nil }
+        guard filter.value >= 0, filter.value.isFinite else {
+            throw SearchValidationError(message: "“File size” must be a number of 0 or more.")
+        }
+        let bytes = filter.bytes
+        // Folders have no size of their own, so a size filter finds files only.
+        return SearchPredicate("size \(filter.comparison.rawValue) \(bytes)") {
+            !$0.isDirectory && filter.comparison.compare($0.size, bytes)
+        }
+    }
+
+    private static func duplicatePredicate(for d: DuplicateSearchConfiguration) throws -> SearchPredicate? {
+        guard d.enabled else { return nil }
+        guard d.sameName || d.sameSize || d.sameContents else {
+            throw SearchValidationError(message: "For duplicates, tick at least one of same name, size or contents.")
+        }
+        // Duplicates are files, never folders.
+        return SearchPredicate("files only (duplicates)") { !$0.isDirectory }
     }
 
     private static func datePredicates(for advanced: AdvancedSearchConfiguration, now: Date, calendar: Calendar) throws -> [SearchPredicate] {
         var result: [SearchPredicate] = []
-        if advanced.dateBetweenEnabled {
-            guard let from = advanced.dateFrom, let to = advanced.dateTo else {
-                throw SearchValidationError(message: "Enter both dates for “Date between”.")
-            }
-            let start = calendar.startOfDay(for: from)
-            let end = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: to))!
-            guard start < end else {
-                throw SearchValidationError(message: "“Date between”: the first date is after the second.")
-            }
-            // Inclusive of both whole days.
-            result.append(SearchPredicate("date between") { $0.modified >= start && $0.modified < end })
+        if let between = try dateBetweenPredicate(for: advanced, calendar: calendar) {
+            result.append(between)
         }
         if advanced.notOlderThan.enabled {
             let limit = try ageLimit(advanced.notOlderThan, "Not older than", now: now, calendar: calendar)
@@ -208,17 +228,36 @@ public enum SearchQueryBuilder {
         return result
     }
 
+    private static func dateBetweenPredicate(for advanced: AdvancedSearchConfiguration, calendar: Calendar) throws -> SearchPredicate? {
+        guard advanced.dateBetweenEnabled else { return nil }
+        let range = try dayRange(from: advanced.dateFrom, to: advanced.dateTo, calendar: calendar)
+        // Inclusive of both whole days.
+        return SearchPredicate("date between") { range.contains($0.modified) }
+    }
+
+    private static func dayRange(from: Date?, to: Date?, calendar: Calendar) throws -> Range<Date> {
+        guard let from = from, let to = to else {
+            throw SearchValidationError(message: "Enter both dates for “Date between”.")
+        }
+        let start = calendar.startOfDay(for: from)
+        let end = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: to))!
+        guard start < end else {
+            throw SearchValidationError(message: "“Date between”: the first date is after the second.")
+        }
+        return start..<end
+    }
+
     private static func attributePredicates(for advanced: AdvancedSearchConfiguration) -> [SearchPredicate] {
         guard advanced.attributesEnabled else { return [] }
-        var result: [SearchPredicate] = []
-        for attribute in FileAttribute.allCases where attribute.isAvailable {
-            switch advanced.state(of: attribute) {
-            case .ignored: continue
-            case .required: result.append(SearchPredicate("+\(attribute.rawValue)") { $0.has(attribute) })
-            case .excluded: result.append(SearchPredicate("-\(attribute.rawValue)") { !$0.has(attribute) })
-            }
+        return FileAttribute.allCases.filter(\.isAvailable).compactMap { attributePredicate(for: advanced, attribute: $0) }
+    }
+
+    private static func attributePredicate(for advanced: AdvancedSearchConfiguration, attribute: FileAttribute) -> SearchPredicate? {
+        switch advanced.state(of: attribute) {
+        case .ignored: return nil
+        case .required: return SearchPredicate("+\(attribute.rawValue)") { $0.has(attribute) }
+        case .excluded: return SearchPredicate("-\(attribute.rawValue)") { !$0.has(attribute) }
         }
-        return result
     }
 
     private static func ageLimit(_ age: AgeFilter, _ label: String, now: Date, calendar: Calendar) throws -> Date {

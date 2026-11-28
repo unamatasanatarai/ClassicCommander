@@ -116,6 +116,12 @@ public struct EntryFormatter {
     public func summary<C: Collection>(_ entries: C,
                                        selected: (files: Int, dirs: Int, bytes: Int64) = (0, 0, 0)) -> String
         where C.Element == FileEntry {
+        let totals = countSummaryTotals(entries)
+        return formatSummary(totals: totals, selected: selected)
+    }
+
+    private func countSummaryTotals<C: Collection>(_ entries: C) -> (files: Int, dirs: Int, bytes: Int64)
+        where C.Element == FileEntry {
         var files = 0, dirs = 0
         var bytes: Int64 = 0
         for e in entries {
@@ -125,15 +131,22 @@ public struct EntryFormatter {
             case .parent: break
             }
         }
+        return (files, dirs, bytes)
+    }
+
+    private func formatSummary(
+        totals: (files: Int, dirs: Int, bytes: Int64),
+        selected: (files: Int, dirs: Int, bytes: Int64)
+    ) -> String {
         func count(_ n: Int, _ one: String, _ many: String) -> String { "\(n) \(n == 1 ? one : many)" }
         if selected.files == 0 && selected.dirs == 0 {
-            var text = count(files, "file", "files")
-            if dirs > 0 { text += ", " + count(dirs, "folder", "folders") }
-            return text + " · " + readable(bytes)
+            var text = count(totals.files, "file", "files")
+            if totals.dirs > 0 { text += ", " + count(totals.dirs, "folder", "folders") }
+            return text + " · " + readable(totals.bytes)
         }
-        var text = "Selected \(selected.files) of " + count(files, "file", "files")
-        if dirs > 0 { text += ", \(selected.dirs) of " + count(dirs, "folder", "folders") }
-        return text + " · \(readable(selected.bytes)) of \(readable(bytes))"
+        var text = "Selected \(selected.files) of " + count(totals.files, "file", "files")
+        if totals.dirs > 0 { text += ", \(selected.dirs) of " + count(totals.dirs, "folder", "folders") }
+        return text + " · \(readable(selected.bytes)) of \(readable(totals.bytes))"
     }
 
     /// Drive bar, e.g. "[Macintosh HD]  76,5 G of 117,1 G free".

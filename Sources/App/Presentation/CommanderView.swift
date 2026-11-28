@@ -32,28 +32,34 @@ public final class CommanderView: NSView {
 
     public var settings: Settings = .standard {
         didSet {
-            for view in [leftView, rightView] where !view.model.isRemote {
-                if (view.model.lister as? FileSystemLister)?.showHidden != settings.display.showHiddenFiles {
-                    view.model.setLister(localLister, visibleRows: view.visibleRows)
-                }
-            }
-            (fileCommands.prompts as? AlertPrompts)?.sizeFormat = settings.display.sizeFormat
-            if settings.operation.autoRefresh != oldValue.operation.autoRefresh { watch(.left); watch(.right) }
-            if ftp.transfersWindow.sizeFormat != settings.display.sizeFormat { ftp.transfersWindow.sizeFormat = settings.display.sizeFormat }
-            for bar in [leftTabBar, rightTabBar] { bar.theme = settings.theme }
-            if settings.display.tabBar != oldValue.display.tabBar { needsLayout = true }
-            for view in [leftView, rightView] {
-                view.theme = settings.theme
-                view.display = settings.display
-                view.contextMenuHold = settings.operation.contextMenuHold
-            }
-            functionBar.theme = settings.theme
-            functionBar.keys = settings.keys
-            functionBar.isHidden = !settings.display.showFunctionKeyBar
-            if ftp.transfers.limits != settings.operation.transferLimits { ftp.transfers.limits = settings.operation.transferLimits }
+            applySettingsToPanels(oldValue: oldValue)
+            applySettingsToChrome(oldValue: oldValue)
             needsLayout = true
             needsDisplay = true
         }
+    }
+
+    private func applySettingsToPanels(oldValue: Settings) {
+        for view in [leftView, rightView] {
+            if !view.model.isRemote, (view.model.lister as? FileSystemLister)?.showHidden != settings.display.showHiddenFiles {
+                view.model.setLister(localLister, visibleRows: view.visibleRows)
+            }
+            view.theme = settings.theme
+            view.display = settings.display
+            view.contextMenuHold = settings.operation.contextMenuHold
+        }
+        if settings.operation.autoRefresh != oldValue.operation.autoRefresh { watch(.left); watch(.right) }
+    }
+
+    private func applySettingsToChrome(oldValue: Settings) {
+        (fileCommands.prompts as? AlertPrompts)?.sizeFormat = settings.display.sizeFormat
+        if ftp.transfersWindow.sizeFormat != settings.display.sizeFormat { ftp.transfersWindow.sizeFormat = settings.display.sizeFormat }
+        for bar in [leftTabBar, rightTabBar] { bar.theme = settings.theme }
+        functionBar.theme = settings.theme
+        functionBar.keys = settings.keys
+        functionBar.isHidden = !settings.display.showFunctionKeyBar
+        if ftp.transfers.limits != settings.operation.transferLimits { ftp.transfers.limits = settings.operation.transferLimits }
+        _ = oldValue
     }
 
     /// Mounted drives for the location menu; replaceable in tests.
@@ -105,40 +111,45 @@ public final class CommanderView: NSView {
         view.onLocationMenu = { [weak self] in self?.showLocationMenu(for: side) }
         view.onHotlist = { [weak self] in self?.showHotlist(for: side) }
         view.onShowHint = { [weak self] hint in self?.showHint(hint, duration: 2.5) }
-        view.onNavigateToPath = { [weak self, weak view] path in
-            guard let self = self, let view = view, view.model.isRemote,
-                  let session = self.ftp.session(for: view) else { return false }
-            var p = path
-            if let addr = self.ftp.displayAddress(of: view.model.directory), p.hasPrefix(addr) {
-                p = String(p.dropFirst(addr.count))
-            }
-            let (dir, mask) = PanelView.parsePathAndMask(p, currentDirectory: view.model.directory.path)
-            let maskFilter: PanelShowFilter = (mask == nil || mask == "*.*" || mask == "*") ? .all : .mask(mask!)
-            view.model.setShowFilter(maskFilter, visibleRows: view.visibleRows)
-            _ = self.ftp.reveal(session.url(for: dir), in: view)
-            return true
-        }
+        view.onNavigateToPath = { [weak self, weak view] path in self?.navigateRemotePath(path, in: view) ?? false }
         // After the drop has finished (the copy dialog must not run inside the drag).
-        view.onDrop = { [weak self] drop in
-            DispatchQueue.main.async { self?.drop(drop) }
-        }
+        view.onDrop = { [weak self] drop in DispatchQueue.main.async { self?.drop(drop) } }
         view.onFilesChanged = { [weak self] in self?.reloadPanels() }
-        view.onContextMenu = { [weak self, weak view] point in
-            guard let self = self, let view = view else { return }
-            Modal.popUpHeld(self.contextMenu(for: view), at: point, in: view)
-        }
-        view.onNavigate = { [weak self] action in
-            self?.activate(side)
-            self?.perform(action)
-        }
-        view.model.onDirectoryChange = { [weak self, weak view] in
-            guard let self = self, let view = view else { return }
-            self.cancelSizing(for: view)
-            self.watch(side)
-            self.tabs[side]?.update(folder: view.model.directory, focus: view.model.currentEntry?.name)
-            self.tabsChanged(side)
-            self.onFolderChange?(side, view.model.directory)
-        }
+        view.onContextMenu = { [weak self, weak view] point in self?.openContextMenu(at: point, in: view) }
+        view.onNavigate = { [weak self] action in self?.activate(side); self?.perform(action) }
+        view.model.onDirectoryChange = { [weak self, weak view] in self?.handleDirectoryChange(in: view, side: side) }
+    }
+
+    private func navigateRemotePath(_ path: String, in view: PanelView?) -> Bool {
+        guard let view = view, view.model.isRemote, let session = ftp.session(for: view) else { return false }
+        let stripped = stripRemoteAddress(path, in: view)
+        let (dir, mask) = PanelView.parsePathAndMask(stripped, currentDirectory: view.model.directory.path)
+        view.model.setShowFilter(Self.showFilter(forMask: mask), visibleRows: view.visibleRows)
+        _ = ftp.reveal(session.url(for: dir), in: view)
+        return true
+    }
+
+    private func stripRemoteAddress(_ path: String, in view: PanelView) -> String {
+        guard let addr = ftp.displayAddress(of: view.model.directory), path.hasPrefix(addr) else { return path }
+        return String(path.dropFirst(addr.count))
+    }
+
+    private static func showFilter(forMask mask: String?) -> PanelShowFilter {
+        (mask == nil || mask == "*.*" || mask == "*") ? .all : .mask(mask!)
+    }
+
+    private func openContextMenu(at point: NSPoint, in view: PanelView?) {
+        guard let view = view else { return }
+        Modal.popUpHeld(contextMenu(for: view), at: point, in: view)
+    }
+
+    private func handleDirectoryChange(in view: PanelView?, side: CommanderModel.Side) {
+        guard let view = view else { return }
+        cancelSizing(for: view)
+        watch(side)
+        tabs[side]?.update(folder: view.model.directory, focus: view.model.currentEntry?.name)
+        tabsChanged(side)
+        onFolderChange?(side, view.model.directory)
     }
 
     @available(*, unavailable)
@@ -270,13 +281,19 @@ public final class CommanderView: NSView {
     }
 
     private func focusRemotePanelIfNeeded(for url: URL) {
-        guard url.isRemoteLocation else { return }
-        let targetID = RemoteSession.sessionID(of: url)
-        if RemoteSession.sessionID(of: activeView.model.directory) != targetID,
-           RemoteSession.sessionID(of: view(for: model.activeSide.other).model.directory) == targetID {
-            // The other panel shows that server: go there.
+        if url.isRemoteLocation, otherPanelMatchesSession(of: url) {
             activate(model.activeSide.other)
         }
+    }
+
+    private func otherPanelMatchesSession(of url: URL) -> Bool {
+        let targetID = RemoteSession.sessionID(of: url)
+        return matchesOtherPanelSession(targetID: targetID, activeID: RemoteSession.sessionID(of: activeView.model.directory))
+    }
+
+    func matchesOtherPanelSession(targetID: UUID?, activeID: UUID?) -> Bool {
+        if activeID == targetID { return false }
+        return RemoteSession.sessionID(of: view(for: model.activeSide.other).model.directory) == targetID
     }
 
     /// Re-reads both directories (e.g. when the window comes back to the front).
@@ -362,21 +379,37 @@ public final class CommanderView: NSView {
 
     public override func keyDown(with event: NSEvent) {
         // "Letters alone": a typed letter always starts Quick Search, before plain-letter shortcuts.
-        let quickMode: QuickSearchController.Mode = settings.quickSearch.filterByDefault ? .filter : .search
-        if settings.quickSearch.activation == .lettersOnly, Self.isPlainLetter(event), let text = quickSearchStart(event) {
-            quickSearch.open(in: activeView, mode: quickMode, text: text)
-        } else if let action = settings.keys.action(for: KeyCombo(event)) {
-            perform(action)
-        } else if let text = quickSearchStart(event) {
-            quickSearch.open(in: activeView, mode: quickMode, text: text)
-        } else if event.keyCode == KeyCode.escape, activeView.model.quickFilter != nil || activeView.model.showsMarkedOnly {
-            // Esc in the panel removes a kept quick filter and shows the entries a selection hid.
-            activeView.model.setQuickFilter(nil, visibleRows: activeView.visibleRows)
-            activeView.model.showMarkedOnly(false, visibleRows: activeView.visibleRows)
-            activeView.needsDisplay = true
-        } else {
+        if let text = lettersOnlyQuickSearchText(for: event) {
+            openQuickSearch(with: text)
+        } else if !handleBindingOrQuickSearch(with: event) {
             super.keyDown(with: event)
         }
+    }
+
+    private func handleBindingOrQuickSearch(with event: NSEvent) -> Bool {
+        if let action = settings.keys.action(for: KeyCombo(event)) { perform(action); return true }
+        if let text = quickSearchStart(event) { openQuickSearch(with: text); return true }
+        return clearPanelFiltersIfEscape(event)
+    }
+
+    private func lettersOnlyQuickSearchText(for event: NSEvent) -> String? {
+        guard settings.quickSearch.activation == .lettersOnly, Self.isPlainLetter(event) else { return nil }
+        return quickSearchStart(event)
+    }
+
+    private func openQuickSearch(with text: String) {
+        let mode: QuickSearchController.Mode = settings.quickSearch.filterByDefault ? .filter : .search
+        quickSearch.open(in: activeView, mode: mode, text: text)
+    }
+
+    private func clearPanelFiltersIfEscape(_ event: NSEvent) -> Bool {
+        guard event.keyCode == KeyCode.escape,
+              activeView.model.quickFilter != nil || activeView.model.showsMarkedOnly else { return false }
+        // Esc in the panel removes a kept quick filter and shows the entries a selection hid.
+        activeView.model.setQuickFilter(nil, visibleRows: activeView.visibleRows)
+        activeView.model.showMarkedOnly(false, visibleRows: activeView.visibleRows)
+        activeView.needsDisplay = true
+        return true
     }
 
     /// A letter typed without ⌘ ⌃ ⌥ (⇧ allowed).
@@ -430,18 +463,21 @@ public final class CommanderView: NSView {
     /// The text that starts Quick Search for this key event, per Options → Quick Search, or nil.
     /// Shortcuts are checked first, so bound keys (hjkl, 5–8 …) keep working in "letter alone" mode.
     func quickSearchStart(_ event: NSEvent) -> String? {
-        let mods = KeyCombo(event).modifiers.subtracting(.shift)
-        let wanted: KeyCombo.Modifiers
-        switch settings.quickSearch.activation {
-        case .off: return nil
-        case .controlOption: wanted = [.control, .option]
-        case .option: wanted = [.option]
-        case .lettersOnly: wanted = []
-        }
-        guard mods == wanted, let chars = event.charactersIgnoringModifiers, chars.count == 1,
+        guard let wanted = requiredQuickSearchModifiers,
+              KeyCombo(event).modifiers.subtracting(.shift) == wanted,
+              let chars = event.charactersIgnoringModifiers, chars.count == 1,
               let scalar = chars.unicodeScalars.first else { return nil }
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-*?~#@&()[]+"))
         return allowed.contains(scalar) ? chars : nil
+    }
+
+    private var requiredQuickSearchModifiers: KeyCombo.Modifiers? {
+        switch settings.quickSearch.activation {
+        case .off: return nil
+        case .controlOption: return [.control, .option]
+        case .option: return [.option]
+        case .lettersOnly: return []
+        }
     }
 
     public func perform(_ action: CommandAction) {
@@ -468,29 +504,34 @@ public final class CommanderView: NSView {
         return performFolderOrTabNav(action, in: panel, rows: rows)
     }
 
+    private static let cursorMoveActions: [CommandAction: (PanelModel, Int) -> Void] = [
+        .cursorUp: { $0.moveCursor(by: -1, visibleRows: $1) },
+        .cursorDown: { $0.moveCursor(by: 1, visibleRows: $1) },
+        .pageUp: { $0.pageUp(visibleRows: $1) },
+        .pageDown: { $0.pageDown(visibleRows: $1) },
+        .firstItem: { $0.moveToStart(visibleRows: $1) },
+        .lastItem: { $0.moveToEnd(visibleRows: $1) },
+    ]
+
     private func performCursorMove(_ action: CommandAction, in panel: PanelView, rows: Int) -> Bool {
-        switch action {
-        case .switchPanel:
-            model.toggleActive()
-            syncActive()
+        if let move = Self.cursorMoveActions[action] {
+            move(panel.model, rows)
+            panel.needsDisplay = true
             return true
-        case .leftLocationMenu:
-            showLocationMenu(for: .left)
-            return true
-        case .rightLocationMenu:
-            showLocationMenu(for: .right)
-            return true
-        case .cursorUp: panel.model.moveCursor(by: -1, visibleRows: rows)
-        case .cursorDown: panel.model.moveCursor(by: 1, visibleRows: rows)
-        case .pageUp: panel.model.pageUp(visibleRows: rows)
-        case .pageDown: panel.model.pageDown(visibleRows: rows)
-        case .firstItem: panel.model.moveToStart(visibleRows: rows)
-        case .lastItem: panel.model.moveToEnd(visibleRows: rows)
-        default:
-            return false
         }
-        panel.needsDisplay = true
+        return performPanelSwitchOrLocationMenu(action)
+    }
+
+    private func performPanelSwitchOrLocationMenu(_ action: CommandAction) -> Bool {
+        if action == .switchPanel { model.toggleActive(); syncActive(); return true }
+        guard let side = Self.locationMenuSide(for: action) else { return false }
+        showLocationMenu(for: side)
         return true
+    }
+
+    private static func locationMenuSide(for action: CommandAction) -> CommanderModel.Side? {
+        if action == .leftLocationMenu { return .left }
+        return action == .rightLocationMenu ? .right : nil
     }
 
     private func performFolderOrTabNav(_ action: CommandAction, in panel: PanelView, rows: Int) -> Bool {
@@ -502,16 +543,23 @@ public final class CommanderView: NSView {
         if case .failed = result { NSSound.beep() }
     }
 
+    private static let folderNavActions: [CommandAction: (PanelModel, Int) -> PanelModel.OpenResult] = [
+        .enterFolder: { $0.enterCurrentFolder(visibleRows: $1) },
+        .parentFolder: { $0.goUp(visibleRows: $1) },
+        .goHome: { $0.goHome(visibleRows: $1) },
+        .goDownloads: { $0.goDownloads(visibleRows: $1) },
+        .goRoot: { $0.goToRoot(visibleRows: $1) },
+    ]
+
     private func performFolderNav(_ action: CommandAction, in panel: PanelView, rows: Int) -> Bool {
-        switch action {
-        case .open: openCurrent()
-        case .enterFolder: beepIfFailed(panel.model.enterCurrentFolder(visibleRows: rows))
-        case .parentFolder: beepIfFailed(panel.model.goUp(visibleRows: rows))
-        case .goHome: beepIfFailed(panel.model.goHome(visibleRows: rows))
-        case .goDownloads: beepIfFailed(panel.model.goDownloads(visibleRows: rows))
-        case .goRoot: beepIfFailed(panel.model.goToRoot(visibleRows: rows))
-        case .directoryHotlist: showHotlist(for: model.activeSide)
-        default: return false
+        if let nav = Self.folderNavActions[action] {
+            beepIfFailed(nav(panel.model, rows))
+        } else if action == .open {
+            openCurrent()
+        } else if action == .directoryHotlist {
+            showHotlist(for: model.activeSide)
+        } else {
+            return false
         }
         panel.needsDisplay = true
         return true
@@ -521,13 +569,17 @@ public final class CommanderView: NSView {
         switch action {
         case .newTab: newTab(model.activeSide)
         case .closeTab: closeTab(tabs[model.activeSide]?.active ?? 0, side: model.activeSide)
-        case .nextTab, .previousTab:
-            guard let t = tabs[model.activeSide], t.count > 1 else { NSSound.beep(); return true }
-            selectTab(t.neighbour(action == .nextTab ? 1 : -1), side: model.activeSide)
+        case .nextTab: stepTab(by: 1)
+        case .previousTab: stepTab(by: -1)
         default: return false
         }
         panel.needsDisplay = true
         return true
+    }
+
+    private func stepTab(by delta: Int) {
+        guard let t = tabs[model.activeSide], t.count > 1 else { NSSound.beep(); return }
+        selectTab(t.neighbour(delta), side: model.activeSide)
     }
 
     private func performSelection(_ action: CommandAction, in panel: PanelView, rows: Int) -> Bool {
@@ -536,39 +588,47 @@ public final class CommanderView: NSView {
             panel.needsDisplay = true
             return true
         }
-        if performMaskOrExtensionSelection(action, in: panel, rows: rows) {
+        if performMaskOrExtensionSelection(action, in: panel, rows: rows) || performMarkAction(action, in: panel, rows: rows) {
             panel.needsDisplay = true
             return true
         }
-        switch action {
-        case .toggleSelection: toggleSelection(in: panel)
-        case .invertSelection: panel.model.invertMarks()
-        case .selectAll: panel.model.markAll(true)
-        case .restoreSelection:
-            if panel.model.restoreMarks() == 0 { NSSound.beep() }
-        case .showMarkedOnly:
-            panel.model.showMarkedOnly(!panel.model.showsMarkedOnly, visibleRows: rows)
-        default:
-            return false
-        }
-        panel.needsDisplay = true
+        return false
+    }
+
+    private func performMarkAction(_ action: CommandAction, in panel: PanelView, rows: Int) -> Bool {
+        let handlers: [CommandAction: () -> Void] = [
+            .toggleSelection: { self.toggleSelection(in: panel) },
+            .invertSelection: { panel.model.invertMarks() },
+            .selectAll: { panel.model.markAll(true) },
+            .restoreSelection: { if panel.model.restoreMarks() == 0 { NSSound.beep() } },
+            .showMarkedOnly: { panel.model.showMarkedOnly(!panel.model.showsMarkedOnly, visibleRows: rows) },
+        ]
+        guard let fn = handlers[action] else { return false }
+        fn()
         return true
     }
 
     private func performMaskOrExtensionSelection(_ action: CommandAction, in panel: PanelView, rows: Int) -> Bool {
-        switch action {
-        case .selectByMask: markByMask(true, in: panel)
-        case .deselectByMask: markByMask(false, in: panel)
-        case .deselectAll:
-            panel.model.markAll(false)
-            if panel.model.showsMarkedOnly { panel.model.showMarkedOnly(false, visibleRows: rows) }
-        case .selectSameExtension, .deselectSameExtension:
-            let mark = action == .selectSameExtension
-            if panel.model.setMarksWithCurrentExtension(mark) == nil { NSSound.beep() } else if mark { applySelectionView(panel) }
-        default:
-            return false
-        }
+        let handlers: [CommandAction: () -> Void] = [
+            .selectByMask: { self.markByMask(true, in: panel) },
+            .deselectByMask: { self.markByMask(false, in: panel) },
+            .deselectAll: { self.deselectAllEntries(in: panel, rows: rows) },
+            .selectSameExtension: { self.markSameExtension(true, in: panel) },
+            .deselectSameExtension: { self.markSameExtension(false, in: panel) },
+        ]
+        guard let fn = handlers[action] else { return false }
+        fn()
         return true
+    }
+
+    private func deselectAllEntries(in panel: PanelView, rows: Int) {
+        panel.model.markAll(false)
+        if panel.model.showsMarkedOnly { panel.model.showMarkedOnly(false, visibleRows: rows) }
+    }
+
+    private func markSameExtension(_ mark: Bool, in panel: PanelView) {
+        if panel.model.setMarksWithCurrentExtension(mark) == nil { NSSound.beep() }
+        else if mark { applySelectionView(panel) }
     }
 
     private static let copySelectionKinds: [CommandAction: SelectionClipboard.Format] = [
@@ -580,49 +640,69 @@ public final class CommanderView: NSView {
 
     private func performViewAndSort(_ action: CommandAction, in panel: PanelView, rows: Int) -> Bool {
         if performSortOrFilter(action, in: panel, rows: rows) { return true }
+        if toggleDisplaySetting(action) { panel.needsDisplay = true; return true }
+        return performRefreshOrQuickSearch(action, in: panel, rows: rows)
+    }
+
+    private func performRefreshOrQuickSearch(_ action: CommandAction, in panel: PanelView, rows: Int) -> Bool {
         switch action {
-        case .toggleHiddenFiles:
-            var s = settings
-            s.display.showHiddenFiles.toggle()
-            change(s)
-        case .toggleFunctionKeyBar:
-            var s = settings
-            s.display.showFunctionKeyBar.toggle()
-            change(s)
-        case .toggleFolderBrackets:
-            var s = settings
-            s.display.showFolderBrackets.toggle()
-            change(s)
-        case .refresh:
-            if panel.model.isRemote { ftp.refresh(panel) } else { panel.model.reload(visibleRows: rows); panel.invalidateVolumeInfo() }
-        case .quickFilter:
-            quickSearch.open(in: panel, mode: .filter, text: panel.model.quickFilter ?? "")
+        case .refresh: refreshPanel(panel, rows: rows)
+        case .quickFilter: quickSearch.open(in: panel, mode: .filter, text: panel.model.quickFilter ?? "")
+        case .reopenQuickSearch: quickSearch.open(in: panel, mode: .search, text: quickSearch.lastText)
+        default: return false
+        }
+        return true
+    }
+
+    private func refreshPanel(_ panel: PanelView, rows: Int) {
+        if panel.model.isRemote { ftp.refresh(panel) } else { panel.model.reload(visibleRows: rows); panel.invalidateVolumeInfo() }
+        panel.needsDisplay = true
+    }
+
+    private func toggleDisplaySetting(_ action: CommandAction) -> Bool {
+        var s = settings
+        switch action {
+        case .toggleHiddenFiles: s.display.showHiddenFiles.toggle()
+        case .toggleFunctionKeyBar: s.display.showFunctionKeyBar.toggle()
+        case .toggleFolderBrackets: s.display.showFolderBrackets.toggle()
+        default: return false
+        }
+        change(s)
+        return true
+    }
+
+    private static let sortColumns: [CommandAction: SortColumn] = [
+        .sortByName: .name,
+        .sortByExtension: .ext,
+        .sortByDate: .date,
+        .sortBySize: .size,
+    ]
+
+    private func performSortOrFilter(_ action: CommandAction, in panel: PanelView, rows: Int) -> Bool {
+        if let col = Self.sortColumns[action] {
+            panel.model.sort(by: col, visibleRows: rows)
+            panel.needsDisplay = true
             return true
-        case .reopenQuickSearch:
-            quickSearch.open(in: panel, mode: .search, text: quickSearch.lastText)
-            return true
-        default:
-            return false
+        }
+        return performFilterOrOrderAction(action, in: panel, rows: rows)
+    }
+
+    private func performFilterOrOrderAction(_ action: CommandAction, in panel: PanelView, rows: Int) -> Bool {
+        switch action {
+        case .sortUnsorted: panel.model.setSort(.unsorted, visibleRows: rows)
+        case .reverseOrder: panel.model.reverseSort(visibleRows: rows)
+        case .showAllFiles: panel.model.setShowFilter(.all, visibleRows: rows)
+        case .showPrograms: panel.model.setShowFilter(.programs, visibleRows: rows)
+        case .showCustomFilter: return applyCustomFilter(in: panel, rows: rows)
+        default: return false
         }
         panel.needsDisplay = true
         return true
     }
 
-    private func performSortOrFilter(_ action: CommandAction, in panel: PanelView, rows: Int) -> Bool {
-        switch action {
-        case .sortByName: panel.model.sort(by: .name, visibleRows: rows)
-        case .sortByExtension: panel.model.sort(by: .ext, visibleRows: rows)
-        case .sortByDate: panel.model.sort(by: .date, visibleRows: rows)
-        case .sortBySize: panel.model.sort(by: .size, visibleRows: rows)
-        case .sortUnsorted: panel.model.setSort(.unsorted, visibleRows: rows)
-        case .reverseOrder: panel.model.reverseSort(visibleRows: rows)
-        case .showAllFiles: panel.model.setShowFilter(.all, visibleRows: rows)
-        case .showPrograms: panel.model.setShowFilter(.programs, visibleRows: rows)
-        case .showCustomFilter:
-            guard let mask = askShowMask() else { return true }
-            panel.model.setShowFilter(mask.isEmpty ? .all : .mask(mask), visibleRows: rows)
-        default: return false
-        }
+    private func applyCustomFilter(in panel: PanelView, rows: Int) -> Bool {
+        guard let mask = askShowMask() else { return true }
+        panel.model.setShowFilter(mask.isEmpty ? .all : .mask(mask), visibleRows: rows)
         panel.needsDisplay = true
         return true
     }
@@ -634,29 +714,36 @@ public final class CommanderView: NSView {
 
     private func performFileTransferOrTool(_ action: CommandAction, in panel: PanelView) -> Bool {
         if performFileTransferAction(action, in: panel) { return true }
-        switch action {
-        case .changeAttributes: changeAttributes(for: panel)
-        case .multiRename:
-            if panel.model.entries.contains(where: { $0.kind != .parent }) { multiRename.present(for: panel) } else { NSSound.beep() }
-        case .findFiles: findFiles.present()
-        case .synchronizeDirs: synchronize.present()
-        default: return false
-        }
+        let tools: [CommandAction: () -> Void] = [
+            .changeAttributes: { self.changeAttributes(for: panel) },
+            .multiRename: { self.openMultiRename(in: panel) },
+            .findFiles: { self.findFiles.present() },
+            .synchronizeDirs: { self.synchronize.present() },
+        ]
+        guard let fn = tools[action] else { return false }
+        fn()
         return true
     }
 
+    private func openMultiRename(in panel: PanelView) {
+        if panel.model.entries.contains(where: { $0.kind != .parent }) { multiRename.present(for: panel) }
+        else { NSSound.beep() }
+    }
+
+    private static let fileTransferActions: [CommandAction: (CommanderView, PanelView) -> Void] = [
+        .copy: { c, _ in c.fileCommands.copy() },
+        .move: { c, _ in c.fileCommands.move() },
+        .newFolder: { c, _ in c.fileCommands.newFolder() },
+        .delete: { c, _ in c.fileCommands.delete() },
+        .deletePermanently: { c, _ in c.fileCommands.delete(permanently: true) },
+        .renameInPlace: { c, p in c.renameInPlace(p) },
+        .packFiles: { c, _ in c.fileCommands.pack() },
+        .unpackFiles: { c, _ in c.fileCommands.unpack() },
+    ]
+
     private func performFileTransferAction(_ action: CommandAction, in panel: PanelView) -> Bool {
-        switch action {
-        case .copy: fileCommands.copy()
-        case .move: fileCommands.move()
-        case .newFolder: fileCommands.newFolder()
-        case .delete: fileCommands.delete()
-        case .deletePermanently: fileCommands.delete(permanently: true)
-        case .renameInPlace: renameInPlace(panel)
-        case .packFiles: fileCommands.pack()
-        case .unpackFiles: fileCommands.unpack()
-        default: return false
-        }
+        guard let handler = Self.fileTransferActions[action] else { return false }
+        handler(self, panel)
         return true
     }
 
@@ -705,18 +792,7 @@ public final class CommanderView: NSView {
         guard let session = ftp.session(for: panel) else { return }
         ftp.commander?.showHint("Applying permissions…", duration: 10)
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak panel] in
-            var count = 0
-            for target in targets {
-                let path = RemoteSession.path(of: target.url)
-                do {
-                    try session.client.chmod(mode, of: path)
-                    count += 1
-                    if recursive && target.kind == .directory, let walked = try? session.walk(path) {
-                        for f in walked.files { try? session.client.chmod(mode, of: f.path); count += 1 }
-                        for d in walked.folders { try? session.client.chmod(mode, of: d); count += 1 }
-                    }
-                } catch {}
-            }
+            let count = targets.reduce(0) { $0 + Self.chmodRemoteTarget($1, mode: mode, recursive: recursive, session: session) }
             DispatchQueue.main.async {
                 self?.ftp.commander?.showHint("Changed permissions on \(count) item\(count == 1 ? "" : "s")", duration: 1.5)
                 if let panel = panel { self?.ftp.refresh(panel) }
@@ -724,28 +800,50 @@ public final class CommanderView: NSView {
         }
     }
 
+    private static func chmodRemoteTarget(_ target: FileEntry, mode: Int, recursive: Bool, session: RemoteSession) -> Int {
+        let path = RemoteSession.path(of: target.url)
+        do {
+            try session.client.chmod(mode, of: path)
+            return 1 + (recursive && target.kind == .directory ? chmodRemoteDescendants(at: path, mode: mode, session: session) : 0)
+        } catch {
+            return 0
+        }
+    }
+
+    private static func chmodRemoteDescendants(at path: String, mode: Int, session: RemoteSession) -> Int {
+        guard let walked = try? session.walk(path) else { return 0 }
+        var count = 0
+        for f in walked.files { try? session.client.chmod(mode, of: f.path); count += 1 }
+        for d in walked.folders { try? session.client.chmod(mode, of: d); count += 1 }
+        return count
+    }
+
     private func applyLocalChmod(mode: Int, recursive: Bool, targets: [FileEntry], panel: PanelView) {
-        let fm = FileManager.default
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak panel] in
-            var count = 0
-            for target in targets {
-                do {
-                    try fm.setAttributes([.posixPermissions: mode], ofItemAtPath: target.url.path)
-                    count += 1
-                    if recursive && target.kind == .directory {
-                        let walker = fm.enumerator(at: target.url, includingPropertiesForKeys: [.isDirectoryKey])
-                        while let item = walker?.nextObject() as? URL {
-                            try? fm.setAttributes([.posixPermissions: mode], ofItemAtPath: item.path)
-                            count += 1
-                        }
-                    }
-                } catch {}
-            }
+            let count = targets.reduce(0) { $0 + Self.chmodLocalTarget($1, mode: mode, recursive: recursive) }
             DispatchQueue.main.async {
                 self?.showHint("Changed permissions on \(count) item\(count == 1 ? "" : "s")", duration: 1.5)
                 panel?.model.reload(visibleRows: panel?.visibleRows ?? 20)
                 panel?.needsDisplay = true
             }
+        }
+    }
+
+    private static func chmodLocalTarget(_ target: FileEntry, mode: Int, recursive: Bool) -> Int {
+        let fm = FileManager.default
+        do {
+            try fm.setAttributes([.posixPermissions: mode], ofItemAtPath: target.url.path)
+            var count = 1
+            if recursive && target.kind == .directory {
+                let walker = fm.enumerator(at: target.url, includingPropertiesForKeys: [.isDirectoryKey])
+                while let item = walker?.nextObject() as? URL {
+                    try? fm.setAttributes([.posixPermissions: mode], ofItemAtPath: item.path)
+                    count += 1
+                }
+            }
+            return count
+        } catch {
+            return 0
         }
     }
 
@@ -800,21 +898,25 @@ public final class CommanderView: NSView {
             local ? [("Open in Finder", .openInFinder), ("Open Terminal Here", .openTerminal)] : [],
         ]
         for (index, group) in groups.enumerated() where !group.isEmpty {
-            if !menu.items.isEmpty { menu.addItem(.separator()) }
-            for (title, action) in group {
-                let item = NSMenuItem(title: title, action: #selector(contextCommand(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = action.rawValue
-                menu.addItem(item)
-            }
-            // Open With…, right after Open / View, for files and folders on this Mac.
-            if index == 0, local, let entry = panel.model.currentEntry, entry.kind != .parent {
-                let openWith = NSMenuItem(title: "Open With", action: nil, keyEquivalent: "")
-                openWith.submenu = openWithMenu(for: panel.model.operationTargets.map(\.url))
-                menu.addItem(openWith)
-            }
+            appendContextGroup(group, to: menu, includeOpenWith: index == 0 && local, panel: panel)
         }
         return menu
+    }
+
+    private func appendContextGroup(_ group: [(String, CommandAction)], to menu: NSMenu, includeOpenWith: Bool, panel: PanelView) {
+        if !menu.items.isEmpty { menu.addItem(.separator()) }
+        for (title, action) in group {
+            let item = NSMenuItem(title: title, action: #selector(contextCommand(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = action.rawValue
+            menu.addItem(item)
+        }
+        // Open With…, right after Open / View, for files and folders on this Mac.
+        if includeOpenWith, let entry = panel.model.currentEntry, entry.kind != .parent {
+            let openWith = NSMenuItem(title: "Open With", action: nil, keyEquivalent: "")
+            openWith.submenu = openWithMenu(for: panel.model.operationTargets.map(\.url))
+            menu.addItem(openWith)
+        }
     }
 
     /// The apps that can open these files (the default one first), then "Other…".
@@ -826,14 +928,7 @@ public final class CommanderView: NSView {
         var apps = workspace.urlsForApplications(toOpen: first)
         if let d = defaultApp { apps.removeAll { $0 == d }; apps.insert(d, at: 0) }
         for app in apps.prefix(30) {
-            let name = FileManager.default.displayName(atPath: app.path).replacingOccurrences(of: ".app", with: "")
-            let item = NSMenuItem(title: app == defaultApp ? "\(name) (default)" : name, action: #selector(openWithChosen(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = OpenWithChoice(urls: urls, app: app)
-            let icon = workspace.icon(forFile: app.path)
-            icon.size = NSSize(width: 16, height: 16)
-            item.image = icon
-            menu.addItem(item)
+            menu.addItem(openWithAppItem(app, urls: urls, isDefault: app == defaultApp))
         }
         if !apps.isEmpty { menu.addItem(.separator()) }
         let other = NSMenuItem(title: "Other…", action: #selector(openWithOther(_:)), keyEquivalent: "")
@@ -841,6 +936,17 @@ public final class CommanderView: NSView {
         other.representedObject = OpenWithChoice(urls: urls, app: nil)
         menu.addItem(other)
         return menu
+    }
+
+    private func openWithAppItem(_ app: URL, urls: [URL], isDefault: Bool) -> NSMenuItem {
+        let name = FileManager.default.displayName(atPath: app.path).replacingOccurrences(of: ".app", with: "")
+        let item = NSMenuItem(title: isDefault ? "\(name) (default)" : name, action: #selector(openWithChosen(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = OpenWithChoice(urls: urls, app: app)
+        let icon = NSWorkspace.shared.icon(forFile: app.path)
+        icon.size = NSSize(width: 16, height: 16)
+        item.image = icon
+        return item
     }
 
     @objc func openWithChosen(_ sender: NSMenuItem) {
@@ -946,21 +1052,21 @@ public final class CommanderView: NSView {
         // Remote panels (Enter and double-click alike) download files and fetch folders first.
         if ftp.navigate(panel, .open) { panel.needsDisplay = true; return }
         switch panel.model.openCurrent(visibleRows: panel.visibleRows) {
-        case .file(let url) where url.isFileURL:
-            if panel.model.isInsideZip {
-                if let temp = try? ZipArchive.extractToTemp(url: url) {
-                    onOpenFile?(temp)
-                } else {
-                    NSSound.beep()
-                }
-            } else {
-                onOpenFile?(url)
-            }
-        case .file: NSSound.beep()
-        case .failed: NSSound.beep()
+        case .file(let url) where url.isFileURL: openLocalFile(url, in: panel)
+        case .file, .failed: NSSound.beep()
         case .navigated, .none: break
         }
         panel.needsDisplay = true
+    }
+
+    private func openLocalFile(_ url: URL, in panel: PanelView) {
+        guard panel.model.isInsideZip else { onOpenFile?(url); return }
+        openZipTempFile(url)
+    }
+
+    private func openZipTempFile(_ url: URL) {
+        if let temp = try? ZipArchive.extractToTemp(url: url) { onOpenFile?(temp) }
+        else { NSSound.beep() }
     }
 
     // MARK: Selection and folder sizes
@@ -983,11 +1089,7 @@ public final class CommanderView: NSView {
     public private(set) var lastMask = "*.*"
 
     private func markByMask(_ mark: Bool, in panel: PanelView) {
-        let message = (mark ? "Select" : "Deselect")
-            + " files matching (e.g. *.txt;*.jpg — end a mask with / for folders):"
-        guard let text = fileCommands.prompts.askText(title: mark ? "Select Files" : "Deselect Files",
-                                                      message: message, defaultValue: lastMask,
-                                                      okTitle: mark ? "Select" : "Deselect") else { return }
+        guard let text = askMaskPattern(mark: mark) else { return }
         lastMask = text
         let mask = FileMask(text)
         let hits = mask.isEmpty ? 0 : panel.model.setMarks(mark, matching: mask, folders: settings.operation.maskSelectsFolders)
@@ -995,16 +1097,23 @@ public final class CommanderView: NSView {
         panel.needsDisplay = true
     }
 
+    private func askMaskPattern(mark: Bool) -> String? {
+        let message = (mark ? "Select" : "Deselect")
+            + " files matching (e.g. *.txt;*.jpg — end a mask with / for folders):"
+        return fileCommands.prompts.askText(title: mark ? "Select Files" : "Deselect Files",
+                                            message: message, defaultValue: lastMask,
+                                            okTitle: mark ? "Select" : "Deselect")
+    }
+
     /// "3" / F3: Lister for a file (n / p step through the panel's files); on a folder, its size.
     @discardableResult
     func view(in panel: PanelView) -> ListerWindowController? {
         guard let entry = panel.model.currentEntry, entry.kind != .parent else { NSSound.beep(); return nil }
-        if entry.kind == .directory {
-            if panel.model.folderSize(for: entry) == nil, !panel.pendingSizes.contains(entry.name) {
-                calculateSize(of: entry, in: panel)
-            }
-            return nil
-        }
+        if entry.kind == .directory { viewFolderSize(of: entry, in: panel); return nil }
+        return openListerForFile(entry, in: panel)
+    }
+
+    private func openListerForFile(_ entry: FileEntry, in panel: PanelView) -> ListerWindowController? {
         if panel.model.isInsideZip {
             guard let temp = try? ZipArchive.extractToTemp(url: entry.url) else { NSSound.beep(); return nil }
             return openLister(files: [temp], index: 0)
@@ -1012,10 +1121,20 @@ public final class CommanderView: NSView {
         let files = panel.model.entries.filter { $0.kind == .file }
         let index = files.firstIndex { $0.url == entry.url } ?? 0
         return openLister(files: files.map(\.url), index: index, onNavigate: { [weak panel] url in
-            guard let panel = panel else { return }
-            panel.model.focus(url: url, visibleRows: panel.visibleRows)
-            panel.needsDisplay = true
+            Self.focusURL(url, in: panel)
         })
+    }
+
+    private static func focusURL(_ url: URL, in panel: PanelView?) {
+        guard let panel = panel else { return }
+        panel.model.focus(url: url, visibleRows: panel.visibleRows)
+        panel.needsDisplay = true
+    }
+
+    private func viewFolderSize(of entry: FileEntry, in panel: PanelView) {
+        if panel.model.folderSize(for: entry) == nil, !panel.pendingSizes.contains(entry.name) {
+            calculateSize(of: entry, in: panel)
+        }
     }
 
     /// Opens Lister on `files[index]`; n / p step through `files`. Used by the panels and Find Files.
@@ -1066,22 +1185,28 @@ public final class CommanderView: NSView {
 
     public func showLocationMenu(for side: CommanderModel.Side) {
         let panel = view(for: side)
-        let location = locationMenu(for: side)
         let menu = NSMenu(title: "Location")
         menu.autoenablesItems = false
+        populateLocationMenu(menu, from: locationMenu(for: side), side: side)
+        presentMenu(menu, panel)
+    }
+
+    private func populateLocationMenu(_ menu: NSMenu, from location: LocationMenu, side: CommanderModel.Side) {
         for (index, item) in location.items.enumerated() {
             if index == 2 { menu.addItem(.separator()) }
-            // Digits pick an entry straight from the keyboard, like Total Commander's drive letters.
-            let key = index < 9 ? String(index + 1) : ""
-            let menuItem = NSMenuItem(title: LocationMenu.title(for: item), action: #selector(locationChosen(_:)),
-                                      keyEquivalent: key)
-            menuItem.keyEquivalentModifierMask = []
-            menuItem.target = self
-            menuItem.representedObject = LocationChoice(side: side, url: item.url)
-            menuItem.image = Self.menuIcon(for: item)
-            menu.addItem(menuItem)
+            menu.addItem(locationMenuItem(for: item, index: index, side: side))
         }
-        presentMenu(menu, panel)
+    }
+
+    private func locationMenuItem(for item: LocationMenu.Item, index: Int, side: CommanderModel.Side) -> NSMenuItem {
+        // Digits pick an entry straight from the keyboard, like Total Commander's drive letters.
+        let key = index < 9 ? String(index + 1) : ""
+        let menuItem = NSMenuItem(title: LocationMenu.title(for: item), action: #selector(locationChosen(_:)), keyEquivalent: key)
+        menuItem.keyEquivalentModifierMask = []
+        menuItem.target = self
+        menuItem.representedObject = LocationChoice(side: side, url: item.url)
+        menuItem.image = Self.menuIcon(for: item)
+        return menuItem
     }
 
     @objc private func locationChosen(_ sender: NSMenuItem) {
@@ -1103,35 +1228,50 @@ public final class CommanderView: NSView {
         let menu = NSMenu(title: "Quick Locations")
         menu.autoenablesItems = false
         let saved = settings.quickLocations
+        appendSavedHotlistItems(saved, to: menu, side: side)
+        menu.addItem(makeAddHotlistItem(for: side))
+        if !saved.isEmpty { menu.addItem(hotlistRemoveMenu(saved, side: side)) }
+        return menu
+    }
+
+    private func appendSavedHotlistItems(_ saved: [QuickLocation], to menu: NSMenu, side: CommanderModel.Side) {
+        guard !saved.isEmpty else { return }
         for (index, location) in saved.enumerated() {
-            // Digits pick a location straight from the keyboard.
-            let item = NSMenuItem(title: location.name, action: #selector(hotlistChosen(_:)), keyEquivalent: index < 9 ? String(index + 1) : "")
-            item.keyEquivalentModifierMask = []
-            item.target = self
-            item.toolTip = location.path
-            item.representedObject = LocationChoice(side: side, url: URL(fileURLWithPath: location.path, isDirectory: true))
-            item.image = Self.folderIcon(location.path)
-            menu.addItem(item)
+            menu.addItem(hotlistItem(for: location, index: index, side: side))
         }
-        if !saved.isEmpty { menu.addItem(.separator()) }
+        menu.addItem(.separator())
+    }
+
+    private func makeAddHotlistItem(for side: CommanderModel.Side) -> NSMenuItem {
         let add = NSMenuItem(title: "Save Current Location…", action: #selector(saveHotlistLocation(_:)), keyEquivalent: "")
         add.target = self
         add.tag = side == .left ? 0 : 1
         add.isEnabled = !view(for: side).model.isRemote
-        menu.addItem(add)
-        if !saved.isEmpty {
-            let remove = NSMenuItem(title: "Remove", action: nil, keyEquivalent: "")
-            let sub = NSMenu(title: "Remove")
-            for (index, location) in saved.enumerated() {
-                let item = NSMenuItem(title: location.name, action: #selector(removeHotlistLocation(_:)), keyEquivalent: "")
-                item.target = self
-                item.tag = index
-                sub.addItem(item)
-            }
-            remove.submenu = sub
-            menu.addItem(remove)
+        return add
+    }
+
+    private func hotlistItem(for location: QuickLocation, index: Int, side: CommanderModel.Side) -> NSMenuItem {
+        // Digits pick a location straight from the keyboard.
+        let item = NSMenuItem(title: location.name, action: #selector(hotlistChosen(_:)), keyEquivalent: index < 9 ? String(index + 1) : "")
+        item.keyEquivalentModifierMask = []
+        item.target = self
+        item.toolTip = location.path
+        item.representedObject = LocationChoice(side: side, url: URL(fileURLWithPath: location.path, isDirectory: true))
+        item.image = Self.folderIcon(location.path)
+        return item
+    }
+
+    private func hotlistRemoveMenu(_ saved: [QuickLocation], side: CommanderModel.Side) -> NSMenuItem {
+        let remove = NSMenuItem(title: "Remove", action: nil, keyEquivalent: "")
+        let sub = NSMenu(title: "Remove")
+        for (index, location) in saved.enumerated() {
+            let item = NSMenuItem(title: location.name, action: #selector(removeHotlistLocation(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            sub.addItem(item)
         }
-        return menu
+        remove.submenu = sub
+        return remove
     }
 
     @objc func hotlistChosen(_ sender: NSMenuItem) {
@@ -1144,11 +1284,24 @@ public final class CommanderView: NSView {
     @objc func saveHotlistLocation(_ sender: NSMenuItem) {
         let panel = view(for: sender.tag == 0 ? .left : .right)
         guard !panel.model.isRemote else { return NSSound.beep() }
-        let path = panel.model.directory.path
-        let suggested = path == "/" ? "/" : panel.model.directory.lastPathComponent
-        guard let name = fileCommands.prompts.askText(title: "Save Current Location",
-                                                      message: "Name for \(path) in the quick locations:",
-                                                      defaultValue: suggested, okTitle: "Save") else { return }
+        saveLocalHotlistLocation(for: panel.model.directory)
+    }
+
+    private func saveLocalHotlistLocation(for directory: URL) {
+        let path = directory.path
+        guard let name = askHotlistName(for: directory, path: path) else { return }
+        upsertQuickLocation(name: name, path: path)
+        showHint("Saved “\(name)”: ▼ on the path bar or ⌃D goes there", duration: 2)
+    }
+
+    private func askHotlistName(for directory: URL, path: String) -> String? {
+        let suggested = path == "/" ? "/" : directory.lastPathComponent
+        return fileCommands.prompts.askText(title: "Save Current Location",
+                                            message: "Name for \(path) in the quick locations:",
+                                            defaultValue: suggested, okTitle: "Save")
+    }
+
+    private func upsertQuickLocation(name: String, path: String) {
         var new = settings
         if let i = new.quickLocations.firstIndex(where: { $0.path == path }) {
             new.quickLocations[i].name = name
@@ -1156,7 +1309,6 @@ public final class CommanderView: NSView {
             new.quickLocations.append(QuickLocation(name: name, path: path))
         }
         change(new)
-        showHint("Saved “\(name)”: ▼ on the path bar or ⌃D goes there", duration: 2)
     }
 
     @objc func removeHotlistLocation(_ sender: NSMenuItem) {
@@ -1176,12 +1328,19 @@ public final class CommanderView: NSView {
     /// app) are shown in their folder with the cursor on the first and, for several, all marked.
     public func show(_ urls: [URL], in side: CommanderModel.Side) {
         guard let first = urls.first?.standardizedFileURL else { return }
-        let values = try? first.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
-        let isFolder = urls.count == 1 && values?.isDirectory == true && values?.isPackage != true
+        let isFolder = urls.count == 1 && Self.isFolderURL(first)
         let folder = isFolder ? first : first.deletingLastPathComponent()
         jump(side, to: folder)
         guard !isFolder else { return }
-        let panel = view(for: side)
+        markAndFocusShownFiles(urls, first: first, folder: folder, in: view(for: side))
+    }
+
+    private static func isFolderURL(_ url: URL) -> Bool {
+        let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
+        return values?.isDirectory == true && values?.isPackage != true
+    }
+
+    private func markAndFocusShownFiles(_ urls: [URL], first: URL, folder: URL, in panel: PanelView) {
         let here = urls.map(\.standardizedFileURL).filter { $0.deletingLastPathComponent().path == folder.path }
         if here.count > 1 { panel.model.setMarks(Set(here.map(\.lastPathComponent))) }
         panel.model.focus(name: first.lastPathComponent, visibleRows: panel.visibleRows)
@@ -1283,6 +1442,13 @@ public final class CommanderView: NSView {
     /// Shows a tab's folder in the panel. A server folder whose connection is closed goes home.
     private func show(_ tab: PanelTabs.Tab, side: CommanderModel.Side) {
         let panel = view(for: side)
+        navigateToTabFolder(tab, in: panel, side: side)
+        if let focus = tab.focus { panel.model.focus(name: focus, visibleRows: panel.visibleRows) }
+        panel.needsDisplay = true
+        tabsChanged(side)
+    }
+
+    private func navigateToTabFolder(_ tab: PanelTabs.Tab, in panel: PanelView, side: CommanderModel.Side) {
         if !tab.folder.isFileURL && ftp.session(for: panel) == nil {
             showHint("The server connection of this tab is closed", duration: 2.5)
             jump(side, to: FileManager.default.homeDirectoryForCurrentUser)
@@ -1291,9 +1457,6 @@ public final class CommanderView: NSView {
         } else {
             activate(side)
         }
-        if let focus = tab.focus { panel.model.focus(name: focus, visibleRows: panel.visibleRows) }
-        panel.needsDisplay = true
-        tabsChanged(side)
     }
 
     /// Sends one panel to a folder and gives it the focus.

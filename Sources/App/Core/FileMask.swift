@@ -22,25 +22,27 @@ public struct FileMask: Equatable {
     public init(_ text: String) {
         patterns = text
             .split(whereSeparator: { $0 == ";" || $0 == " " })
-            .map(String.init)
-            .filter { !$0.isEmpty }
-            .map { raw in
-                var mask = raw
-                let forFolders = mask.hasSuffix("/")
-                if forFolders { mask.removeLast() }
-                if mask == "*.*" || mask.isEmpty { mask = "*" }   // "*.*" also matches names without a dot
-                var regex = "^"
-                for ch in mask {
-                    switch ch {
-                    case "*": regex += ".*"
-                    case "?": regex += "."
-                    default: regex += NSRegularExpression.escapedPattern(for: String(ch))
-                    }
-                }
-                regex += "$"
-                let re = try? NSRegularExpression(pattern: regex, options: [.caseInsensitive])
-                return Pattern(patternString: regex, regex: re, forFolders: forFolders)
+            .compactMap { $0.isEmpty ? nil : Self.compilePattern(String($0)) }
+    }
+
+    private static func compilePattern(_ raw: String) -> Pattern {
+        var mask = raw
+        let forFolders = mask.hasSuffix("/")
+        if forFolders { mask.removeLast() }
+        if mask == "*.*" || mask.isEmpty { mask = "*" }   // "*.*" also matches names without a dot
+        let regex = "^" + wildcardToRegex(mask) + "$"
+        let re = try? NSRegularExpression(pattern: regex, options: [.caseInsensitive])
+        return Pattern(patternString: regex, regex: re, forFolders: forFolders)
+    }
+
+    private static func wildcardToRegex(_ mask: String) -> String {
+        mask.map { ch in
+            switch ch {
+            case "*": return ".*"
+            case "?": return "."
+            default: return NSRegularExpression.escapedPattern(for: String(ch))
             }
+        }.joined()
     }
 
     public var isEmpty: Bool { patterns.isEmpty }

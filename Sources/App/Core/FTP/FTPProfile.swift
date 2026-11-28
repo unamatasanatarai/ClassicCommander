@@ -226,20 +226,27 @@ public struct FTPProfile: Codable, Equatable {
     static func parseHostPort(_ text: String, defaultPort: Int) -> (String, Int)? {
         let t = text.trimmingCharacters(in: .whitespaces)
         guard !t.isEmpty else { return nil }
-        var host = t, port = defaultPort
-        if t.hasPrefix("[") {                                   // [IPv6]:port
-            guard let close = t.firstIndex(of: "]") else { return nil }
-            host = String(t[t.index(after: t.startIndex)..<close])
-            let rest = t[t.index(after: close)...]
-            if rest.hasPrefix(":") { guard let p = Int(rest.dropFirst()) else { return nil }; port = p }
-            else if !rest.isEmpty { return nil }
-        } else if t.filter({ $0 == ":" }).count == 1, let colon = t.lastIndex(of: ":") {
-            host = String(t[..<colon])
-            guard let p = Int(t[t.index(after: colon)...]) else { return nil }
-            port = p
-        }
-        guard (1...65535).contains(port), isValidHost(host) else { return nil }
+        let parsed = t.hasPrefix("[") ? parseBracketedHostPort(t, defaultPort: defaultPort)
+            : parseUnbracketedHostPort(t, defaultPort: defaultPort)
+        guard let (host, port) = parsed, (1...65535).contains(port), isValidHost(host) else { return nil }
         return (host, port)
+    }
+
+    private static func parseBracketedHostPort(_ t: String, defaultPort: Int) -> (String, Int)? {
+        guard let close = t.firstIndex(of: "]") else { return nil }
+        let host = String(t[t.index(after: t.startIndex)..<close])
+        let rest = t[t.index(after: close)...]
+        if rest.isEmpty { return (host, defaultPort) }
+        guard rest.hasPrefix(":"), let p = Int(rest.dropFirst()) else { return nil }
+        return (host, p)
+    }
+
+    private static func parseUnbracketedHostPort(_ t: String, defaultPort: Int) -> (String, Int)? {
+        if t.filter({ $0 == ":" }).count == 1, let colon = t.lastIndex(of: ":") {
+            guard let p = Int(t[t.index(after: colon)...]) else { return nil }
+            return (String(t[..<colon]), p)
+        }
+        return (t, defaultPort)
     }
 
     /// Host names, IPv4 and IPv6 addresses; no spaces, slashes or other URL characters.
@@ -261,31 +268,44 @@ public struct FTPProfile: Codable, Equatable {
     }
 
     private var authProblems: [String] {
+        if isSFTP { return sftpAuthProblems }
+        return !anonymous && username.isEmpty ? ["Enter a user name, or tick Anonymous login."] : []
+    }
+
+    private var sftpAuthProblems: [String] {
         var list: [String] = []
-        if isSFTP {
-            if username.isEmpty { list.append("Enter a user name.") }
-            if !Self.isValidSSHUser(username) { list.append("The user name must not contain spaces or control characters, or start with -.") }
-            if sshAuth == .keyFile {
-                if keyFile.trimmingCharacters(in: .whitespaces).isEmpty { list.append("Choose a private key file.") }
-                else if !FileManager.default.isReadableFile(atPath: keyFilePath) { list.append("The key file \(keyFile) cannot be read.") }
-            }
-        } else if !anonymous && username.isEmpty {
-            list.append("Enter a user name, or tick Anonymous login.")
-        }
+        if username.isEmpty { list.append("Enter a user name.") }
+        if !Self.isValidSSHUser(username) { list.append("The user name must not contain spaces or control characters, or start with -.") }
+        if sshAuth == .keyFile, let problem = keyFileProblem { list.append(problem) }
         return list
+    }
+
+    private var keyFileProblem: String? {
+        if keyFile.trimmingCharacters(in: .whitespaces).isEmpty { return "Choose a private key file." }
+        if !FileManager.default.isReadableFile(atPath: keyFilePath) { return "The key file \(keyFile) cannot be read." }
+        return nil
     }
 
     private var pathAndProxyProblems: [String] {
         var list: [String] = []
         if !remoteDirectory.isEmpty && !remoteDirectory.hasPrefix("/") { list.append("The remote directory must start with /.") }
         if remoteDirectory.contains("\0") || remoteDirectory.contains("\n") { list.append("The remote directory contains invalid characters.") }
-        if FTPClient.hasControlCharacters(username) || FTPClient.hasControlCharacters(proxyUsername) {
-            list.append("User names must not contain line breaks or other control characters.")
-        }
-        if proxyKind != .none && FTPProfile.parseHostPort(proxyHost, defaultPort: proxyKind == .http ? 8080 : 1080) == nil {
-            list.append("Enter the proxy as host:port.")
-        }
+        return list + credentialAndProxyProblems
+    }
+
+    private var credentialAndProxyProblems: [String] {
+        var list: [String] = []
+        if hasControlCharUser { list.append("User names must not contain line breaks or other control characters.") }
+        if hasInvalidProxy { list.append("Enter the proxy as host:port.") }
         return list
+    }
+
+    private var hasControlCharUser: Bool {
+        FTPClient.hasControlCharacters(username) || FTPClient.hasControlCharacters(proxyUsername)
+    }
+
+    private var hasInvalidProxy: Bool {
+        proxyKind != .none && FTPProfile.parseHostPort(proxyHost, defaultPort: proxyKind == .http ? 8080 : 1080) == nil
     }
 
     /// SSH user names go to ssh as an option value: no whitespace, control characters or leading "-".
@@ -301,25 +321,37 @@ public struct FTPProfile: Codable, Equatable {
     public static func fromURL(_ text: String) -> (FTPProfile, password: String?)? {
         guard let comps = URLComponents(string: text.trimmingCharacters(in: .whitespaces)),
               let scheme = comps.scheme?.lowercased(), ["ftp", "ftps", "sftp"].contains(scheme),
-              let host = comps.host, isValidHost(host) else { return nil }
-        // Line breaks hidden in a link (%0A) would reach the login commands: such links are refused.
-        for part in [comps.user, comps.password, comps.path] where FTPClient.hasControlCharacters(part ?? "") { return nil }
+              let host = comps.host, isValidHost(host),
+              !hasControlCharsInURL(comps) else { return nil }
         var p = FTPProfile()
         p.security = scheme == "ftps" ? .implicitTLS : .explicitTLS
         p.connectionProtocol = scheme == "sftp" ? .sftp : .ftp
         p.host = host
         p.port = comps.port ?? p.defaultPort
+        applyURLAuth(&p, comps: comps)
+        p.remoteDirectory = comps.path
+        p.name = host
+        return (p, comps.password)
+    }
+
+    private static func hasControlCharsInURL(_ comps: URLComponents) -> Bool {
+        // Line breaks hidden in a link (%0A) would reach the login commands: such links are refused.
+        [comps.user, comps.password, comps.path].contains { FTPClient.hasControlCharacters($0 ?? "") }
+    }
+
+    private static func applyURLAuth(_ p: inout FTPProfile, comps: URLComponents) {
         p.username = comps.user ?? ""
         if p.isSFTP {
-            p.sshAuth = comps.password == nil ? .keyFile : .password
-            if p.sshAuth == .keyFile { p.keyFile = defaultKeyFile() }
+            applySFTPURLAuth(&p, hasPassword: comps.password != nil)
         } else {
             p.anonymous = p.username.isEmpty || p.username.lowercased() == "anonymous"
         }
         if p.anonymous { p.username = "" }
-        p.remoteDirectory = comps.path.isEmpty ? "" : comps.path
-        p.name = host
-        return (p, comps.password)
+    }
+
+    private static func applySFTPURLAuth(_ p: inout FTPProfile, hasPassword: Bool) {
+        p.sshAuth = hasPassword ? .password : .keyFile
+        if p.sshAuth == .keyFile { p.keyFile = defaultKeyFile() }
     }
 
     /// One line describing the profile in the connection manager.

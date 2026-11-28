@@ -49,23 +49,13 @@ public final class ChmodDialogController: NSWindowController {
         }
 
         public var mode: Int {
-            var m = 0
-            if setUID { m |= 0o4000 }
-            if setGID { m |= 0o2000 }
-            if sticky { m |= 0o1000 }
-
-            if ownerRead { m |= 0o400 }
-            if ownerWrite { m |= 0o200 }
-            if ownerExecute { m |= 0o100 }
-
-            if groupRead { m |= 0o040 }
-            if groupWrite { m |= 0o020 }
-            if groupExecute { m |= 0o010 }
-
-            if otherRead { m |= 0o004 }
-            if otherWrite { m |= 0o002 }
-            if otherExecute { m |= 0o001 }
-            return m
+            let flags: [(Bool, Int)] = [
+                (setUID, 0o4000), (setGID, 0o2000), (sticky, 0o1000),
+                (ownerRead, 0o400), (ownerWrite, 0o200), (ownerExecute, 0o100),
+                (groupRead, 0o040), (groupWrite, 0o020), (groupExecute, 0o010),
+                (otherRead, 0o004), (otherWrite, 0o002), (otherExecute, 0o001),
+            ]
+            return flags.reduce(0) { $1.0 ? ($0 | $1.1) : $0 }
         }
 
         public var octalString: String {
@@ -80,8 +70,10 @@ public final class ChmodDialogController: NSWindowController {
 
         private func triad(_ r: Bool, _ w: Bool, _ x: Bool, special: Bool, lower: String, upper: String) -> String {
             let exec = special ? (x ? lower : upper) : (x ? "x" : "-")
-            return (r ? "r" : "-") + (w ? "w" : "-") + exec
+            return Self.rwxChar(r, "r") + Self.rwxChar(w, "w") + exec
         }
+
+        private static func rwxChar(_ on: Bool, _ ch: String) -> String { on ? ch : "-" }
     }
 
     public let targets: [FileEntry]
@@ -145,9 +137,7 @@ public final class ChmodDialogController: NSWindowController {
         window.makeKeyAndOrderFront(nil)
     }
 
-    private func build() -> NSView {
-        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-
+    private func makeHeaderRow() -> NSStackView {
         let heading = NSTextField(labelWithString: "Permissions")
         heading.font = .systemFont(ofSize: 20, weight: .semibold)
 
@@ -178,22 +168,25 @@ public final class ChmodDialogController: NSWindowController {
         let topRow = NSStackView(views: [headerText, NSView(), badgeStack])
         topRow.alignment = .bottom
         topRow.spacing = 16
+        return topRow
+    }
 
-        func makeColHeader(_ text: String, align: NSTextAlignment = .center) -> NSTextField {
-            let lbl = NSTextField(labelWithString: text)
-            lbl.font = .systemFont(ofSize: 13, weight: .semibold)
-            lbl.textColor = .secondaryLabelColor
-            lbl.alignment = align
-            return lbl
-        }
+    private func makeColHeader(_ text: String, align: NSTextAlignment = .center) -> NSTextField {
+        let lbl = NSTextField(labelWithString: text)
+        lbl.font = .systemFont(ofSize: 13, weight: .semibold)
+        lbl.textColor = .secondaryLabelColor
+        lbl.alignment = align
+        return lbl
+    }
 
-        func makeRowLabel(_ text: String) -> NSTextField {
-            let lbl = NSTextField(labelWithString: text)
-            lbl.font = .systemFont(ofSize: 14)
-            lbl.textColor = .labelColor
-            return lbl
-        }
+    private func makeRowLabel(_ text: String) -> NSTextField {
+        let lbl = NSTextField(labelWithString: text)
+        lbl.font = .systemFont(ofSize: 14)
+        lbl.textColor = .labelColor
+        return lbl
+    }
 
+    private func configureMatrixBoxes() {
         let matrixBoxes = [
             (cbOwnerRead, "Owner Read"), (cbOwnerWrite, "Owner Write"), (cbOwnerExec, "Owner Execute"),
             (cbGroupRead, "Group Read"), (cbGroupWrite, "Group Write"), (cbGroupExec, "Group Execute"),
@@ -205,13 +198,23 @@ public final class ChmodDialogController: NSWindowController {
             b.action = #selector(checkboxChanged)
             b.setAccessibilityLabel(accLabel)
         }
+    }
 
-        let matrixCard = NSBox()
-        matrixCard.boxType = .custom
-        matrixCard.borderWidth = 1
-        matrixCard.cornerRadius = 10
-        matrixCard.borderColor = isDark ? NSColor(white: 1, alpha: 0.14) : NSColor(srgbRed: 214/255, green: 214/255, blue: 214/255, alpha: 1)
-        matrixCard.fillColor = isDark ? NSColor(white: 0.18, alpha: 1) : .white
+    private func makeMatrixCard(isDark: Bool) -> NSBox {
+        let card = NSBox()
+        card.boxType = .custom
+        card.borderWidth = 1
+        card.cornerRadius = 10
+        card.borderColor = isDark ? NSColor(white: 1, alpha: 0.14) : NSColor(srgbRed: 214/255, green: 214/255, blue: 214/255, alpha: 1)
+        card.fillColor = isDark ? NSColor(white: 0.18, alpha: 1) : .white
+        return card
+    }
+
+    private func build() -> NSView {
+        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let topRow = makeHeaderRow()
+        configureMatrixBoxes()
+        let matrixCard = makeMatrixCard(isDark: isDark)
 
         let matrixGrid = NSGridView(views: [
             [NSGridCell.emptyContentView, makeColHeader("Owner"), makeColHeader("Group"), makeColHeader("Others")],

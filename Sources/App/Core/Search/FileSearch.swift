@@ -47,54 +47,45 @@ public final class FileSearch {
         self.onProgress = onProgress
         predicate = .all(try SearchQueryBuilder.predicates(for: config))
         content = config.general.content.enabled ? try ContentMatcher(config.general.content) : nil
-
-        if config.general.selectedItemsOnly {
-            guard !selectedItems.isEmpty else {
-                throw SearchValidationError(message: "Nothing is selected in the panel to search in.")
-            }
-            roots = selectedItems
-        } else {
-            let typed = config.general.searchPaths
-            guard !typed.isEmpty else { throw SearchValidationError(message: "Enter a folder in “Search in”.") }
-            var urls: [URL] = []
-            for path in typed {
-                // A server address ("sftp://user@host/path") of a connected panel.
-                if let remote = remoteAddress(path) ?? (path.hasPrefix(RemoteSession.scheme + "://") ? URL(string: path) : nil) {
-                    urls.append(remote)
-                    continue
-                }
-                let expanded = (path as NSString).expandingTildeInPath
-                let url = (expanded.hasPrefix("/") ? URL(fileURLWithPath: expanded) : base.appendingPathComponent(expanded))
-                    .standardizedFileURL
-                var isDir: ObjCBool = false
-                guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
-                    throw SearchValidationError(message: "“\(path)” is not a folder.")
-                }
-                urls.append(url)
-            }
-            roots = urls
-        }
+        roots = try Self.resolveRoots(config: config, selectedItems: selectedItems, base: base, remoteAddress: remoteAddress)
         if config.advanced.duplicates.enabled && config.advanced.duplicates.sameContents && roots.contains(where: \.isRemoteLocation) {
             throw SearchValidationError(message: "Duplicates by content cannot be searched on a server (every file would have to be downloaded). Untick “same contents”.")
         }
     }
 
+    private static func resolveRoots(
+        config: FileSearchConfiguration,
+        selectedItems: [URL],
+        base: URL,
+        remoteAddress: (String) -> URL?
+    ) throws -> [URL] {
+        if config.general.selectedItemsOnly {
+            guard !selectedItems.isEmpty else {
+                throw SearchValidationError(message: "Nothing is selected in the panel to search in.")
+            }
+            return selectedItems
+        }
+        let typed = config.general.searchPaths
+        guard !typed.isEmpty else { throw SearchValidationError(message: "Enter a folder in “Search in”.") }
+        return try typed.map { path in
+            if let remote = remoteAddress(path) ?? (path.hasPrefix(RemoteSession.scheme + "://") ? URL(string: path) : nil) {
+                return remote
+            }
+            let expanded = (path as NSString).expandingTildeInPath
+            let url = (expanded.hasPrefix("/") ? URL(fileURLWithPath: expanded) : base.appendingPathComponent(expanded))
+                .standardizedFileURL
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
+                throw SearchValidationError(message: "“\(path)” is not a folder.")
+            }
+            return url
+        }
+    }
+
     public func run() -> Report {
         var report = Report()
-        for root in roots {
-            if isCancelled() { break }
-            if root.isRemoteLocation {
-                searchRemote(root, into: &report)
-                continue
-            }
-            var isDir: ObjCBool = false
-            if FileManager.default.fileExists(atPath: root.path, isDirectory: &isDir), isDir.boolValue {
-                walk(root, into: &report)
-            } else if let item = SearchItem.read(root) {
-                // A selected file is tested on its own.
-                report.scanned += 1
-                consider(item, into: &report)
-            }
+        for root in roots where !isCancelled() {
+            searchRoot(root, into: &report)
         }
         if config.advanced.duplicates.enabled && !isCancelled() {
             report.duplicateGroups = DuplicateFinder.groups(of: report.found, config: config.advanced.duplicates,
@@ -102,6 +93,21 @@ public final class FileSearch {
         }
         report.cancelled = isCancelled()
         return report
+    }
+
+    private func searchRoot(_ root: URL, into report: inout Report) {
+        if root.isRemoteLocation { searchRemote(root, into: &report) } else { searchLocal(root, into: &report) }
+    }
+
+    private func searchLocal(_ root: URL, into report: inout Report) {
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: root.path, isDirectory: &isDir), isDir.boolValue {
+            walk(root, into: &report)
+        } else if let item = SearchItem.read(root) {
+            // A selected file is tested on its own.
+            report.scanned += 1
+            consider(item, into: &report)
+        }
     }
 
     private func walk(_ root: URL, into report: inout Report) {
@@ -118,32 +124,41 @@ public final class FileSearch {
             report.errors.append("\(root.path): cannot be read")
             return
         }
-        let maxLevel: Int?
-        switch config.general.depth {
-        case .all: maxLevel = nil
-        case .currentOnly: maxLevel = 1
-        case .limited(let n): maxLevel = max(1, n + 1)
-        }
+        let maxLevel: Int? = remoteMaxLevel
         let realPrefix = real.path.hasSuffix("/") ? real.path : real.path + "/"
         var lastProgress = Date.distantPast
+        walkEntries(walker, realPrefix: realPrefix, root: root, maxLevel: maxLevel, lastProgress: &lastProgress, into: &report)
+        report.errors += walkErrors
+    }
 
+    private func walkEntries(
+        _ walker: FileManager.DirectoryEnumerator, realPrefix: String, root: URL,
+        maxLevel: Int?, lastProgress: inout Date, into report: inout Report
+    ) {
         for case let url as URL in walker {
             if isCancelled() { break }
-            let level = walker.level
-            let relative = url.path.hasPrefix(realPrefix) ? String(url.path.dropFirst(realPrefix.count)) : url.lastPathComponent
-            guard let item = SearchItem.read(relative: relative, under: root, statPath: url.path) else { continue }  // vanished meanwhile
-            let shown = item.url
-            if item.isDirectory, let maxLevel = maxLevel, level >= maxLevel {
-                walker.skipDescendants()
-            }
-            report.scanned += 1
-            if Date().timeIntervalSince(lastProgress) > 0.2 {
-                lastProgress = Date()
-                onProgress(report.scanned, shown.deletingLastPathComponent().path)
-            }
-            consider(item, into: &report, readPath: url)
+            visitWalkedURL(url, walker: walker, realPrefix: realPrefix, root: root,
+                           maxLevel: maxLevel, lastProgress: &lastProgress, into: &report)
         }
-        report.errors += walkErrors
+    }
+
+    private func visitWalkedURL(
+        _ url: URL, walker: FileManager.DirectoryEnumerator, realPrefix: String,
+        root: URL, maxLevel: Int?, lastProgress: inout Date, into report: inout Report
+    ) {
+        let level = walker.level
+        let relative = url.path.hasPrefix(realPrefix) ? String(url.path.dropFirst(realPrefix.count)) : url.lastPathComponent
+        guard let item = SearchItem.read(relative: relative, under: root, statPath: url.path) else { return }  // vanished meanwhile
+        if item.isDirectory, let maxLevel = maxLevel, level >= maxLevel { walker.skipDescendants() }
+        report.scanned += 1
+        reportProgressIfDue(scanned: report.scanned, folder: item.url.deletingLastPathComponent().path, lastProgress: &lastProgress)
+        consider(item, into: &report, readPath: url)
+    }
+
+    private func reportProgressIfDue(scanned: Int, folder: String, lastProgress: inout Date) {
+        guard Date().timeIntervalSince(lastProgress) > 0.2 else { return }
+        lastProgress = Date()
+        onProgress(scanned, folder)
     }
 
     // MARK: Servers
@@ -163,42 +178,57 @@ public final class FileSearch {
             return
         }
         let rootPath = RemoteSession.path(of: root)
-        // A selected entry may be a file: look it up in its folder's listing.
-        let parent = (rootPath as NSString).deletingLastPathComponent
-        if rootPath != "/", let entry = (try? session.fetch(parent.isEmpty ? "/" : parent))?.first(where: { $0.name == (rootPath as NSString).lastPathComponent }),
-           !entry.isDirectory {
-            report.scanned += 1
-            considerRemote(item(entry, path: rootPath, session: session), session: session, into: &report)
-            return
-        }
+        if searchRemoteSingleFile(rootPath, session: session, into: &report) { return }
         let maxLevel: Int? = remoteMaxLevel
         var queue: [(path: String, level: Int)] = [(rootPath, 0)]
         var next = 0
         var lastProgress = Date.distantPast
-        while next < queue.count {
+        while next < queue.count, !isCancelled() {
             let (dir, level) = queue[next]
             next += 1
-            if isCancelled() { return }
-            let listing: [RemoteEntry]
-            do { listing = try session.fetch(dir, useCache: false, store: false) } catch {
-                report.errors.append("\(session.addressLabel)\(dir): \((error as? FTPError)?.message ?? error.localizedDescription)")
-                continue
-            }
-            if Date().timeIntervalSince(lastProgress) > 0.2 {
-                lastProgress = Date()
-                onProgress(report.scanned, session.addressLabel + dir)
-            }
-            for entry in listing {
-                if isCancelled() { return }
-                let path = (dir == "/" ? "" : dir) + "/" + entry.name
-                report.scanned += 1
-                if entry.isDirectory, maxLevel.map({ level + 1 < $0 }) ?? true, level + 1 < RemoteSession.maxDepth,
-                   report.scanned < RemoteSession.maxEntries {
-                    queue.append((path, level + 1))
-                }
-                considerRemote(item(entry, path: path, session: session), session: session, into: &report)
-            }
+            guard let listing = fetchRemoteDirectory(dir, session: session, into: &report) else { continue }
+            reportProgressIfDue(scanned: report.scanned, folder: session.addressLabel + dir, lastProgress: &lastProgress)
+            processRemoteListing(listing, dir: dir, level: level, maxLevel: maxLevel, session: session, queue: &queue, into: &report)
         }
+    }
+
+    private func fetchRemoteDirectory(_ dir: String, session: RemoteSession, into report: inout Report) -> [RemoteEntry]? {
+        do {
+            return try session.fetch(dir, useCache: false, store: false)
+        } catch {
+            report.errors.append("\(session.addressLabel)\(dir): \((error as? FTPError)?.message ?? error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func processRemoteListing(
+        _ listing: [RemoteEntry], dir: String, level: Int, maxLevel: Int?,
+        session: RemoteSession, queue: inout [(path: String, level: Int)], into report: inout Report
+    ) {
+        for entry in listing where !isCancelled() {
+            let path = (dir == "/" ? "" : dir) + "/" + entry.name
+            report.scanned += 1
+            if shouldDescendRemote(entry, level: level, maxLevel: maxLevel, scanned: report.scanned) {
+                queue.append((path, level + 1))
+            }
+            considerRemote(item(entry, path: path, session: session), session: session, into: &report)
+        }
+    }
+
+    private func shouldDescendRemote(_ entry: RemoteEntry, level: Int, maxLevel: Int?, scanned: Int) -> Bool {
+        entry.isDirectory && (maxLevel.map { level + 1 < $0 } ?? true)
+            && level + 1 < RemoteSession.maxDepth && scanned < RemoteSession.maxEntries
+    }
+
+    private func searchRemoteSingleFile(_ rootPath: String, session: RemoteSession, into report: inout Report) -> Bool {
+        // A selected entry may be a file: look it up in its folder's listing.
+        let parent = (rootPath as NSString).deletingLastPathComponent
+        guard rootPath != "/",
+              let entry = (try? session.fetch(parent.isEmpty ? "/" : parent))?.first(where: { $0.name == (rootPath as NSString).lastPathComponent }),
+              !entry.isDirectory else { return false }
+        report.scanned += 1
+        considerRemote(item(entry, path: rootPath, session: session), session: session, into: &report)
+        return true
     }
 
     /// A server entry as a search item (owner unknown: never "system"; permissions from the listing).
@@ -217,6 +247,10 @@ public final class FileSearch {
             report.errors.append("\(session.addressLabel)\(RemoteSession.path(of: item.url)): larger than 200 MB, not downloaded for the text search")
             return
         }
+        downloadAndConsiderRemote(item, session: session, into: &report)
+    }
+
+    private func downloadAndConsiderRemote(_ item: SearchItem, session: RemoteSession, into report: inout Report) {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("cc-find-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: folder) }
         let local = folder.appendingPathComponent(item.name)
@@ -235,20 +269,28 @@ public final class FileSearch {
 
     private func consider(_ item: SearchItem, into report: inout Report, readPath: URL? = nil) {
         guard predicate.test(item) else { return }
-        if let content = content {
-            do {
-                let outcome = try content.search(readPath ?? item.url, isCancelled: isCancelled)
-                switch outcome {
-                case .skipped: return
-                case .contains: if config.general.content.invertMatch { return }
-                case .lacks: if !config.general.content.invertMatch { return }
-                }
-            } catch {
-                report.errors.append("\(item.url.path): \((error as NSError).localizedDescription)")
-                return
-            }
+        if let content = content, !matchesContent(content, item: item, readPath: readPath, into: &report) {
+            return
         }
         report.found.append(item)
         if !config.advanced.duplicates.enabled { onFound(item) }
+    }
+
+    private func matchesContent(_ content: ContentMatcher, item: SearchItem, readPath: URL?, into report: inout Report) -> Bool {
+        do {
+            let outcome = try content.search(readPath ?? item.url, isCancelled: isCancelled)
+            return Self.outcomeMatches(outcome, invertMatch: config.general.content.invertMatch)
+        } catch {
+            report.errors.append("\(item.url.path): \((error as NSError).localizedDescription)")
+            return false
+        }
+    }
+
+    private static func outcomeMatches(_ outcome: ContentMatcher.Outcome, invertMatch: Bool) -> Bool {
+        switch outcome {
+        case .skipped: return false
+        case .contains: return !invertMatch
+        case .lacks: return invertMatch
+        }
     }
 }

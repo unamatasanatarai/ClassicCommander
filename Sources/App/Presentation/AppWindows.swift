@@ -44,8 +44,9 @@ enum AppWindows {
         styleButtons(in: window)
         let main = mainWindow?.isVisible == true ? mainWindow : nil
         let screen = (main?.screen ?? NSScreen.main)?.visibleFrame
-        guard let anchor = main?.frame ?? screen else { return }
-        window.setFrame(centered(window.frame, on: anchor, within: screen), display: false)
+        if let anchor = main?.frame ?? screen {
+            window.setFrame(centered(window.frame, on: anchor, within: screen), display: false)
+        }
     }
 
     /// `frame` centred on `anchor`, then kept inside `screen` (when given).
@@ -90,24 +91,30 @@ enum AppWindows {
     /// whenever a button currently has focus (or no text/table control has focus).
     @discardableResult
     static func handleButtonNav(_ event: NSEvent, in window: NSWindow) -> Bool {
-        let responder = window.firstResponder
-        if responder is NSText || responder is NSTextView || responder is NSTableView || responder is NSComboBox {
-            return false
-        }
-        let mods = event.modifierFlags.intersection([.command, .option, .control])
-        guard mods.isEmpty else { return false }
+        guard !isTextOrTableResponder(window.firstResponder),
+              event.modifierFlags.intersection([.command, .option, .control]).isEmpty else { return false }
+        let currentButton = (window.firstResponder as? NSButton).flatMap { isPushButton($0) ? $0 : nil }
+        if triggerNonDefaultButton(currentButton, keyCode: event.keyCode) { return true }
+        return navigateByArrow(keyCode: event.keyCode, from: currentButton, in: window)
+    }
 
-        let currentButton = (responder as? NSButton).flatMap { isPushButton($0) ? $0 : nil }
-        if event.keyCode == 36, let current = currentButton, current.keyEquivalent != "\r" {
-            current.performClick(nil)
-            return true
-        }
+    private static func navigateByArrow(keyCode: UInt16, from current: NSButton?, in window: NSWindow) -> Bool {
+        guard let direction = arrowDirection(for: keyCode) else { return false }
+        if let current = current { return moveButtonFocus(from: current, in: window, direction: direction) }
+        return focusInitialOrFirstButton(in: window)
+    }
 
-        guard let d = arrowDirection(for: event.keyCode) else { return false }
+    private static func triggerNonDefaultButton(_ button: NSButton?, keyCode: UInt16) -> Bool {
+        guard keyCode == 36, let current = button, current.keyEquivalent != "\r" else { return false }
+        current.performClick(nil)
+        return true
+    }
 
-        if let current = currentButton {
-            return moveButtonFocus(from: current, in: window, direction: d)
-        }
+    private static func isTextOrTableResponder(_ responder: NSResponder?) -> Bool {
+        responder is NSText || responder is NSTextView || responder is NSTableView || responder is NSComboBox
+    }
+
+    private static func focusInitialOrFirstButton(in window: NSWindow) -> Bool {
         if let initial = window.initialFirstResponder as? NSButton, isPushButton(initial), initial.isEnabled {
             window.makeFirstResponder(initial)
             return true
@@ -142,44 +149,29 @@ enum AppWindows {
     static func moveButtonFocus(from current: NSButton, in window: NSWindow, direction: (dx: CGFloat, dy: CGFloat)) -> Bool {
         guard let root = window.contentView else { return false }
         var buttons: [NSButton] = []
-        func collect(_ view: NSView) {
-            guard !view.isHidden else { return }
-            if let b = view as? NSButton, isPushButton(b), b.isEnabled { buttons.append(b) }
-            view.subviews.forEach(collect)
-        }
-        collect(root)
+        collectEnabledPushButtons(in: root, into: &buttons)
         let curRect = current.convert(current.bounds, to: nil)
         let curCenter = NSPoint(x: curRect.midX, y: curRect.midY)
-
-        var best: (button: NSButton, score: CGFloat)?
-        for candidate in buttons where candidate !== current {
+        let best = buttons.compactMap { candidate -> (button: NSButton, score: CGFloat)? in
+            guard candidate !== current else { return nil }
             let r = candidate.convert(candidate.bounds, to: nil)
-            guard let score = directionalScore(dx: r.midX - curCenter.x, dy: r.midY - curCenter.y, direction: direction) else { continue }
-            if best == nil || score < best!.score {
-                best = (candidate, score)
-            }
-        }
+            return directionalScore(dx: r.midX - curCenter.x, dy: r.midY - curCenter.y, direction: direction).map { (candidate, $0) }
+        }.min { $0.score < $1.score }
         guard let target = best?.button else { return false }
         window.makeFirstResponder(target)
         return true
     }
 
+    private static func collectEnabledPushButtons(in view: NSView, into buttons: inout [NSButton]) {
+        guard !view.isHidden else { return }
+        if let b = view as? NSButton, isPushButton(b), b.isEnabled { buttons.append(b) }
+        for subview in view.subviews { collectEnabledPushButtons(in: subview, into: &buttons) }
+    }
+
     private static func directionalScore(dx: CGFloat, dy: CGFloat, direction: (dx: CGFloat, dy: CGFloat)) -> CGFloat? {
-        let primary: CGFloat
-        let perp: CGFloat
-        if direction.dx > 0 {
-            guard dx > 4 else { return nil }
-            primary = dx; perp = abs(dy)
-        } else if direction.dx < 0 {
-            guard dx < -4 else { return nil }
-            primary = -dx; perp = abs(dy)
-        } else if direction.dy > 0 {
-            guard dy > 4 else { return nil }
-            primary = dy; perp = abs(dx)
-        } else {
-            guard dy < -4 else { return nil }
-            primary = -dy; perp = abs(dx)
-        }
+        let primary = dx * direction.dx + dy * direction.dy
+        guard primary > 4 else { return nil }
+        let perp = abs(dx * direction.dy + dy * direction.dx)
         return primary + perp * 3.0
     }
 
@@ -208,21 +200,28 @@ enum AppWindows {
     static func styleButtons(in root: NSView) {
         var groups: [ObjectIdentifier: [NSButton]] = [:]
         var order: [ObjectIdentifier] = []
-        func visit(_ view: NSView) {
-            if let button = view as? NSButton, isPushButton(button) {
-                stylePushButton(button)
-                if let key = groupKey(of: button) {
-                    if groups[key] == nil { order.append(key) }
-                    groups[key, default: []].append(button)
-                }
-            }
-            view.subviews.forEach(visit)
-            if let tabs = view as? NSTabView {
-                for item in tabs.tabViewItems { if let page = item.view, page.superview == nil { visit(page) } }
+        collectPushButtons(in: root, groups: &groups, order: &order)
+        for key in order { equalizeWidths(groups[key] ?? []) }
+    }
+
+    private static func collectPushButtons(in view: NSView, groups: inout [ObjectIdentifier: [NSButton]], order: inout [ObjectIdentifier]) {
+        if let button = view as? NSButton, isPushButton(button) {
+            stylePushButton(button)
+            if let key = groupKey(of: button) {
+                if groups[key] == nil { order.append(key) }
+                groups[key, default: []].append(button)
             }
         }
-        visit(root)
-        for key in order { equalizeWidths(groups[key] ?? []) }
+        for subview in view.subviews { collectPushButtons(in: subview, groups: &groups, order: &order) }
+        if let tabs = view as? NSTabView { collectTabPages(in: tabs, groups: &groups, order: &order) }
+    }
+
+    private static func collectTabPages(in tabs: NSTabView, groups: inout [ObjectIdentifier: [NSButton]], order: inout [ObjectIdentifier]) {
+        for item in tabs.tabViewItems {
+            if let page = item.view, page.superview == nil {
+                collectPushButtons(in: page, groups: &groups, order: &order)
+            }
+        }
     }
 
     /// Push buttons are bordered: checkboxes and radio buttons are not (pop-ups are NSButtons too).
@@ -231,27 +230,31 @@ enum AppWindows {
     }
 
     static func stylePushButton(_ button: NSButton) {
-        let isIconOnlySquare = button.bezelStyle == .regularSquare && button.imagePosition == .imageOnly
-        if !isIconOnlySquare && button.bezelStyle != .recessed && button.bezelStyle != .inline {
-            button.bezelStyle = .rounded
-        }
+        if shouldUseRoundedBezel(button) { button.bezelStyle = .rounded }
         button.controlSize = .regular
         // Titles drawn in their own colours (Synchronize's arrows) or with underlined mnemonics keep them.
-        let title = button.attributedTitle
-        let colour = title.length > 0 ? title.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor : nil
-        let coloured = colour.map { $0 != .controlTextColor } ?? false
-        var hasUnderline = false
-        if title.length > 0 {
-            title.enumerateAttribute(.underlineStyle, in: NSRange(location: 0, length: title.length)) { val, _, stop in
-                if let style = val as? Int, style != 0 { hasUnderline = true; stop.pointee = true }
-            }
-        }
-        if !coloured && !hasUnderline {
+        if !hasCustomTitleStyling(button.attributedTitle) {
             button.font = .systemFont(ofSize: NSFont.systemFontSize)
         }
         if button.keyEquivalent == "\r" && button.bezelColor != danger {
             button.bezelColor = accent
         }
+    }
+
+    private static func shouldUseRoundedBezel(_ button: NSButton) -> Bool {
+        let isIconOnlySquare = button.bezelStyle == .regularSquare && button.imagePosition == .imageOnly
+        return !isIconOnlySquare && button.bezelStyle != .recessed && button.bezelStyle != .inline
+    }
+
+    private static func hasCustomTitleStyling(_ title: NSAttributedString) -> Bool {
+        guard title.length > 0 else { return false }
+        let colour = title.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+        if colour.map({ $0 != .controlTextColor }) ?? false { return true }
+        var hasUnderline = false
+        title.enumerateAttribute(.underlineStyle, in: NSRange(location: 0, length: title.length)) { val, _, stop in
+            if let style = val as? Int, style != 0 { hasUnderline = true; stop.pointee = true }
+        }
+        return hasUnderline
     }
 
     /// Buttons side by side: the arranged views of one stack, or one column of a grid.

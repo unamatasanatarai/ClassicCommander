@@ -76,11 +76,16 @@ public final class SFTPClient: RemoteClient {
     static func isValidHostKey(_ line: String) -> Bool {
         let parts = line.split(separator: " ", omittingEmptySubsequences: false)
         guard parts.count == 2, !parts[1].isEmpty else { return false }
-        let type = parts[0], blob = parts[1]
-        let typeOK = ["ssh-", "ecdsa-", "sk-"].contains { type.hasPrefix($0) }
+        return isSafeKeyType(parts[0]) && isBase64Blob(parts[1])
+    }
+
+    private static func isSafeKeyType(_ type: Substring) -> Bool {
+        ["ssh-", "ecdsa-", "sk-"].contains { type.hasPrefix($0) }
             && type.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) || "-@.".unicodeScalars.contains($0) }
-        let blobOK = blob.unicodeScalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || "+/=".unicodeScalars.contains($0)) }
-        return typeOK && blobOK
+    }
+
+    private static func isBase64Blob(_ blob: Substring) -> Bool {
+        blob.unicodeScalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || "+/=".unicodeScalars.contains($0)) }
     }
 
     // MARK: Arguments
@@ -113,15 +118,20 @@ public final class SFTPClient: RemoteClient {
         case .password:
             args += ["-o", "PubkeyAuthentication=no", "-o", "PreferredAuthentications=password,keyboard-interactive"]
         }
-        if profile.proxyKind != .none,
-           let (host, port) = FTPProfile.parseHostPort(profile.proxyHost, defaultPort: profile.proxyKind == .http ? 8080 : 1080) {
-            // Validated host and port only: ProxyCommand runs through the shell.
-            let kind = profile.proxyKind == .http ? "connect" : "5"
-            let proxy = host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"
-            args += ["-o", "ProxyCommand=/usr/bin/nc -X \(kind) -x \(proxy) %h %p"]
-        }
+        args += proxyArguments()
         args.append(profile.host.contains(":") ? "[\(profile.host)]" : profile.host)
         return args
+    }
+
+    private func proxyArguments() -> [String] {
+        guard profile.proxyKind != .none,
+              let (host, port) = FTPProfile.parseHostPort(profile.proxyHost, defaultPort: profile.proxyKind == .http ? 8080 : 1080) else {
+            return []
+        }
+        // Validated host and port only: ProxyCommand runs through the shell.
+        let kind = profile.proxyKind == .http ? "connect" : "5"
+        let proxy = host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"
+        return ["-o", "ProxyCommand=/usr/bin/nc -X \(kind) -x \(proxy) %h %p"]
     }
 
     /// A path as one sftp batch argument: every ASCII character other than letters, digits and
@@ -132,12 +142,14 @@ public final class SFTPClient: RemoteClient {
         }
         var out = ""
         for c in path.unicodeScalars {
-            if c.isASCII && !(CharacterSet.alphanumerics.contains(c) || "/._-+,=:@%".unicodeScalars.contains(c)) {
-                out += "\\"
-            }
+            if needsQuoteBackslash(c) { out += "\\" }
             out.unicodeScalars.append(c)
         }
         return out
+    }
+
+    private static func needsQuoteBackslash(_ c: Unicode.Scalar) -> Bool {
+        c.isASCII && !(CharacterSet.alphanumerics.contains(c) || "/._-+,=:@%".unicodeScalars.contains(c))
     }
 
     // MARK: Running sftp
@@ -149,6 +161,19 @@ public final class SFTPClient: RemoteClient {
         let errorText: String
     }
 
+    private func prepareSecretEnv(_ env: inout [String: String]) throws -> URL? {
+        guard let secret = secret else { return nil }
+        let file = Self.workDirectory.appendingPathComponent("\(token)-\(UUID().uuidString.prefix(8)).pw")
+        guard Self.writePrivateFile(file, Data(secret.utf8)) else {
+            throw FTPError.invalid("Could not prepare the login (temporary folder not writable).")
+        }
+        env["SSH_ASKPASS"] = Self.askPassPath
+        env["SSH_ASKPASS_REQUIRE"] = "force"
+        env["CC_SECRET_FILE"] = file.path
+        env["DISPLAY"] = env["DISPLAY"] ?? ":0"
+        return file
+    }
+
     /// Runs one sftp batch. A failing command stops the batch, unless it starts with "-".
     func run(_ commands: [String], cancel: CancelFlag? = nil, poll: (() -> Void)? = nil) throws -> Result {
         writeKnownHosts()
@@ -156,18 +181,7 @@ public final class SFTPClient: RemoteClient {
         process.executableURL = URL(fileURLWithPath: sftpPath)
         process.arguments = arguments(interactiveSecret: secret != nil)
         var env = ProcessInfo.processInfo.environment
-        var secretFile: URL?
-        if let secret = secret {
-            let file = Self.workDirectory.appendingPathComponent("\(token)-\(UUID().uuidString.prefix(8)).pw")
-            guard Self.writePrivateFile(file, Data(secret.utf8)) else {
-                throw FTPError.invalid("Could not prepare the login (temporary folder not writable).")
-            }
-            secretFile = file
-            env["SSH_ASKPASS"] = Self.askPassPath
-            env["SSH_ASKPASS_REQUIRE"] = "force"
-            env["CC_SECRET_FILE"] = file.path
-            env["DISPLAY"] = env["DISPLAY"] ?? ":0"
-        }
+        let secretFile = try prepareSecretEnv(&env)
         defer { if let f = secretFile { try? FileManager.default.removeItem(at: f) } }
         process.environment = env
 
@@ -238,11 +252,8 @@ public final class SFTPClient: RemoteClient {
 
     /// Maps ssh/sftp failures to the same errors FTP uses (plus host key problems).
     static func error(for result: Result, path: String = "") -> FTPError {
-        let text = result.errorText
-        let lower = text.lowercased()
-        let first = text.components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .first { !$0.isEmpty && !$0.hasPrefix("Connection closed") } ?? ""
+        let lower = result.errorText.lowercased()
+        let first = firstNonEmptyErrorLine(result.errorText)
         if let mapped = matchErrorRule(lower: lower, first: first, path: path) {
             return mapped
         }
@@ -252,20 +263,19 @@ public final class SFTPClient: RemoteClient {
         return .server(first.isEmpty ? "sftp exit code \(result.exitCode)" : first)
     }
 
+    private static func firstNonEmptyErrorLine(_ text: String) -> String {
+        text.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty && !$0.hasPrefix("Connection closed") } ?? ""
+    }
+
     private static func containsAny(_ text: String, _ needles: [String]) -> Bool {
         needles.contains { text.contains($0) }
     }
 
     private static func matchErrorRule(lower: String, first: String, path: String) -> FTPError? {
-        if lower.contains("remote host identification has changed") || (lower.contains("host key for") && lower.contains("has changed")) {
-            return .hostKeyChanged
-        }
-        if lower.contains("host key verification failed") || (lower.contains("no ") && lower.contains("host key is known")) {
-            return .hostKeyUnknown
-        }
-        if containsAny(lower, ["load key", "invalid format", "bad permissions"])
-            || (lower.contains("identity file") && lower.contains("not accessible")) {
-            return .keyFile(first)
+        if let special = matchHostOrKeyError(lower: lower, first: first) {
+            return special
         }
         if lower.contains("couldn't open local file") || (lower.contains("no space left") && lower.contains("local")) {
             return .localDiskFull
@@ -280,6 +290,27 @@ public final class SFTPClient: RemoteClient {
             (["not found", "no such file"], .notFound(path)),
         ]
         return simpleRules.first { containsAny(lower, $0.0) }?.1
+    }
+
+    private static func matchHostOrKeyError(lower: String, first: String) -> FTPError? {
+        if isHostKeyChanged(lower) { return .hostKeyChanged }
+        if isHostKeyUnknown(lower) { return .hostKeyUnknown }
+        return isKeyFileError(lower) ? .keyFile(first) : nil
+    }
+
+    private static func isHostKeyChanged(_ lower: String) -> Bool {
+        lower.contains("remote host identification has changed")
+            || (lower.contains("host key for") && lower.contains("has changed"))
+    }
+
+    private static func isHostKeyUnknown(_ lower: String) -> Bool {
+        lower.contains("host key verification failed")
+            || (lower.contains("no ") && lower.contains("host key is known"))
+    }
+
+    private static func isKeyFileError(_ lower: String) -> Bool {
+        containsAny(lower, ["load key", "invalid format", "bad permissions"])
+            || (lower.contains("identity file") && lower.contains("not accessible"))
     }
 
     private func check(_ result: Result, path: String = "") throws {
@@ -331,15 +362,20 @@ public final class SFTPClient: RemoteClient {
             throw FTPError.cancelled
         }
         try check(result, path: path)
+        let got = try finalizeDownload(part: part, to: local, expectedSize: expectedSize)
+        progress?(got)
+    }
+
+    private func finalizeDownload(part: URL, to local: URL, expectedSize: Int64?) throws -> Int64 {
+        let fm = FileManager.default
         if !fm.fileExists(atPath: part.path) { fm.createFile(atPath: part.path, contents: Data()) }
         let got = FTPClient.fileSize(part)
         if let expected = expectedSize, got != expected {
             throw FTPError.verificationFailed("received \(got) of \(expected) bytes")
         }
-        if fm.fileExists(atPath: local.path) { try fm.removeItem(at: local) }
-        try fm.moveItem(at: part, to: local)
+        try LocalCopy.replace(local, with: part)
         Quarantine.mark(local, origin: "sftp://\(profile.host.contains(":") ? "[\(profile.host)]" : profile.host):\(profile.port)")
-        progress?(got)
+        return got
     }
 
     public func upload(_ local: URL, to path: String, resume: Bool = false, cancel: CancelFlag? = nil,
@@ -368,12 +404,7 @@ public final class SFTPClient: RemoteClient {
     /// The size in an "ls -l" line ("-rw-r--r--  ? 501  0  1234 Nov 22 18:21 /path").
     static func sizeField(_ line: String) -> Int64? {
         let fields = line.split(separator: " ", omittingEmptySubsequences: true)
-        if fields.count > 4, let s = Int64(fields[4]) { return s }
-        if fields.count > 3, let s = Int64(fields[3]) { return s }
-        for i in 3..<min(fields.count, 6) {
-            if let s = Int64(fields[i]) { return s }
-        }
-        return nil
+        return [4, 3, 5].lazy.compactMap { $0 < fields.count ? Int64(fields[$0]) : nil }.first
     }
 
     /// Creates a folder and any missing parents; the folder itself must not exist yet.
@@ -430,7 +461,14 @@ public final class SFTPClient: RemoteClient {
     public static func fetchHostKeys(host: String, port: Int) -> (summary: String, keys: [String])? {
         guard FTPProfile.isValidHost(host), !host.hasPrefix("-"), (1...65535).contains(port) else { return nil }
         guard let scan = runTool("/usr/bin/ssh-keyscan", ["-T", "10", "-p", String(port), host]) else { return nil }
-        let keys = String(decoding: scan, as: UTF8.self).components(separatedBy: "\n")
+        let keys = parseKeyscanOutput(scan)
+        guard !keys.isEmpty else { return nil }
+        let fingerprints = keys.compactMap(fingerprint(of:))
+        return (fingerprints.joined(separator: "\n"), keys)
+    }
+
+    private static func parseKeyscanOutput(_ scan: Data) -> [String] {
+        String(decoding: scan, as: UTF8.self).components(separatedBy: "\n")
             .filter { !$0.hasPrefix("#") && !$0.isEmpty }
             .compactMap { line -> String? in
                 let parts = line.split(separator: " ")
@@ -438,15 +476,13 @@ public final class SFTPClient: RemoteClient {
                 let key = "\(parts[1]) \(parts[2])"
                 return isValidHostKey(key) ? key : nil
             }
-        guard !keys.isEmpty else { return nil }
-        var fingerprints: [String] = []
-        for key in keys {
-            if let fp = runTool("/usr/bin/ssh-keygen", ["-l", "-f", "-"], input: Data("x \(key)\n".utf8)) {
-                let parts = String(decoding: fp, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
-                if parts.count >= 2 { fingerprints.append("\(parts.last ?? "")  \(parts[1])") }
-            }
-        }
-        return (fingerprints.joined(separator: "\n"), keys)
+    }
+
+    private static func fingerprint(of key: String) -> String? {
+        guard let fp = runTool("/usr/bin/ssh-keygen", ["-l", "-f", "-"], input: Data("x \(key)\n".utf8)) else { return nil }
+        let parts = String(decoding: fp, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
+        guard parts.count >= 2 else { return nil }
+        return "\(parts.last ?? "")  \(parts[1])"
     }
 
     /// Whether a private key is protected by a passphrase (it cannot be read with an empty one).

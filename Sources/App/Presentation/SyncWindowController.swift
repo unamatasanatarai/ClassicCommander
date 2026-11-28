@@ -82,17 +82,7 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
 
     /// Opens the dialog with the two panels' folders (Total Commander's behaviour).
     public func present() {
-        if let c = commander, !isComparing {
-            // Left against right, also when a panel is connected to a server (shown as its address).
-            func text(_ model: PanelModel) -> String {
-                model.isRemote ? c.ftp.displayAddress(of: model.directory) ?? model.directory.absoluteString : model.directory.path
-            }
-            leftPath.stringValue = text(c.leftView.model)
-            rightPath.stringValue = text(c.rightView.model)
-            let marked = !c.leftView.model.marked.isEmpty || !c.rightView.model.marked.isEmpty
-            onlySelectedBox.isEnabled = marked
-            if !marked { onlySelectedBox.state = .off }
-        }
+        if let c = commander, !isComparing { syncPathsFromCommander(c) }
         if maskField.stringValue.isEmpty { maskField.stringValue = "*.*" }
         updateButtons()
         if let window = window { AppWindows.place(window) }
@@ -100,11 +90,32 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         window?.makeKeyAndOrderFront(nil)
     }
 
+    private func syncPathsFromCommander(_ c: CommanderView) {
+        leftPath.stringValue = Self.panelDisplayPath(c.leftView.model, commander: c)
+        rightPath.stringValue = Self.panelDisplayPath(c.rightView.model, commander: c)
+        let marked = !c.leftView.model.marked.isEmpty || !c.rightView.model.marked.isEmpty
+        onlySelectedBox.isEnabled = marked
+        if !marked { onlySelectedBox.state = .off }
+    }
+
+    private static func panelDisplayPath(_ model: PanelModel, commander c: CommanderView) -> String {
+        model.isRemote ? c.ftp.displayAddress(of: model.directory) ?? model.directory.absoluteString : model.directory.path
+    }
+
     // MARK: Building
 
-    private func buildContent() -> NSView {
-        let buttons = [leftBrowse, rightBrowse, compareButton, synchronizeButton, closeButton]
+    private func finalizeColumns(_ columns: [NSStackView], buttons: [NSButton]) {
+        for column in columns {
+            column.distribution = .fill
+            column.setHuggingPriority(.required, for: .vertical)
+        }
         for b in buttons {
+            b.widthAnchor.constraint(greaterThanOrEqualToConstant: AppWindows.Layout.buttonMinWidth).isActive = true
+        }
+    }
+
+    private func configureActionButtons() {
+        for b in [leftBrowse, rightBrowse, compareButton, synchronizeButton, closeButton] {
             b.bezelStyle = .rounded
             b.target = self
             b.action = #selector(buttonPressed(_:))
@@ -112,11 +123,9 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         for b in [leftBrowse, rightBrowse] { b.widthAnchor.constraint(equalToConstant: 40).isActive = true }
         closeButton.keyEquivalent = "\u{1b}"
         compareButton.keyEquivalent = "\r"
-        for f in [leftPath, rightPath] { f.widthAnchor.constraint(greaterThanOrEqualToConstant: 210).isActive = true }
-        maskField.widthAnchor.constraint(equalToConstant: 120).isActive = true
-        maskField.stringValue = "*.*"
-        maskField.toolTip = "Files to compare, e.g. *.*  or  *.txt;*.doc  or  * | *.tmp"
+    }
 
+    private func configureOptionCheckboxes() {
         for b in [asymmetricBox, subdirsBox, byContentBox, ignoreDateBox, emptyDirsBox, onlySelectedBox] {
             b.target = self
             b.action = #selector(optionChanged)
@@ -126,8 +135,9 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         byContentBox.toolTip = "Files of equal size are also compared byte by byte."
         ignoreDateBox.toolTip = "Only size (and content) decides; dates are ignored."
         emptyDirsBox.toolTip = "Also list empty folders and folders that exist on one side only."
+    }
 
-        // Show: toggle pills with crisp ON (elevated) vs OFF (muted) states.
+    private func configureFilterToggles() {
         let toggles: [(NSButton, NSColor, String)] = [
             (showRight, .systemGreen, "Show files to copy left → right"),
             (showEqual, .labelColor, "Show identical files"),
@@ -157,6 +167,16 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
                 b.widthAnchor.constraint(equalToConstant: 92).isActive = true
             }
         }
+    }
+
+    private func buildContent() -> NSView {
+        configureActionButtons()
+        for f in [leftPath, rightPath] { f.widthAnchor.constraint(greaterThanOrEqualToConstant: 210).isActive = true }
+        maskField.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        maskField.stringValue = "*.*"
+        maskField.toolTip = "Files to compare, e.g. *.*  or  *.txt;*.doc  or  * | *.tmp"
+        configureOptionCheckboxes()
+        configureFilterToggles()
         let arrows = NSStackView(views: [showRight, showEqual, showDifferent, showLeft])
         arrows.spacing = 4
         let sideFilters = NSStackView(views: [showDuplicates, showSingles])
@@ -187,13 +207,7 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         actions.spacing = AppWindows.Layout.controlSpacing
         // Small vertical stacks must fill and hug, or their buttons have no fixed position
         // (ambiguous layout: Compare once drifted up over the path field).
-        for column in [compareColumn, options] {
-            column.distribution = .fill
-            column.setHuggingPriority(.required, for: .vertical)
-        }
-        for b in [synchronizeButton, closeButton] {
-            b.widthAnchor.constraint(greaterThanOrEqualToConstant: AppWindows.Layout.buttonMinWidth).isActive = true
-        }
+        finalizeColumns([compareColumn, options], buttons: [synchronizeButton, closeButton])
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
@@ -286,13 +300,7 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
 
     /// Reads the controls into a configuration (paths as typed, "~" expanded).
     func readConfiguration() -> SyncConfiguration {
-        func url(_ text: String) -> URL {
-            let t = text.trimmingCharacters(in: .whitespaces)
-            if let remote = commander?.ftp.location(fromAddress: t) { return remote }
-            if t.hasPrefix(RemoteSession.scheme + "://"), let u = URL(string: t) { return u }   // a closed connection
-            return URL(fileURLWithPath: (t as NSString).expandingTildeInPath).standardizedFileURL
-        }
-        var c = SyncConfiguration(left: url(leftPath.stringValue), right: url(rightPath.stringValue))
+        var c = SyncConfiguration(left: resolveSyncURL(leftPath.stringValue), right: resolveSyncURL(rightPath.stringValue))
         c.mask = maskField.stringValue.isEmpty ? "*.*" : maskField.stringValue
         c.asymmetric = asymmetricBox.state == .on
         c.subdirectories = subdirsBox.state == .on
@@ -304,6 +312,13 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
             c.onlyNames = names.isEmpty ? nil : names
         }
         return c
+    }
+
+    private func resolveSyncURL(_ text: String) -> URL {
+        let t = text.trimmingCharacters(in: .whitespaces)
+        if let remote = commander?.ftp.location(fromAddress: t) { return remote }
+        if t.hasPrefix(RemoteSession.scheme + "://"), let u = URL(string: t) { return u }   // a closed connection
+        return URL(fileURLWithPath: (t as NSString).expandingTildeInPath).standardizedFileURL
     }
 
     @objc func compare() {
@@ -345,24 +360,38 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         compareButton.title = "Compare"
         spinner.stopAnimation(nil)
         switch result {
-        case .success(let c):
-            config = cfg
-            comparison = c
-            applyFilter()
-            var status = c.summary
-            if let synced = lastSyncSummary {
-                status = synced + "   ·   " + status
-                lastSyncSummary = nil
-            }
-            if c.cancelled { status += "  - comparison aborted" }
-            if !c.errors.isEmpty { status += "  ·  \(c.errors.count) could not be read" }
-            statusLabel.stringValue = status
-            statusLabel.toolTip = c.errors.isEmpty ? nil : c.errors.prefix(30).joined(separator: "\n")
-        case .failure(let error):
-            statusLabel.stringValue = (error as? SearchValidationError)?.message ?? error.localizedDescription
-            if !runSynchronously { NSSound.beep() }
+        case .success(let c): applyCompareSuccess(c, config: cfg)
+        case .failure(let error): applyCompareFailure(error)
         }
         updateButtons()
+    }
+
+    private func applyCompareSuccess(_ c: SyncComparison, config cfg: SyncConfiguration) {
+        config = cfg
+        comparison = c
+        applyFilter()
+        statusLabel.stringValue = formatCompareStatus(c)
+        statusLabel.toolTip = c.errors.isEmpty ? nil : c.errors.prefix(30).joined(separator: "\n")
+    }
+
+    private func applyCompareFailure(_ error: Error) {
+        statusLabel.stringValue = Self.compareFailureMessage(error)
+        if !runSynchronously { NSSound.beep() }
+    }
+
+    private static func compareFailureMessage(_ error: Error) -> String {
+        (error as? SearchValidationError)?.message ?? error.localizedDescription
+    }
+
+    private func formatCompareStatus(_ c: SyncComparison) -> String {
+        var status = c.summary
+        if let synced = lastSyncSummary {
+            status = synced + "   ·   " + status
+            lastSyncSummary = nil
+        }
+        if c.cancelled { status += "  - comparison aborted" }
+        if !c.errors.isEmpty { status += "  ·  \(c.errors.count) could not be read" }
+        return status
     }
 
     private func rememberMask() {
@@ -495,36 +524,45 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         guard let v = table.selectedRowIndexes.first, visibleIndexes.indices.contains(v) else { return NSSound.beep() }
         let row = comparison.rows[visibleIndexes[v]]
         guard !row.isDirectory else { return NSSound.beep() }
+        runDiffViewer(for: row)
+    }
+
+    private func runDiffViewer(for row: SyncRow) {
         let lookup = commander?.ftp.sessionLookup ?? { _ in nil }
         let viewer = makeDiffViewer(for: row)
-        let work = { () -> (Result<FileComparison, Error>, [URL]) in
-            var temps: [URL] = []
-            func local(_ info: SyncFileInfo?) throws -> URL {
-                guard let info = info else { return URL(fileURLWithPath: "/dev/null") }
-                guard let session = lookup(info.url) else { return info.url }
-                let temp = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("cc-diff-\(UUID().uuidString)").appendingPathComponent(info.url.lastPathComponent)
-                temps.append(temp.deletingLastPathComponent())
-                try session.client.download(RemoteSession.path(of: info.url), to: temp, expectedSize: info.size,
-                                            resume: false, cancel: nil, progress: nil)
-                return temp
-            }
-            let result = Result { try FileComparison.compare(try local(row.left), try local(row.right)) }
-            return (result, temps)
+        if runSynchronously {
+            Self.finishDiff(Self.downloadAndCompare(row: row, lookup: lookup), on: viewer)
+            return
         }
-        let done: ((Result<FileComparison, Error>, [URL])) -> Void = { [weak viewer] output in
-            guard let viewer = viewer else { return DiffWindowController.removeTemporaryFiles(output.1) }
-            viewer.temporaryFiles = output.1
-            switch output.0 {
-            case .success(let c): viewer.show(c)
-            case .failure(let e): viewer.showError("Cannot compare: \((e as? FTPError)?.message ?? e.localizedDescription)")
-            }
-        }
-        if runSynchronously { done(work()); return }
         DispatchQueue.global(qos: .userInitiated).async {
-            let output = work()
-            DispatchQueue.main.async { done(output) }
+            let output = Self.downloadAndCompare(row: row, lookup: lookup)
+            DispatchQueue.main.async { Self.finishDiff(output, on: viewer) }
         }
+    }
+
+    private static func finishDiff(_ output: (Result<FileComparison, Error>, [URL]), on viewer: DiffWindowController?) {
+        guard let viewer = viewer else { return DiffWindowController.removeTemporaryFiles(output.1) }
+        viewer.temporaryFiles = output.1
+        switch output.0 {
+        case .success(let c): viewer.show(c)
+        case .failure(let e): viewer.showError("Cannot compare: \((e as? FTPError)?.message ?? e.localizedDescription)")
+        }
+    }
+
+    private static func downloadAndCompare(row: SyncRow, lookup: SyncSessionLookup) -> (Result<FileComparison, Error>, [URL]) {
+        var temps: [URL] = []
+        func local(_ info: SyncFileInfo?) throws -> URL {
+            guard let info = info else { return URL(fileURLWithPath: "/dev/null") }
+            guard let session = lookup(info.url) else { return info.url }
+            let temp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("cc-diff-\(UUID().uuidString)").appendingPathComponent(info.url.lastPathComponent)
+            temps.append(temp.deletingLastPathComponent())
+            try session.client.download(RemoteSession.path(of: info.url), to: temp, expectedSize: info.size,
+                                        resume: false, cancel: nil, progress: nil)
+            return temp
+        }
+        let result = Result { try FileComparison.compare(try local(row.left), try local(row.right)) }
+        return (result, temps)
     }
 
     private func reveal(_ url: URL, side: CommanderModel.Side) {
@@ -551,7 +589,7 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
             table.selectRowIndexes(IndexSet(integer: clicked), byExtendingSelection: false)
         }
         guard !table.selectedRowIndexes.isEmpty else { return }
-        let items: [(String, Selector, String)] = [
+        addMenuItems([
             ("Copy left → right", #selector(markLeftToRight), "⌃L"),
             ("Copy right → left", #selector(markRightToLeft), "⌃R"),
             ("Default direction", #selector(markDefault), "⌃D"),
@@ -559,18 +597,18 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
             ("Remove selection (don't copy)", #selector(unmark), "⌃M"),
             ("Delete on right side", #selector(markDeleteRight), ""),
             ("Delete on left side", #selector(markDeleteLeft), ""),
-        ]
-        for (title, sel, key) in items {
-            let item = NSMenuItem(title: key.isEmpty ? title : "\(title)\t\(key)", action: sel, keyEquivalent: "")
-            item.target = self
-            menu.addItem(item)
-        }
+        ], to: menu)
         menu.addItem(.separator())
-        let view = NSMenuItem(title: "View differences\t3", action: #selector(viewDifferences), keyEquivalent: "")
-        view.target = self
-        menu.addItem(view)
-        for (title, sel) in [("Show left file in panel", #selector(showLeftInPanel)), ("Show right file in panel", #selector(showRightInPanel))] {
-            let item = NSMenuItem(title: title, action: sel, keyEquivalent: "")
+        addMenuItems([
+            ("View differences\t3", #selector(viewDifferences), ""),
+            ("Show left file in panel", #selector(showLeftInPanel), ""),
+            ("Show right file in panel", #selector(showRightInPanel), ""),
+        ], to: menu)
+    }
+
+    private func addMenuItems(_ specs: [(String, Selector, String)], to menu: NSMenu) {
+        for (title, sel, key) in specs {
+            let item = NSMenuItem(title: key.isEmpty ? title : "\(title)\t\(key)", action: sel, keyEquivalent: "")
             item.target = self
             menu.addItem(item)
         }
@@ -591,14 +629,15 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         let mods = event.modifierFlags.intersection([.command, .control, .option, .shift])
         if mods.isEmpty, handleUnmodifiedTableKey(event.keyCode) { return true }
         guard event.modifierFlags.contains(.control), let ch = event.charactersIgnoringModifiers?.lowercased() else { return false }
-        switch ch {
-        case "l": markLeftToRight()
-        case "r": markRightToLeft()
-        case "d": markDefault()
-        case "m": unmark()
-        case "w": reverse()
-        default: return false
-        }
+        return handleCtrlTableKey(ch)
+    }
+
+    private func handleCtrlTableKey(_ ch: String) -> Bool {
+        let map: [String: () -> Void] = [
+            "l": markLeftToRight, "r": markRightToLeft, "d": markDefault, "m": unmark, "w": reverse,
+        ]
+        guard let fn = map[ch] else { return false }
+        fn()
         return true
     }
 
@@ -635,27 +674,33 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
 
     private func updateToggleStyles() {
         let isDark = window?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        let onFill = (isDark ? NSColor(white: 0.26, alpha: 1.0) : NSColor(white: 1.0, alpha: 0.95)).cgColor
-        let offFill = (isDark ? NSColor(white: 1.0, alpha: 0.06) : NSColor(white: 0.0, alpha: 0.06)).cgColor
-        let onBorder = (isDark ? NSColor(white: 1.0, alpha: 0.25) : NSColor(white: 0.0, alpha: 0.22)).cgColor
-        let offBorder = (isDark ? NSColor(white: 1.0, alpha: 0.10) : NSColor(white: 0.0, alpha: 0.10)).cgColor
+        let colors = Self.toggleColors(isDark: isDark)
         for b in [showRight, showEqual, showDifferent, showLeft, showDuplicates, showSingles] {
             let on = b.state == .on
-            b.layer?.backgroundColor = on ? onFill : offFill
-            b.layer?.borderColor = on ? onBorder : offBorder
+            b.layer?.backgroundColor = on ? colors.onFill : colors.offFill
+            b.layer?.borderColor = on ? colors.onBorder : colors.offBorder
             b.alphaValue = on ? 1.0 : 0.45
         }
     }
 
+    private static func toggleColors(isDark: Bool) -> (onFill: CGColor, offFill: CGColor, onBorder: CGColor, offBorder: CGColor) {
+        let onFill = (isDark ? NSColor(white: 0.26, alpha: 1.0) : NSColor(white: 1.0, alpha: 0.95)).cgColor
+        let offFill = (isDark ? NSColor(white: 1.0, alpha: 0.06) : NSColor(white: 0.0, alpha: 0.06)).cgColor
+        let onBorder = (isDark ? NSColor(white: 1.0, alpha: 0.25) : NSColor(white: 0.0, alpha: 0.22)).cgColor
+        let offBorder = (isDark ? NSColor(white: 1.0, alpha: 0.10) : NSColor(white: 0.0, alpha: 0.10)).cgColor
+        return (onFill, offFill, onBorder, offBorder)
+    }
+
     @objc private func buttonPressed(_ sender: NSButton) {
-        switch sender {
-        case compareButton: compare()
-        case synchronizeButton: openConfirmation()
-        case closeButton: window?.performClose(nil)
-        case leftBrowse: browse(into: leftPath)
-        case rightBrowse: browse(into: rightPath)
-        default: break
-        }
+        if sender === compareButton { compare(); return }
+        if sender === synchronizeButton { openConfirmation(); return }
+        if sender === closeButton { window?.performClose(nil); return }
+        if let field = browseTarget(for: sender) { browse(into: field) }
+    }
+
+    private func browseTarget(for sender: NSButton) -> NSComboBox? {
+        if sender === leftBrowse { return leftPath }
+        return sender === rightBrowse ? rightPath : nil
     }
 
     private func openConfirmation() {
@@ -664,28 +709,39 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         guard !plan.isEmpty else { return NSSound.beep() }
         let sheet = SyncConfirmationController(plan: plan, config: cfg, sessions: commander?.ftp.sessionLookup ?? { _ in nil },
                                                shown: showFilter)
-        sheet.onFinished = { [weak self] report in
-            guard let self = self else { return }
-            self.confirmation = nil
-            let summary = Self.formatSyncSummary(report)
-            self.commander?.reloadPanels()
-            self.lastSyncSummary = summary
-            self.compare()   // show the new state
-            self.statusLabel.stringValue = summary
-            let problems = report.skipped + report.errors
-            self.statusLabel.toolTip = problems.isEmpty ? nil : problems.prefix(30).joined(separator: "\n")
-        }
+        sheet.onFinished = { [weak self] report in self?.handleSyncFinished(report) }
         confirmation = sheet
         window.beginSheet(sheet.window!)
     }
 
+    private func handleSyncFinished(_ report: SyncReport) {
+        confirmation = nil
+        let summary = Self.formatSyncSummary(report)
+        commander?.reloadPanels()
+        lastSyncSummary = summary
+        compare()   // show the new state
+        statusLabel.stringValue = summary
+        let problems = report.skipped + report.errors
+        statusLabel.toolTip = problems.isEmpty ? nil : problems.prefix(30).joined(separator: "\n")
+    }
+
     private static func formatSyncSummary(_ report: SyncReport) -> String {
+        let parts = summaryParts(for: report)
+        return "Synchronized: " + parts.joined(separator: ", ") + (report.cancelled ? " (stopped)" : "")
+    }
+
+    private static func summaryParts(for report: SyncReport) -> [String] {
         var parts = ["\(report.copied) copied"]
         if report.created > 0 { parts.append("\(report.created) folders created") }
         if report.deleted > 0 { parts.append("\(report.deleted) deleted") }
+        return parts + problemSummaryParts(for: report)
+    }
+
+    private static func problemSummaryParts(for report: SyncReport) -> [String] {
+        var parts: [String] = []
         if !report.skipped.isEmpty { parts.append("\(report.skipped.count) skipped") }
         if !report.errors.isEmpty { parts.append("\(report.errors.count) failed") }
-        return "Synchronized: " + parts.joined(separator: ", ") + (report.cancelled ? " (stopped)" : "")
+        return parts
     }
 
     private func browse(into field: NSComboBox) {
@@ -712,6 +768,10 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         if id == .action, r.action == .deleteLeft || r.action == .deleteRight {
             return makeDeleteActionView(for: r.action, row: r)
         }
+        return makeSyncCell(id: id, row: r)
+    }
+
+    private func makeSyncCell(id: Column, row r: SyncRow) -> NSView {
         let (text, alignment) = cellContent(for: id, row: r)
         let label = NSTextField(labelWithString: text)
         label.alignment = alignment
@@ -722,24 +782,35 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
     }
 
     private func cellContent(for id: Column, row r: SyncRow) -> (String, NSTextAlignment) {
-        let f = EntryFormatter.shared
-        func size(_ i: SyncFileInfo?) -> String {
-            guard let i = i else { return "" }
-            return i.isDirectory ? "<DIR>" : f.grouped(i.size)
-        }
-        func date(_ i: SyncFileInfo?) -> String {
-            guard let i = i else { return "" }
-            return f.date(FileEntry(name: "", url: i.url, kind: .file, modified: i.modified))
-        }
         switch id {
-        case .leftName: return (r.left == nil ? "" : EntryFormatter.visible(r.path), .left)
-        case .leftSize: return (size(r.left), .right)
-        case .leftDate: return (date(r.left), .left)
         case .action: return (r.symbol, .center)
-        case .rightDate: return (date(r.right), .left)
-        case .rightSize: return (size(r.right), .right)
-        case .rightName: return (r.right == nil ? "" : EntryFormatter.visible(r.path), .left)
+        case .leftName, .rightName: return (Self.sideName(r, left: id == .leftName), .left)
+        case .leftSize, .rightSize: return (Self.sideSize(r, left: id == .leftSize), .right)
+        case .leftDate, .rightDate: return (Self.sideDate(r, left: id == .leftDate), .left)
         }
+    }
+
+    private static func sideSize(_ r: SyncRow, left: Bool) -> String {
+        formatSyncSize(left ? r.left : r.right)
+    }
+
+    private static func sideDate(_ r: SyncRow, left: Bool) -> String {
+        formatSyncDate(left ? r.left : r.right)
+    }
+
+    private static func sideName(_ r: SyncRow, left: Bool) -> String {
+        let info = left ? r.left : r.right
+        return info == nil ? "" : EntryFormatter.visible(r.path)
+    }
+
+    private static func formatSyncSize(_ i: SyncFileInfo?) -> String {
+        guard let i = i else { return "" }
+        return i.isDirectory ? "<DIR>" : EntryFormatter.shared.grouped(i.size)
+    }
+
+    private static func formatSyncDate(_ i: SyncFileInfo?) -> String {
+        guard let i = i else { return "" }
+        return EntryFormatter.shared.date(FileEntry(name: "", url: i.url, kind: .file, modified: i.modified))
     }
 
     private func makeDeleteActionView(for action: SyncAction, row: SyncRow) -> NSView {
@@ -748,36 +819,49 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
 
         let iconView = NSImageView()
         iconView.translatesAutoresizingMaskIntoConstraints = false
-        if let baseImg = NSImage(systemSymbolName: "trash", accessibilityDescription: "Delete")
-            ?? NSImage(systemSymbolName: "trash.fill", accessibilityDescription: "Delete") {
+        if let baseImg = Self.trashSymbolImage() {
             let conf = NSImage.SymbolConfiguration(pointSize: 11, weight: .bold)
             iconView.image = baseImg.withSymbolConfiguration(conf) ?? baseImg
             iconView.contentTintColor = .systemRed
         }
-        iconView.toolTip = action == .deleteLeft
-            ? "Delete left file: \(row.path)"
-            : "Delete right file: \(row.path)"
+        iconView.toolTip = action == .deleteLeft ? "Delete left file: \(row.path)" : "Delete right file: \(row.path)"
         container.addSubview(iconView)
-
+        let edgeConstraint = action == .deleteLeft
+            ? iconView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 5)
+            : iconView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -5)
         NSLayoutConstraint.activate([
             iconView.centerYAnchor.constraint(equalTo: container.centerYAnchor),
             iconView.widthAnchor.constraint(equalToConstant: 14),
             iconView.heightAnchor.constraint(equalToConstant: 14),
-            action == .deleteLeft
-                ? iconView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 5)
-                : iconView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -5),
+            edgeConstraint,
         ])
         return container
     }
 
+    private static func trashSymbolImage() -> NSImage? {
+        NSImage(systemSymbolName: "trash", accessibilityDescription: "Delete")
+            ?? NSImage(systemSymbolName: "trash.fill", accessibilityDescription: "Delete")
+    }
+
     /// Row colours like Total Commander: → green, ← blue, ≠ and deletions red, = normal.
     static func color(for row: SyncRow) -> NSColor {
-        switch row.action {
-        case .copyToRight: return .systemGreen
-        case .copyToLeft: return .systemBlue
-        case .deleteLeft, .deleteRight: return .systemRed
-        case .none: return row.state == .identical ? .labelColor : .systemRed
-        }
+        if row.action == .none { return unchangedColor(for: row.state) }
+        return actionColor(for: row.action)
+    }
+
+    private static let actionColors: [SyncAction: NSColor] = [
+        .copyToRight: .systemGreen,
+        .copyToLeft: .systemBlue,
+        .deleteLeft: .systemRed,
+        .deleteRight: .systemRed,
+    ]
+
+    private static func actionColor(for action: SyncAction) -> NSColor {
+        actionColors[action] ?? .labelColor
+    }
+
+    private static func unchangedColor(for state: SyncState) -> NSColor {
+        state == .identical ? .labelColor : .systemRed
     }
 }
 
@@ -834,7 +918,7 @@ final class SyncConfirmationController: NSWindowController, NSTableViewDataSourc
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    private func build() -> NSView {
+    private func configureConfirmationBoxes() {
         let f = EntryFormatter.shared
         func describe(_ ops: [SyncOperation]) -> String {
             "\(ops.count) file\(ops.count == 1 ? "" : "s"), \(f.compact(SyncPlan.bytes(ops)))"
@@ -859,6 +943,10 @@ final class SyncConfirmationController: NSWindowController, NSTableViewDataSourc
         overwriteBox.isEnabled = replacing > 0
         emptyDirsBox.state = .on
         emptyDirsBox.isEnabled = folders > 0
+    }
+
+    private func build() -> NSView {
+        configureConfirmationBoxes()
 
         for (id, title, width) in [("op", "Operation", 90), ("src", "Source", 290), ("dst", "Destination", 290)] {
             let c = NSTableColumn(identifier: .init(id))
@@ -942,9 +1030,18 @@ final class SyncConfirmationController: NSWindowController, NSTableViewDataSourc
         for b in [leftToRightBox, rightToLeftBox, deleteBox, overwriteBox, emptyDirsBox] { b.isEnabled = false }
         progress.isHidden = false
         let opts = options
-        let plan = self.plan
+        let step = makeProgressStep()
+        let finish: (SyncReport) -> Void = { [weak self] report in
+            guard let self = self, let window = self.window else { return }
+            window.sheetParent?.endSheet(window)
+            self.onFinished?(report)
+        }
+        runExecutor(opts: opts, flag: flag, step: step, finish: finish)
+    }
+
+    private func makeProgressStep() -> (SyncOperation) -> Void {
         var done = 0.0
-        let step: (SyncOperation) -> Void = { [weak self] op in
+        return { [weak self] op in
             let update = {
                 done += 1
                 self?.progress.doubleValue = done
@@ -952,11 +1049,12 @@ final class SyncConfirmationController: NSWindowController, NSTableViewDataSourc
             }
             if Thread.isMainThread { update() } else { DispatchQueue.main.async(execute: update) }
         }
-        let finish: (SyncReport) -> Void = { [weak self] report in
-            guard let self = self, let window = self.window else { return }
-            window.sheetParent?.endSheet(window)
-            self.onFinished?(report)
-        }
+    }
+
+    private func runExecutor(
+        opts: SyncRunOptions, flag: CancelFlag, step: @escaping (SyncOperation) -> Void, finish: @escaping (SyncReport) -> Void
+    ) {
+        let plan = self.plan
         let sessions = self.sessions
         if runSynchronously {
             finish(SyncExecutor.run(plan, options: opts, sessions: sessions, isCancelled: { flag.isCancelled }, progress: step))
@@ -995,40 +1093,45 @@ final class SyncConfirmationController: NSWindowController, NSTableViewDataSourc
 
     func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
         let op = plan.all[row]
-        let text: String
-        switch column?.identifier.rawValue {
-        case "op":
-            if op.kind == .delete {
-                let stack = NSStackView()
-                stack.orientation = .horizontal
-                stack.spacing = 4
-                stack.alignment = .centerY
-                if let img = NSImage(systemSymbolName: "trash", accessibilityDescription: "Delete")
-                    ?? NSImage(systemSymbolName: "trash.fill", accessibilityDescription: "Delete") {
-                    let conf = NSImage.SymbolConfiguration(pointSize: 10, weight: .bold)
-                    let icon = NSImageView(image: img.withSymbolConfiguration(conf) ?? img)
-                    icon.contentTintColor = .systemRed
-                    icon.translatesAutoresizingMaskIntoConstraints = false
-                    icon.widthAnchor.constraint(equalToConstant: 12).isActive = true
-                    icon.heightAnchor.constraint(equalToConstant: 12).isActive = true
-                    stack.addArrangedSubview(icon)
-                }
-                let lbl = NSTextField(labelWithString: "Delete")
-                lbl.textColor = .systemRed
-                stack.addArrangedSubview(lbl)
-                return stack
-            }
-            switch op.kind {
-            case .copy: text = op.overwrites ? "Overwrite" : "Copy"
-            case .makeDirectory: text = "Create dir"
-            case .delete: text = "Delete"
-            }
-        case "src": text = op.source.map(sidePath) ?? "—"
-        default: text = sidePath(op.destination)
-        }
-        let label = NSTextField(labelWithString: text)
+        let colID = column?.identifier.rawValue
+        if colID == "op", op.kind == .delete { return makeDeleteLabelView() }
+        let label = NSTextField(labelWithString: cellText(for: op, columnID: colID))
         label.lineBreakMode = .byTruncatingHead
         if op.kind == .delete { label.textColor = .systemRed }
         return AppWindows.centeredCell(label)
+    }
+
+    private func cellText(for op: SyncOperation, columnID: String?) -> String {
+        switch columnID {
+        case "op": return Self.opLabel(for: op)
+        case "src": return op.source.map(sidePath) ?? "—"
+        default: return sidePath(op.destination)
+        }
+    }
+
+    private static func opLabel(for op: SyncOperation) -> String {
+        if op.kind == .makeDirectory { return "Create dir" }
+        return op.overwrites ? "Overwrite" : "Copy"
+    }
+
+    private func makeDeleteLabelView() -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.spacing = 4
+        stack.alignment = .centerY
+        if let img = NSImage(systemSymbolName: "trash", accessibilityDescription: "Delete")
+            ?? NSImage(systemSymbolName: "trash.fill", accessibilityDescription: "Delete") {
+            let conf = NSImage.SymbolConfiguration(pointSize: 10, weight: .bold)
+            let icon = NSImageView(image: img.withSymbolConfiguration(conf) ?? img)
+            icon.contentTintColor = .systemRed
+            icon.translatesAutoresizingMaskIntoConstraints = false
+            icon.widthAnchor.constraint(equalToConstant: 12).isActive = true
+            icon.heightAnchor.constraint(equalToConstant: 12).isActive = true
+            stack.addArrangedSubview(icon)
+        }
+        let lbl = NSTextField(labelWithString: "Delete")
+        lbl.textColor = .systemRed
+        stack.addArrangedSubview(lbl)
+        return stack
     }
 }

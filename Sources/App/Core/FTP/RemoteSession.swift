@@ -118,20 +118,34 @@ public final class RemoteSession {
             let dir = queue[next]
             next += 1
             if cancel?.isCancelled == true { throw FTPError.cancelled }
-            for e in try fetch(dir, useCache: false, store: false, cancel: cancel) {
-                let child = dir == "/" ? "/" + e.name : dir + "/" + e.name
-                if e.isDirectory {
-                    // A hostile or broken server could present endless folders: stop at sane limits.
-                    guard child.split(separator: "/").count - rootDepth <= Self.maxDepth else { throw Self.tooLarge }
-                    folders.append(child)
-                    queue.append(child)
-                } else {
-                    files.append((child, e.size, e.modified))
-                }
-                if files.count + folders.count > Self.maxEntries { throw Self.tooLarge }
-            }
+            try collectWalkEntries(in: dir, rootDepth: rootDepth, files: &files, folders: &folders, queue: &queue, cancel: cancel)
         }
         return (files, folders)
+    }
+
+    private func collectWalkEntries(
+        in dir: String, rootDepth: Int,
+        files: inout [(String, Int64, Date?)], folders: inout [String], queue: inout [String], cancel: CancelFlag?
+    ) throws {
+        for e in try fetch(dir, useCache: false, store: false, cancel: cancel) {
+            try appendWalkEntry(e, in: dir, rootDepth: rootDepth, files: &files, folders: &folders, queue: &queue)
+            if files.count + folders.count > Self.maxEntries { throw Self.tooLarge }
+        }
+    }
+
+    private func appendWalkEntry(
+        _ e: RemoteEntry, in dir: String, rootDepth: Int,
+        files: inout [(String, Int64, Date?)], folders: inout [String], queue: inout [String]
+    ) throws {
+        let child = dir == "/" ? "/" + e.name : dir + "/" + e.name
+        if e.isDirectory {
+            // A hostile or broken server could present endless folders: stop at sane limits.
+            guard child.split(separator: "/").count - rootDepth <= Self.maxDepth else { throw Self.tooLarge }
+            folders.append(child)
+            queue.append(child)
+        } else {
+            files.append((child, e.size, e.modified))
+        }
     }
 }
 

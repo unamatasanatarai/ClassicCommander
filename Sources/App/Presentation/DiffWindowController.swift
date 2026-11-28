@@ -38,7 +38,7 @@ final class DiffWindowController: NSWindowController, NSWindowDelegate {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    private func build() -> NSView {
+    private func configureDiffTextViews() {
         for (view, scroll) in [(leftText, leftScroll), (rightText, rightScroll)] {
             view.isEditable = false
             view.isRichText = true
@@ -56,36 +56,35 @@ final class DiffWindowController: NSWindowController, NSWindowDelegate {
             NotificationCenter.default.addObserver(self, selector: #selector(scrolled(_:)),
                                                    name: NSView.boundsDidChangeNotification, object: scroll.contentView)
         }
+    }
 
-        // Configure arrow up and down navigation buttons
-        for b in [previousButton, nextButton] {
-            b.bezelStyle = .regularSquare
-            b.isBordered = true
-            b.showsBorderOnlyWhileMouseInside = false
-            b.controlSize = .small
-            b.target = self
-            b.translatesAutoresizingMaskIntoConstraints = false
-            b.widthAnchor.constraint(equalToConstant: 26).isActive = true
-            b.heightAnchor.constraint(equalToConstant: 24).isActive = true
-        }
-
-        if let upImg = NSImage(systemSymbolName: "arrow.up", accessibilityDescription: "Previous difference") {
-            previousButton.image = upImg
-            previousButton.imagePosition = .imageOnly
+    private func configureNavButton(
+        _ button: NSButton, symbol: String, fallback: String, label: String, action: Selector, toolTip: String
+    ) {
+        button.bezelStyle = .regularSquare
+        button.isBordered = true
+        button.showsBorderOnlyWhileMouseInside = false
+        button.controlSize = .small
+        button.target = self
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.widthAnchor.constraint(equalToConstant: 26).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        if let img = NSImage(systemSymbolName: symbol, accessibilityDescription: label) {
+            button.image = img
+            button.imagePosition = .imageOnly
         } else {
-            previousButton.title = "↑"
+            button.title = fallback
         }
-        previousButton.action = #selector(previousDifference)
-        previousButton.toolTip = "Previous difference (⌥↑ or p)"
+        button.action = action
+        button.toolTip = toolTip
+    }
 
-        if let downImg = NSImage(systemSymbolName: "arrow.down", accessibilityDescription: "Next difference") {
-            nextButton.image = downImg
-            nextButton.imagePosition = .imageOnly
-        } else {
-            nextButton.title = "↓"
-        }
-        nextButton.action = #selector(nextDifference)
-        nextButton.toolTip = "Next difference (⌥↓ or n)"
+    private func build() -> NSView {
+        configureDiffTextViews()
+        configureNavButton(previousButton, symbol: "arrow.up", fallback: "↑", label: "Previous difference",
+                           action: #selector(previousDifference), toolTip: "Previous difference (⌥↑ or p)")
+        configureNavButton(nextButton, symbol: "arrow.down", fallback: "↓", label: "Next difference",
+                           action: #selector(nextDifference), toolTip: "Next difference (⌥↓ or n)")
 
         statusLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .bold)
         statusLabel.lineBreakMode = .byTruncatingTail
@@ -222,12 +221,7 @@ final class DiffWindowController: NSWindowController, NSWindowDelegate {
     func show(_ comparison: FileComparison) {
         switch comparison {
         case .binary(let identical, let first):
-            diff = nil
-            statusLabel.stringValue = identical ? "The files are identical."
-                : "Binary files differ" + (first.map { " (first difference at byte \($0))" } ?? "") + "."
-            statusLabel.textColor = identical ? .systemGreen : .systemRed
-            leftText.textStorage?.setAttributedString(NSAttributedString(string: identical ? "" : "(binary file)"))
-            rightText.textStorage?.setAttributedString(NSAttributedString(string: identical ? "" : "(binary file)"))
+            showBinaryComparison(identical: identical, first: first)
         case .text(let d):
             diff = d
             render(d)
@@ -243,6 +237,20 @@ final class DiffWindowController: NSWindowController, NSWindowDelegate {
         updateButtons()
     }
 
+    private func showBinaryComparison(identical: Bool, first: Int64?) {
+        diff = nil
+        statusLabel.stringValue = Self.binaryStatusMessage(identical: identical, first: first)
+        statusLabel.textColor = identical ? .systemGreen : .systemRed
+        let body = NSAttributedString(string: identical ? "" : "(binary file)")
+        leftText.textStorage?.setAttributedString(body)
+        rightText.textStorage?.setAttributedString(body)
+    }
+
+    private static func binaryStatusMessage(identical: Bool, first: Int64?) -> String {
+        if identical { return "The files are identical." }
+        return "Binary files differ" + (first.map { " (first difference at byte \($0))" } ?? "") + "."
+    }
+
     private func render(_ d: TextDiff) {
         let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         let numberWidth = String(max(d.rows.compactMap(\.leftNumber).max() ?? 0, d.rows.compactMap(\.rightNumber).max() ?? 0)).count
@@ -252,23 +260,39 @@ final class DiffWindowController: NSWindowController, NSWindowDelegate {
 
     private func renderSide(_ d: TextDiff, left: Bool, numberWidth: Int, font: NSFont) -> NSAttributedString {
         let out = NSMutableAttributedString()
-        for row in d.rows {
-            let text = (left ? row.left : row.right) ?? ""
-            let number = (left ? row.leftNumber : row.rightNumber).map { String($0) } ?? ""
-            let pad = String(repeating: " ", count: max(0, numberWidth - number.count))
-            var background: NSColor?
-            switch row.kind {
-            case .same: background = nil
-            case .changed: background = NSColor.systemYellow.withAlphaComponent(0.20)
-            case .removed: background = left ? NSColor.systemRed.withAlphaComponent(0.20) : NSColor.quaternaryLabelColor.withAlphaComponent(0.06)
-            case .added: background = left ? NSColor.quaternaryLabelColor.withAlphaComponent(0.06) : NSColor.systemGreen.withAlphaComponent(0.22)
-            }
-            var attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.textColor]
-            if let bg = background { attrs[.backgroundColor] = bg }
-            out.append(NSAttributedString(string: pad + number + " ", attributes: [.font: font, .foregroundColor: NSColor.tertiaryLabelColor]))
-            out.append(NSAttributedString(string: text.replacingOccurrences(of: "\t", with: "    ") + "\n", attributes: attrs))
-        }
+        for row in d.rows { appendLine(row, left: left, numberWidth: numberWidth, font: font, to: out) }
         return out
+    }
+
+    private func appendLine(
+        _ row: TextDiff.Row, left: Bool, numberWidth: Int, font: NSFont, to out: NSMutableAttributedString
+    ) {
+        let text = (left ? row.left : row.right) ?? ""
+        let number = (left ? row.leftNumber : row.rightNumber).map { String($0) } ?? ""
+        let pad = String(repeating: " ", count: max(0, numberWidth - number.count))
+        let attrs = Self.lineAttributes(for: row.kind, left: left, font: font)
+        out.append(NSAttributedString(string: pad + number + " ", attributes: [.font: font, .foregroundColor: NSColor.tertiaryLabelColor]))
+        out.append(NSAttributedString(string: text.replacingOccurrences(of: "\t", with: "    ") + "\n", attributes: attrs))
+    }
+
+    private static func lineAttributes(for kind: TextDiff.Kind, left: Bool, font: NSFont) -> [NSAttributedString.Key: Any] {
+        var attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.textColor]
+        if let bg = lineBackground(for: kind, left: left) { attrs[.backgroundColor] = bg }
+        return attrs
+    }
+
+    private static func lineBackground(for kind: TextDiff.Kind, left: Bool) -> NSColor? {
+        if kind == .same { return nil }
+        if kind == .changed { return NSColor.systemYellow.withAlphaComponent(0.20) }
+        return addedOrRemovedTint(isRemoved: kind == .removed, left: left)
+    }
+
+    private static func addedOrRemovedTint(isRemoved: Bool, left: Bool) -> NSColor {
+        diffTint(active: isRemoved ? left : !left, color: isRemoved ? .systemRed : .systemGreen, alpha: isRemoved ? 0.20 : 0.22)
+    }
+
+    private static func diffTint(active: Bool, color: NSColor, alpha: CGFloat) -> NSColor {
+        active ? color.withAlphaComponent(alpha) : NSColor.quaternaryLabelColor.withAlphaComponent(0.06)
     }
 
     // MARK: Navigation
@@ -300,12 +324,7 @@ final class DiffWindowController: NSWindowController, NSWindowDelegate {
     private func scroll(_ view: NSTextView, toLine row: Int) {
         guard let layout = view.layoutManager, let container = view.textContainer else { return }
         let text = view.string as NSString
-        var index = 0, line = 0
-        while line < row && index < text.length {
-            index = NSMaxRange(text.lineRange(for: NSRange(location: index, length: 0)))
-            line += 1
-        }
-        let lineRange = text.lineRange(for: NSRange(location: min(index, text.length), length: 0))
+        let lineRange = Self.rangeOfLine(row, in: text)
         layout.ensureLayout(for: container)
         let glyphs = layout.glyphRange(forCharacterRange: lineRange, actualCharacterRange: nil)
         let rect = layout.boundingRect(forGlyphRange: glyphs, in: container)
@@ -313,6 +332,15 @@ final class DiffWindowController: NSWindowController, NSWindowDelegate {
         view.enclosingScrollView?.contentView.scroll(to: target)
         view.enclosingScrollView?.reflectScrolledClipView(view.enclosingScrollView!.contentView)
         view.setSelectedRange(NSRange(location: lineRange.location, length: 0))
+    }
+
+    private static func rangeOfLine(_ row: Int, in text: NSString) -> NSRange {
+        var index = 0, line = 0
+        while line < row && index < text.length {
+            index = NSMaxRange(text.lineRange(for: NSRange(location: index, length: 0)))
+            line += 1
+        }
+        return text.lineRange(for: NSRange(location: min(index, text.length), length: 0))
     }
 
     private func updateButtons() {
@@ -335,10 +363,18 @@ final class DiffWindowController: NSWindowController, NSWindowDelegate {
     func handleKey(_ event: NSEvent) -> Bool {
         let ch = event.charactersIgnoringModifiers?.lowercased() ?? ""
         let option = event.modifierFlags.contains(.option)
-        if ch == "n" || (option && event.keyCode == 125) { nextDifference(); return true }
-        if ch == "p" || (option && event.keyCode == 126) { previousDifference(); return true }
+        if isNextKey(event, ch: ch, option: option) { nextDifference(); return true }
+        if isPrevKey(event, ch: ch, option: option) { previousDifference(); return true }
         if event.keyCode == 53 { window?.performClose(nil); return true }
         return false
+    }
+
+    private func isNextKey(_ event: NSEvent, ch: String, option: Bool) -> Bool {
+        ch == "n" || (option && event.keyCode == 125)
+    }
+
+    private func isPrevKey(_ event: NSEvent, ch: String, option: Bool) -> Bool {
+        ch == "p" || (option && event.keyCode == 126)
     }
 
     /// Deletes downloaded copies (also used when the window closed before they arrived).

@@ -143,19 +143,22 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
         if let key = commander?.settings.keys.keys(for: .view).first {
             viewButton.title = "\(key.displayName) View"
         }
-        if !isSearching, let panel = commander?.activeView {
-            // A panel connected to a server searches that server (shown as its address).
-            let path = panel.model.isRemote
-                ? commander?.ftp.displayAddress(of: panel.model.directory) ?? FileManager.default.homeDirectoryForCurrentUser.path
-                : panel.model.directory.path
-            config.general.searchPaths = [path]
-        }
+        updateSearchPathsIfIdle()
         writeUI()
         updateEnabled()
         if let window = window { AppWindows.place(window) }
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         window?.makeFirstResponder(searchFor)
+    }
+
+    private func updateSearchPathsIfIdle() {
+        guard !isSearching, let panel = commander?.activeView else { return }
+        // A panel connected to a server searches that server (shown as its address).
+        let path = panel.model.isRemote
+            ? commander?.ftp.displayAddress(of: panel.model.directory) ?? FileManager.default.homeDirectoryForCurrentUser.path
+            : panel.model.directory.path
+        config.general.searchPaths = [path]
     }
 
     // MARK: Building
@@ -332,46 +335,10 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
     }
 
     private func buildAdvanced() -> NSView {
-        for (p, b) in [(dateFromPicker, dateFromButton), (dateToPicker, dateToButton)] {
-            p.datePickerStyle = .textField
-            p.datePickerElements = .yearMonthDay
-            p.dateValue = Date()
-            b.bezelStyle = .rounded
-            b.target = self
-            b.action = #selector(showCalendar(_:))
-        }
-        for (field, stepper) in [(notOlderField, notOlderStepper), (olderField, olderStepper), (sizeField, sizeStepper)] {
-            field.widthAnchor.constraint(equalToConstant: 80).isActive = true
-            stepper.minValue = 0
-            stepper.maxValue = 1_000_000
-            stepper.increment = 1
-            stepper.valueWraps = false
-            stepper.target = self
-            stepper.action = #selector(stepped(_:))
-        }
-        for u in [notOlderUnit, olderUnit] { u.addItems(withTitles: AgeUnit.allCases.map(\.label)) }
-        sizeOperator.addItems(withTitles: ComparisonOperator.allCases.map(\.rawValue))
-        sizeUnit.addItems(withTitles: SizeUnit.allCases.map(\.label))
+        configureDatePickers()
+        configureSteppersAndUnits()
         wire([dateBetweenBox, notOlderBox, olderBox, sizeBox, attributesBox, duplicatesBox], #selector(controlChanged))
-
-        // Three-state attribute boxes: "–" ignore, ✓ must have, empty must not have.
-        var attrRows: [[NSView]] = []
-        for row in Self.attributeLayout {
-            var views: [NSView] = []
-            for attribute in row {
-                let b = NSButton(checkboxWithTitle: attribute.label, target: nil, action: nil)
-                b.allowsMixedState = true
-                b.state = .mixed
-                b.toolTip = attribute.macMeaning + "\n– = ignore,  ✓ = must have,  empty = must not have"
-                attributeBoxes[attribute] = b
-                views.append(b)
-            }
-            while views.count < 4 { views.append(NSGridCell.emptyContentView) }
-            attrRows.append(views)
-        }
-        let attrGrid = NSGridView(views: attrRows)
-        attrGrid.columnSpacing = 18
-        attrGrid.rowSpacing = 6
+        let attrGrid = buildAttributeGrid()
 
         func row(_ views: [NSView]) -> NSStackView {
             let s = NSStackView(views: views)
@@ -437,12 +404,24 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
             stepper.integerValue = age.value
             unit.selectItem(at: AgeUnit.allCases.firstIndex(of: age.unit) ?? 0)
         }
+        writeSizeAndAttributesUI(from: a)
+        setCheck(duplicatesBox, a.duplicates.enabled)
+        setCheck(sameNameBox, a.duplicates.sameName)
+        setCheck(sameSizeBox, a.duplicates.sameSize)
+        setCheck(sameContentsBox, a.duplicates.sameContents)
+    }
+
+    private func writeSizeAndAttributesUI(from a: AdvancedSearchConfiguration) {
         setCheck(sizeBox, a.fileSize.enabled)
         sizeOperator.selectItem(at: ComparisonOperator.allCases.firstIndex(of: a.fileSize.comparison) ?? 0)
         sizeField.stringValue = a.fileSize.value.truncatingRemainder(dividingBy: 1) == 0
             ? String(Int64(a.fileSize.value)) : String(a.fileSize.value)
         sizeStepper.doubleValue = a.fileSize.value
         sizeUnit.selectItem(at: SizeUnit.allCases.firstIndex(of: a.fileSize.unit) ?? 0)
+        writeAttributesUI(from: a)
+    }
+
+    private func writeAttributesUI(from a: AdvancedSearchConfiguration) {
         setCheck(attributesBox, a.attributesEnabled)
         for (attribute, box) in attributeBoxes {
             switch a.state(of: attribute) {
@@ -451,70 +430,86 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
             case .excluded: box.state = .off
             }
         }
-        setCheck(duplicatesBox, a.duplicates.enabled)
-        setCheck(sameNameBox, a.duplicates.sameName)
-        setCheck(sameSizeBox, a.duplicates.sameSize)
-        setCheck(sameContentsBox, a.duplicates.sameContents)
     }
 
     /// Reads the controls into `config`. Number fields that do not parse are reported, not guessed.
     @discardableResult
     func readUI() -> SearchValidationError? {
         var c = config
-        c.general.filenamePattern = searchFor.stringValue.isEmpty ? "*" : searchFor.stringValue
-        c.general.searchPaths = FileSearchConfiguration.parsePaths(searchIn.stringValue)
-        c.general.useRegex = regexBox.state == .on
-        c.general.selectedItemsOnly = selectedOnlyBox.state == .on
-        c.general.depth = Self.depthChoices[max(0, depthPopup.indexOfSelectedItem)].1
-        c.general.content.enabled = findTextBox.state == .on
-        c.general.content.expression = findTextField.stringValue
-        c.general.content.wholeWordsOnly = wholeWordsBox.state == .on
-        c.general.content.caseSensitive = caseBox.state == .on
-        c.general.content.useRegex = textRegexBox.state == .on
-        c.general.content.hexadecimal = hexBox.state == .on
-        c.general.content.invertMatch = notBox.state == .on
-        c.general.content.charsets = ContentCharset.allCases.filter { charsetBoxes[$0]?.state == .on }
+        readGeneralUI(into: &c.general)
+        let problem = readAdvancedUI(into: &c.advanced)
+        config = c
+        return problem
+    }
 
-        c.advanced.dateBetweenEnabled = dateBetweenBox.state == .on
-        c.advanced.dateFrom = dateFromPicker.dateValue
-        c.advanced.dateTo = dateToPicker.dateValue
+    private func readGeneralUI(into g: inout GeneralSearchConfiguration) {
+        g.filenamePattern = searchFor.stringValue.isEmpty ? "*" : searchFor.stringValue
+        g.searchPaths = FileSearchConfiguration.parsePaths(searchIn.stringValue)
+        g.useRegex = regexBox.state == .on
+        g.selectedItemsOnly = selectedOnlyBox.state == .on
+        g.depth = Self.depthChoices[max(0, depthPopup.indexOfSelectedItem)].1
+        g.content.enabled = findTextBox.state == .on
+        g.content.expression = findTextField.stringValue
+        g.content.wholeWordsOnly = wholeWordsBox.state == .on
+        g.content.caseSensitive = caseBox.state == .on
+        g.content.useRegex = textRegexBox.state == .on
+        g.content.hexadecimal = hexBox.state == .on
+        g.content.invertMatch = notBox.state == .on
+        g.content.charsets = ContentCharset.allCases.filter { charsetBoxes[$0]?.state == .on }
+    }
+
+    private func readAdvancedUI(into a: inout AdvancedSearchConfiguration) -> SearchValidationError? {
+        a.dateBetweenEnabled = dateBetweenBox.state == .on
+        a.dateFrom = dateFromPicker.dateValue
+        a.dateTo = dateToPicker.dateValue
         var problem: SearchValidationError?
-        func int(_ field: NSTextField, _ name: String, active: Bool) -> Int {
-            if let v = Int(field.stringValue.trimmingCharacters(in: .whitespaces)), v >= 0 { return v }
+        a.notOlderThan = readAgeFilter(box: notOlderBox, field: notOlderField, unit: notOlderUnit,
+                                       name: "Not older than", problem: &problem)
+        a.olderThan = readAgeFilter(box: olderBox, field: olderField, unit: olderUnit,
+                                    name: "Older than", problem: &problem)
+        a.fileSize = readSizeFilter(problem: &problem)
+        a.attributesEnabled = attributesBox.state == .on
+        a.attributes = readAttributesUI()
+        a.duplicates = DuplicateSearchConfiguration(enabled: duplicatesBox.state == .on,
+                                                    sameName: sameNameBox.state == .on,
+                                                    sameSize: sameSizeBox.state == .on,
+                                                    sameContents: sameContentsBox.state == .on)
+        return problem
+    }
+
+    private func readAgeFilter(
+        box: NSButton, field: NSTextField, unit: NSPopUpButton, name: String, problem: inout SearchValidationError?
+    ) -> AgeFilter {
+        let active = box.state == .on
+        let value: Int
+        if let v = Int(field.stringValue.trimmingCharacters(in: .whitespaces)), v >= 0 {
+            value = v
+        } else {
             if active && problem == nil { problem = SearchValidationError(message: "“\(name)” needs a whole number of 0 or more.") }
-            return 1
+            value = 1
         }
-        c.advanced.notOlderThan = AgeFilter(enabled: notOlderBox.state == .on,
-                                            value: int(notOlderField, "Not older than", active: notOlderBox.state == .on),
-                                            unit: AgeUnit.allCases[max(0, notOlderUnit.indexOfSelectedItem)])
-        c.advanced.olderThan = AgeFilter(enabled: olderBox.state == .on,
-                                         value: int(olderField, "Older than", active: olderBox.state == .on),
-                                         unit: AgeUnit.allCases[max(0, olderUnit.indexOfSelectedItem)])
+        return AgeFilter(enabled: active, value: value, unit: AgeUnit.allCases[max(0, unit.indexOfSelectedItem)])
+    }
+
+    private func readSizeFilter(problem: inout SearchValidationError?) -> SizeFilter {
         let sizeText = sizeField.stringValue.replacingOccurrences(of: ",", with: ".").trimmingCharacters(in: .whitespaces)
         let sizeValue = Double(sizeText)
         if sizeBox.state == .on && (sizeValue == nil || sizeValue! < 0) && problem == nil {
             problem = SearchValidationError(message: "“File size” needs a number of 0 or more.")
         }
-        c.advanced.fileSize = SizeFilter(enabled: sizeBox.state == .on,
-                                         comparison: ComparisonOperator.allCases[max(0, sizeOperator.indexOfSelectedItem)],
-                                         value: sizeValue ?? 1,
-                                         unit: SizeUnit.allCases[max(0, sizeUnit.indexOfSelectedItem)])
-        c.advanced.attributesEnabled = attributesBox.state == .on
+        return SizeFilter(enabled: sizeBox.state == .on,
+                          comparison: ComparisonOperator.allCases[max(0, sizeOperator.indexOfSelectedItem)],
+                          value: sizeValue ?? 1,
+                          unit: SizeUnit.allCases[max(0, sizeUnit.indexOfSelectedItem)])
+    }
+
+    private func readAttributesUI() -> [FileAttribute: TriState] {
         var attrs: [FileAttribute: TriState] = [:]
         for (attribute, box) in attributeBoxes where attribute.isAvailable {
-            switch box.state {
-            case .on: attrs[attribute] = .required
-            case .off: attrs[attribute] = .excluded
-            default: break
-            }
+            if box.state == .on { attrs[attribute] = .required }
+            else if box.state == .off { attrs[attribute] = .excluded }
         }
-        c.advanced.attributes = attrs
-        c.advanced.duplicates = DuplicateSearchConfiguration(enabled: duplicatesBox.state == .on,
-                                                             sameName: sameNameBox.state == .on,
-                                                             sameSize: sameSizeBox.state == .on,
-                                                             sameContents: sameContentsBox.state == .on)
-        config = c
-        return problem
+        return attrs
     }
 
     @objc private func controlChanged() {
@@ -526,8 +521,63 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
         field.stringValue = String(sender.integerValue)
     }
 
+    private func configureDatePickers() {
+        for (p, b) in [(dateFromPicker, dateFromButton), (dateToPicker, dateToButton)] {
+            p.datePickerStyle = .textField
+            p.datePickerElements = .yearMonthDay
+            p.dateValue = Date()
+            b.bezelStyle = .rounded
+            b.target = self
+            b.action = #selector(showCalendar(_:))
+        }
+    }
+
+    private func configureSteppersAndUnits() {
+        for (field, stepper) in [(notOlderField, notOlderStepper), (olderField, olderStepper), (sizeField, sizeStepper)] {
+            field.widthAnchor.constraint(equalToConstant: 80).isActive = true
+            stepper.minValue = 0
+            stepper.maxValue = 1_000_000
+            stepper.increment = 1
+            stepper.valueWraps = false
+            stepper.target = self
+            stepper.action = #selector(stepped(_:))
+        }
+        for u in [notOlderUnit, olderUnit] { u.addItems(withTitles: AgeUnit.allCases.map(\.label)) }
+        sizeOperator.addItems(withTitles: ComparisonOperator.allCases.map(\.rawValue))
+        sizeUnit.addItems(withTitles: SizeUnit.allCases.map(\.label))
+    }
+
+    private func buildAttributeGrid() -> NSGridView {
+        // Three-state attribute boxes: "–" ignore, ✓ must have, empty must not have.
+        var attrRows: [[NSView]] = []
+        for row in Self.attributeLayout {
+            var views: [NSView] = row.map(makeAttributeBox)
+            while views.count < 4 { views.append(NSGridCell.emptyContentView) }
+            attrRows.append(views)
+        }
+        let attrGrid = NSGridView(views: attrRows)
+        attrGrid.columnSpacing = 18
+        attrGrid.rowSpacing = 6
+        return attrGrid
+    }
+
+    private func makeAttributeBox(for attribute: FileAttribute) -> NSButton {
+        let b = NSButton(checkboxWithTitle: attribute.label, target: nil, action: nil)
+        b.allowsMixedState = true
+        b.state = .mixed
+        b.toolTip = attribute.macMeaning + "\n– = ignore,  ✓ = must have,  empty = must not have"
+        attributeBoxes[attribute] = b
+        return b
+    }
+
     /// Greys out controls whose section is switched off, as in Total Commander.
     private func updateEnabled() {
+        updateTextSearchEnabled()
+        updateSearchInEnabled()
+        updateAdvancedAndResultEnabled()
+    }
+
+    private func updateTextSearchEnabled() {
         let text = findTextBox.state == .on
         let hex = hexBox.state == .on
         findTextField.isEnabled = text
@@ -535,16 +585,26 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
         hexBox.isEnabled = text
         notBox.isEnabled = text
         for b in charsetBoxes.values { b.isEnabled = text && !hex }
+    }
+
+    private func updateSearchInEnabled() {
         let hasSelection = !(commander?.activeView.model.marked.isEmpty ?? true)
         selectedOnlyBox.isEnabled = hasSelection || selectedOnlyBox.state == .on
         searchIn.isEnabled = selectedOnlyBox.state != .on
         browseButton.isEnabled = searchIn.isEnabled
         drivesButton.isEnabled = searchIn.isEnabled
+    }
+
+    private func updateAdvancedAndResultEnabled() {
         let dates = dateBetweenBox.state == .on
         for v in [dateFromPicker, dateToPicker, dateFromButton, dateToButton] as [NSControl] { v.isEnabled = dates }
         for v in [notOlderField, notOlderStepper, notOlderUnit] as [NSControl] { v.isEnabled = notOlderBox.state == .on }
         for v in [olderField, olderStepper, olderUnit] as [NSControl] { v.isEnabled = olderBox.state == .on }
         for v in [sizeOperator, sizeField, sizeStepper, sizeUnit] as [NSControl] { v.isEnabled = sizeBox.state == .on }
+        updateAttributesAndResultButtons()
+    }
+
+    private func updateAttributesAndResultButtons() {
         for (attribute, box) in attributeBoxes {
             box.isEnabled = attributesBox.state == .on && attribute.isAvailable
         }
@@ -581,30 +641,51 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
     @objc func startSearch() {
         guard !isSearching else { return }
         if let problem = readUI() { return show(problem) }
-        // "Only search in selected": the marked entries of the active panel.
-        let selected = commander.map { c in c.activeView.model.realEntries.filter { c.activeView.model.isMarked($0) }.map(\.url) } ?? []
-        let base = commander?.activeView.model.directory ?? FileManager.default.homeDirectoryForCurrentUser
         let flag = CancelFlag()
-        let search: FileSearch
+        guard let search = buildFileSearch(flag: flag) else { return }
+        beginSearchRun(search, flag: flag)
+    }
+
+    private func buildFileSearch(flag: CancelFlag) -> FileSearch? {
+        // "Only search in selected": the marked entries of the active panel.
+        let selected = selectedURLsForSearch()
+        let base = commander?.activeView.model.directory ?? FileManager.default.homeDirectoryForCurrentUser
+        return createFileSearch(selected: selected, base: base, flag: flag)
+    }
+
+    private func createFileSearch(selected: [URL], base: URL, flag: CancelFlag) -> FileSearch? {
         do {
-            search = try FileSearch(
+            return try FileSearch(
                 config: config, selectedItems: selected, base: base,
                 isCancelled: { flag.isCancelled },
                 onFound: { [weak self] item in self?.enqueue(item) },
-                onProgress: { [weak self] count, folder in
-                    DispatchQueue.main.async {
-                        guard let self = self, self.isSearching else { return }
-                        self.setSummary("Searching…  \(count) items checked")
-                        self.statusLabel.stringValue = folder
-                    }
-                },
+                onProgress: { [weak self] count, folder in self?.reportProgress(count: count, folder: folder) },
                 sessions: commander?.ftp.sessionLookup ?? { _ in nil },
                 remoteAddress: { [weak self] text in self?.commander?.ftp.location(fromAddress: text) })
-        } catch let error as SearchValidationError {
-            return show(error)
         } catch {
-            return show(SearchValidationError(message: error.localizedDescription))
+            show(Self.validationError(for: error))
+            return nil
         }
+    }
+
+    static func validationError(for error: Error) -> SearchValidationError {
+        (error as? SearchValidationError) ?? SearchValidationError(message: error.localizedDescription)
+    }
+
+    private func selectedURLsForSearch() -> [URL] {
+        guard let c = commander else { return [] }
+        return c.activeView.model.realEntries.filter { c.activeView.model.isMarked($0) }.map(\.url)
+    }
+
+    private func reportProgress(count: Int, folder: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.isSearching else { return }
+            self.setSummary("Searching…  \(count) items checked")
+            self.statusLabel.stringValue = folder
+        }
+    }
+
+    private func beginSearchRun(_ search: FileSearch, flag: CancelFlag) {
         remember()
         rows = []
         rebuildDisplayRows()
@@ -613,7 +694,6 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
         setSummary("Searching…")
         cancelButton.title = "Stop"
         updateEnabled()
-
         if runSynchronously {
             finish(search.run())
         } else {
@@ -671,27 +751,39 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
         flush()
         isSearching = false
         cancelFlag = nil
+        applyFinishRows(from: report)
+        lastErrors = report.errors
+        let text = Self.finishSummaryText(for: report, rowCount: rows.count)
+        summary = text
+        rebuildDisplayRows()
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        applyFinishStatus(text: text, errors: report.errors)
+        cancelButton.title = "Cancel"
+        updateEnabled()
+    }
+
+    private func applyFinishRows(from report: FileSearch.Report) {
         if let groups = report.duplicateGroups {
             rows = groups.flatMap { g in g.items.map { Row(item: $0, group: g.id) } }
         } else if runSynchronously {
             rows = report.found.map { Row(item: $0, group: nil) }
         }
-        lastErrors = report.errors
+    }
+
+    private static func finishSummaryText(for report: FileSearch.Report, rowCount: Int) -> String {
         var text: String
         if let groups = report.duplicateGroups {
-            text = "[\(rows.count) duplicate files in \(groups.count) group\(groups.count == 1 ? "" : "s") found]"
+            text = "[\(rowCount) duplicate files in \(groups.count) group\(groups.count == 1 ? "" : "s") found]"
         } else {
             text = "[\(report.fileCount) files and \(report.directoryCount) directories found]"
         }
-        if report.cancelled { text += " - search aborted" }
-        summary = text
-        rebuildDisplayRows()
-        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-        statusLabel.stringValue = report.errors.isEmpty
-            ? text : "\(text)  ·  \(report.errors.count) could not be read (hover for details)"
-        statusLabel.toolTip = report.errors.isEmpty ? nil : report.errors.prefix(30).joined(separator: "\n")
-        cancelButton.title = "Cancel"
-        updateEnabled()
+        return report.cancelled ? text + " - search aborted" : text
+    }
+
+    private func applyFinishStatus(text: String, errors: [String]) {
+        statusLabel.stringValue = errors.isEmpty
+            ? text : "\(text)  ·  \(errors.count) could not be read (hover for details)"
+        statusLabel.toolTip = errors.isEmpty ? nil : errors.prefix(30).joined(separator: "\n")
     }
 
     private func cancelPressed() {
@@ -750,15 +842,28 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
             commander.ftp.viewRemote(row.item.url, size: row.item.size)
             return nil
         }
+        return openLocalResultInLister(url: row.item.url, commander: commander)
+    }
+
+    private func openLocalResultInLister(url: URL, commander: CommanderView) -> ListerWindowController? {
         let files = rows.filter { !$0.item.isDirectory && !$0.item.url.isRemoteLocation }.map(\.item.url)
-        let index = files.firstIndex(of: row.item.url) ?? 0
+        let index = files.firstIndex(of: url) ?? 0
         return commander.openLister(files: files, index: index, onNavigate: { [weak self] url in
-            guard let self = self else { return }
-            if let idx = self.rows.firstIndex(where: { $0.item.url == url }) {
-                self.table.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
-                self.table.scrollRowToVisible(idx)
-            }
+            self?.selectRow(for: url)
         })
+    }
+
+    func selectRow(for url: URL) {
+        _ = rowIndex(for: url).map(selectTableRow)
+    }
+
+    private func selectTableRow(at idx: Int) {
+        table.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
+        table.scrollRowToVisible(idx)
+    }
+
+    private func rowIndex(for url: URL) -> Int? {
+        rows.firstIndex { $0.item.url == url }
     }
 
     /// Keys in the results list: the View shortcut opens Lister, Return goes to the file.
@@ -872,12 +977,17 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
             label = NSTextField(labelWithString: String(repeating: "–", count: 60))
             label.textColor = .tertiaryLabelColor
         case .item(let i):
-            let url = rows[i].item.url
-            let shown = url.isRemoteLocation ? commander?.ftp.displayAddress(of: url) ?? url.path : url.path
-            label = NSTextField(labelWithString: EntryFormatter.visible(shown) + (rows[i].item.isDirectory ? "/" : ""))
-            label.lineBreakMode = .byTruncatingMiddle
+            label = makeItemCellLabel(for: rows[i].item)
         }
         return AppWindows.centeredCell(label)
+    }
+
+    private func makeItemCellLabel(for item: SearchItem) -> NSTextField {
+        let url = item.url
+        let shown = url.isRemoteLocation ? commander?.ftp.displayAddress(of: url) ?? url.path : url.path
+        let label = NSTextField(labelWithString: EntryFormatter.visible(shown) + (item.isDirectory ? "/" : ""))
+        label.lineBreakMode = .byTruncatingMiddle
+        return label
     }
 
     public func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {

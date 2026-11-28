@@ -87,23 +87,32 @@ final class MultiRenameWindowController: NSWindowController, NSWindowDelegate, N
         return b
     }
 
-    private func build() -> NSView {
+    private func configureFieldsAndControls() {
         nameField.stringValue = "[N]"
-        nameField.addItems(withObjectValues: defaults.stringArray(forKey: Key.names) ?? [])
         extField.stringValue = "[E]"
+        nameField.addItems(withObjectValues: defaults.stringArray(forKey: Key.names) ?? [])
         searchField.addItems(withObjectValues: defaults.stringArray(forKey: Key.searches) ?? [])
         replaceField.addItems(withObjectValues: defaults.stringArray(forKey: Key.replaces) ?? [])
+        configureTargetsAndPopups()
+        configureNumericFields()
+        nameField.widthAnchor.constraint(equalToConstant: 280).isActive = true
+        extField.widthAnchor.constraint(equalToConstant: 140).isActive = true
+        searchField.widthAnchor.constraint(equalToConstant: 220).isActive = true
+        replaceField.widthAnchor.constraint(equalToConstant: 220).isActive = true
+    }
+
+    private func configureTargetsAndPopups() {
         for f in [nameField, extField, searchField, replaceField, startField, stepField] as [NSTextField] {
-            f.delegate = self
-            f.target = self
-            f.action = #selector(changed)
+            f.delegate = self; f.target = self; f.action = #selector(changed)
         }
         for c in [caseBox, firstOnlyBox, extensionBox, regexBox, casePopup, digitsPopup] as [NSControl] {
-            c.target = self
-            c.action = #selector(changed)
+            c.target = self; c.action = #selector(changed)
         }
         casePopup.addItems(withTitles: RenameRules.Case.allCases.map(\.label))
         digitsPopup.addItems(withTitles: (1...10).map(String.init))
+    }
+
+    private func configureNumericFields() {
         startField.integerValue = 1
         stepField.integerValue = 1
         for f in [startField, stepField] {
@@ -113,10 +122,10 @@ final class MultiRenameWindowController: NSWindowController, NSWindowDelegate, N
             formatter.allowsFloats = false
             f.formatter = formatter
         }
-        nameField.widthAnchor.constraint(equalToConstant: 280).isActive = true
-        extField.widthAnchor.constraint(equalToConstant: 140).isActive = true
-        searchField.widthAnchor.constraint(equalToConstant: 220).isActive = true
-        replaceField.widthAnchor.constraint(equalToConstant: 220).isActive = true
+    }
+
+    private func build() -> NSView {
+        configureFieldsAndControls()
 
         let nameButtons = NSGridView(views: [
             [tokenButton("[N] Name", "[N]", into: nameField), tokenButton("[YMD] Date", "[YMD]", into: nameField)],
@@ -354,47 +363,71 @@ final class MultiRenameWindowController: NSWindowController, NSWindowDelegate, N
     /// Click a column title: sort by it (the counter follows the new order).
     func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
         guard let d = tableView.sortDescriptors.first, let key = d.key else { return }
-        let f = EntryFormatter.shared
-        func value(_ e: FileEntry) -> String {
-            switch key {
-            case "size": return String(format: "%020lld", e.size ?? -1)
-            case "date": return f.date(e)
-            case "where": return e.url.deletingLastPathComponent().path
-            case "new": return (try? MultiRename.newName(for: e, index: 0, rules: rules)) ?? e.name
-            default: return e.name
-            }
-        }
         entries.sort { a, b in
-            let r = value(a).localizedStandardCompare(value(b))
+            let r = sortValue(for: a, key: key).localizedStandardCompare(sortValue(for: b, key: key))
             return d.ascending ? r == .orderedAscending : r == .orderedDescending
         }
         update()
     }
 
+    private static let sortKeyGetters: [String: (MultiRenameWindowController, FileEntry) -> String] = [
+        "size": { _, entry in sizeSortKey(for: entry) },
+        "new": { vc, entry in vc.newSortName(for: entry) },
+        "date": { _, entry in EntryFormatter.shared.date(entry) },
+        "where": { _, entry in entry.url.deletingLastPathComponent().path },
+    ]
+
+    private func sortValue(for entry: FileEntry, key: String) -> String {
+        Self.sortKeyGetters[key]?(self, entry) ?? entry.name
+    }
+
+    private static func sizeSortKey(for entry: FileEntry) -> String {
+        String(format: "%020lld", entry.size ?? -1)
+    }
+
+    private func newSortName(for entry: FileEntry) -> String {
+        (try? MultiRename.newName(for: entry, index: 0, rules: rules)) ?? entry.name
+    }
+
     func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
         guard rows.indices.contains(row) else { return nil }
-        let r = rows[row]
-        let f = EntryFormatter.shared
-        let label: NSTextField
-        switch column?.identifier.rawValue {
-        case "new":
-            label = NSTextField(labelWithString: EntryFormatter.visible(r.newName))
-            if let problem = r.problem {
-                label.textColor = .systemRed
-                label.toolTip = problem
-            } else if r.changes {
-                label.font = .boldSystemFont(ofSize: 13)
-            }
-        case "size":
-            label = NSTextField(labelWithString: r.entry.kind == .file ? f.grouped(r.entry.size ?? 0) : "<DIR>")
-            label.alignment = .right
-        case "date": label = NSTextField(labelWithString: f.date(r.entry))
-        case "where":
-            let url = r.entry.url.deletingLastPathComponent()
-            label = NSTextField(labelWithString: url.isRemoteLocation ? commander?.ftp.displayAddress(of: url) ?? url.path : url.path)
-        default: label = NSTextField(labelWithString: EntryFormatter.visible(r.entry.name))
-        }
+        let label = cellLabel(for: rows[row], columnID: column?.identifier.rawValue)
         label.lineBreakMode = .byTruncatingMiddle
         return AppWindows.centeredCell(label)
+    }
+
+    private static let cellLabelBuilders: [String: (MultiRenameWindowController, MultiRename.Row) -> NSTextField] = [
+        "new": { vc, row in vc.newNameLabel(for: row) },
+        "size": { _, row in sizeLabel(for: row.entry) },
+        "date": { _, row in NSTextField(labelWithString: EntryFormatter.shared.date(row.entry)) },
+        "where": { vc, row in NSTextField(labelWithString: vc.locationString(for: row.entry)) },
+    ]
+
+    private func cellLabel(for r: MultiRename.Row, columnID: String?) -> NSTextField {
+        if let id = columnID, let builder = Self.cellLabelBuilders[id] { return builder(self, r) }
+        return NSTextField(labelWithString: EntryFormatter.visible(r.entry.name))
+    }
+
+    private static func sizeLabel(for entry: FileEntry) -> NSTextField {
+        let text = entry.kind == .file ? EntryFormatter.shared.grouped(entry.size ?? 0) : "<DIR>"
+        let label = NSTextField(labelWithString: text)
+        label.alignment = .right
+        return label
+    }
+
+    private func newNameLabel(for r: MultiRename.Row) -> NSTextField {
+        let label = NSTextField(labelWithString: EntryFormatter.visible(r.newName))
+        if let problem = r.problem {
+            label.textColor = .systemRed
+            label.toolTip = problem
+        } else if r.changes {
+            label.font = .boldSystemFont(ofSize: 13)
+        }
+        return label
+    }
+
+    private func locationString(for entry: FileEntry) -> String {
+        let url = entry.url.deletingLastPathComponent()
+        return url.isRemoteLocation ? (commander?.ftp.displayAddress(of: url) ?? url.path) : url.path
     }
 }

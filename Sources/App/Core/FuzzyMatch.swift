@@ -29,23 +29,40 @@ public enum FuzzyMatch {
     }
 
     private static func wordScore(_ word: String, in text: String) -> Int? {
-        if let range = text.range(of: word) {
-            let position = text.distance(from: text.startIndex, to: range.lowerBound)
-            let atWordStart = range.lowerBound == text.startIndex || !text[text.index(before: range.lowerBound)].isLetter
-            return 1000 - position + (atWordStart ? 200 : 0)
-        }
+        if let score = substringScore(word, in: text) { return score }
+        return subsequenceScore(word, in: text)
+    }
+
+    private static func substringScore(_ word: String, in text: String) -> Int? {
+        guard let range = text.range(of: word) else { return nil }
+        let position = text.distance(from: text.startIndex, to: range.lowerBound)
+        let atWordStart = range.lowerBound == text.startIndex || !text[text.index(before: range.lowerBound)].isLetter
+        return 1000 - position + (atWordStart ? 200 : 0)
+    }
+
+    private static func subsequenceScore(_ word: String, in text: String) -> Int? {
         // Letters in order: reward consecutive letters and letters that start words.
         let chars = Array(text)
         var score = 0, i = 0, lastHit = -2
         for q in word {
-            while i < chars.count && chars[i] != q { i += 1 }
-            guard i < chars.count else { return nil }
-            if i == lastHit + 1 { score += 15 }
-            if i == 0 || !chars[i - 1].isLetter { score += 25 }
-            score += 5
-            lastHit = i
-            i += 1
+            guard let hit = nextMatchIndex(of: q, in: chars, from: i) else { return nil }
+            score += hitScore(at: hit, lastHit: lastHit, in: chars)
+            lastHit = hit
+            i = hit + 1
         }
+        return score
+    }
+
+    private static func nextMatchIndex(of target: Character, in chars: [Character], from start: Int) -> Int? {
+        var i = start
+        while i < chars.count && chars[i] != target { i += 1 }
+        return i < chars.count ? i : nil
+    }
+
+    private static func hitScore(at index: Int, lastHit: Int, in chars: [Character]) -> Int {
+        var score = 5
+        if index == lastHit + 1 { score += 15 }
+        if index == 0 || !chars[index - 1].isLetter { score += 25 }
         return score
     }
 

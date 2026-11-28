@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help setup build run kill test coverage crap dmg release revoke clean
+.PHONY: help setup build run kill test coverage crap crap-baseline dmg release revoke clean
 
 APP_NAME  ?= $(shell bash -c 'source ./scripts/config.sh && echo "$$APP_NAME"')
 BUNDLE_ID ?= $(shell bash -c 'source ./scripts/config.sh && echo "$$BUNDLE_ID"')
@@ -43,8 +43,13 @@ test:
 coverage:
 	@./scripts/coverage.sh --check
 
-## crap: Calculate CRAP risk scores for all methods and report high-risk functions
+## crap: CRAP risk scores; fails on functions over the threshold that are new or worse than the baseline
 crap:
+	@python3 tools/crap/test_crap.py
+	@./tools/crap/run.sh
+
+## crap-baseline: Accept the current CRAP scores as the new baseline (tools/crap/baseline.*)
+crap-baseline:
 	@./tools/crap/run.sh --baseline
 
 ## dmg: Build styled DMG distribution package

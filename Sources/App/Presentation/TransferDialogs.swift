@@ -44,19 +44,7 @@ final class TransferDialogController: NSWindowController, NSComboBoxDelegate {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    private func build() -> NSView {
-        let message = NSTextField(labelWithString: question.message)
-        targetField.stringValue = question.defaultTarget
-        targetField.addItems(withObjectValues: defaults.stringArray(forKey: Key.targets) ?? [])
-        maskField.placeholderString = "all files — or e.g. *.jpg;*.png"
-        maskField.addItems(withObjectValues: defaults.stringArray(forKey: Key.masks) ?? [])
-        maskField.delegate = self
-        maskField.target = self
-        maskField.action = #selector(maskChanged)
-        verifyBox.state = defaults.bool(forKey: Key.verify) ? .on : .off
-        statsLabel.textColor = .secondaryLabelColor
-        statsLabel.alignment = .right
-
+    private func configureActionButtons() {
         okButton.target = self
         okButton.action = #selector(okPressed)
         okButton.keyEquivalent = "\r"
@@ -72,6 +60,32 @@ final class TransferDialogController: NSWindowController, NSComboBoxDelegate {
             b.bezelStyle = .rounded
             b.widthAnchor.constraint(greaterThanOrEqualToConstant: AppWindows.Layout.buttonMinWidth).isActive = true
         }
+    }
+
+    private func configureInputFields() {
+        targetField.stringValue = question.defaultTarget
+        targetField.addItems(withObjectValues: defaults.stringArray(forKey: Key.targets) ?? [])
+        maskField.placeholderString = "all files — or e.g. *.jpg;*.png"
+        maskField.addItems(withObjectValues: defaults.stringArray(forKey: Key.masks) ?? [])
+        maskField.delegate = self
+        maskField.target = self
+        maskField.action = #selector(maskChanged)
+        verifyBox.state = defaults.bool(forKey: Key.verify) ? .on : .off
+        statsLabel.textColor = .secondaryLabelColor
+        statsLabel.alignment = .right
+    }
+
+    private func build() -> NSView {
+        let message = NSTextField(labelWithString: question.message)
+        configureInputFields()
+        configureActionButtons()
+        let typeRow = buildTypeRow()
+        let buttons = buildButtonRow()
+        let stack = buildStack(views: [message, targetField, typeRow, maskField, verifyBox, buttons])
+        return buildRoot(stack: stack, width: 480, fullWidthViews: [targetField, typeRow, maskField, buttons])
+    }
+
+    private func buildTypeRow() -> NSStackView {
         let typeLabel = NSTextField(labelWithString: "Only files of type:")
         typeLabel.setContentHuggingPriority(.required, for: .horizontal)
         typeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -79,16 +93,22 @@ final class TransferDialogController: NSWindowController, NSComboBoxDelegate {
         statsLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         let typeSpacer = NSView()
         typeSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let typeRow = NSStackView(views: [typeLabel, typeSpacer, statsLabel])
-        typeRow.spacing = AppWindows.Layout.controlSpacing
+        let row = NSStackView(views: [typeLabel, typeSpacer, statsLabel])
+        row.spacing = AppWindows.Layout.controlSpacing
+        return row
+    }
 
-        let buttonSpacer = NSView()
-        buttonSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let buttons = NSStackView(views: [queueButton, buttonSpacer, cancelButton, okButton])
+    private func buildButtonRow() -> NSStackView {
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let buttons = NSStackView(views: [queueButton, spacer, cancelButton, okButton])
         buttons.spacing = AppWindows.Layout.controlSpacing
+        return buttons
+    }
 
+    private func buildStack(views: [NSView]) -> NSStackView {
         let m = AppWindows.Layout.margin
-        let stack = NSStackView(views: [message, targetField, typeRow, maskField, verifyBox, buttons])
+        let stack = NSStackView(views: views)
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = AppWindows.Layout.controlSpacing
@@ -96,6 +116,11 @@ final class TransferDialogController: NSWindowController, NSComboBoxDelegate {
         stack.setCustomSpacing(AppWindows.Layout.margin, after: verifyBox)
         stack.edgeInsets = NSEdgeInsets(top: m, left: m, bottom: m, right: m)
         stack.translatesAutoresizingMaskIntoConstraints = false
+        return stack
+    }
+
+    private func buildRoot(stack: NSStackView, width: CGFloat, fullWidthViews: [NSView]) -> NSView {
+        let m = AppWindows.Layout.margin
         let root = NSView()
         root.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -103,12 +128,8 @@ final class TransferDialogController: NSWindowController, NSComboBoxDelegate {
             stack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             stack.topAnchor.constraint(equalTo: root.topAnchor),
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            root.widthAnchor.constraint(equalToConstant: 480),
-            targetField.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
-            typeRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
-            maskField.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
-            buttons.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2),
-        ])
+            root.widthAnchor.constraint(equalToConstant: width),
+        ] + fullWidthViews.map { $0.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -m * 2) })
         return root
     }
 
@@ -348,11 +369,15 @@ final class ConflictDialogController: NSWindowController {
         AppWindows.place(window)
         defer { window.orderOut(nil) }
         while true {
-            let code = Modal.runWindow(window).rawValue - 1000
-            guard Self.buttons.indices.contains(code) else { return .cancel }
-            if let decision = Self.buttons[code].1 { return decision }
-            if let name = askName(Self.suggestedName(for: conflict.target.name)) { return .rename(name) }
+            if let decision = nextDecision(in: window, askName: askName) { return decision }
         }
+    }
+
+    private func nextDecision(in window: NSWindow, askName: (String) -> String?) -> ConflictDecision? {
+        let code = Modal.runWindow(window).rawValue - 1000
+        guard Self.buttons.indices.contains(code) else { return .cancel }
+        if let decision = Self.buttons[code].1 { return decision }
+        return askName(Self.suggestedName(for: conflict.target.name)).map { .rename($0) }
     }
 
     /// "photo.jpg" → "photo (2).jpg".

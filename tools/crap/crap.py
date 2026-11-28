@@ -1,79 +1,356 @@
 #!/usr/bin/env python3
 """
-CRAP (Change Risk Anti-Patterns) Score Analyzer for ClassicCommander
-Calculates cyclomatic complexity, code coverage, and CRAP risk scores for all methods.
+CRAP (Change Risk Anti-Patterns) score analyzer for ClassicCommander.
 
-Formula:
   CRAP(m) = comp(m)^2 * (1 - cov(m))^3 + comp(m)
 
-Where:
-  comp(m) = cyclomatic complexity of method m
-  cov(m)  = code coverage of method m (0.0 to 1.0)
+comp(m): cyclomatic complexity of m, counted from Swift tokens (see `complexity_of_tokens`).
+cov(m):  region coverage of m from `llvm-cov export` (0.0 to 1.0).
 
-Standard CRAP threshold is 30.0, but ClassicCommander targets a strict threshold of <= 6.0.
-Methods with CRAP > 6.0 are errors, and 4.0 to 6.0 are warnings.
+Every function, method, accessor and explicit closure is scored on its own. The source range of each
+comes from the llvm-cov record itself (line and column), and the ranges of the closures and local
+functions nested inside it are cut out, so complexity and coverage always describe the same code.
+
+Pass: CRAP <= THRESHOLD. The common industry limit is 30; this project uses THRESHOLD.
+Gate: compared against a baseline, the run fails (exit 1) when a function is over the threshold and
+is new, or scores worse than it did in the baseline.
 Reference: https://testing.googleblog.com/2011/02/this-code-is-crap.html
 """
 
 import argparse
+import bisect
 import datetime
 import html
 import json
 import os
-import re
 import subprocess
 import sys
 
+THRESHOLD = 6.0
 
-def strip_comments_and_strings(source_text: str) -> str:
-    """Removes comments and string literals to prevent false positives in complexity counting."""
-    # Remove multi-line comments /* ... */
-    text = re.sub(r"/\*.*?\*/", " ", source_text, flags=re.DOTALL)
-    # Remove single-line comments // ...
-    text = re.sub(r"//.*", " ", text)
-    # Remove multi-line strings """ ... """
-    text = re.sub(r'""".*?"""', " ", text, flags=re.DOTALL)
-    # Remove single-line strings " ... "
-    text = re.sub(r'"(?:\\.|[^"\\])*"', " ", text)
-    return text
+# llvm-cov region array: [line_start, col_start, line_end, col_end, count, file_id, expanded_file_id, kind]
+REGION_CODE = 0
+REGION_SKIPPED = 2
+
+# ---------------------------------------------------------------------------------------------------
+# Swift lexer
+# ---------------------------------------------------------------------------------------------------
+
+KEYWORDS = {
+    "if", "guard", "for", "while", "repeat", "catch", "case", "default", "switch", "where", "do",
+    "else", "in", "let", "var", "func", "return", "try", "throw",
+}
+OPERATOR_CHARS = set("/=-+!*%<>&|^~?.")
+DIRECTIVES = {"#if", "#elseif", "#else", "#endif", "#sourceLocation", "#warning", "#error"}
+
+
+class Token:
+    __slots__ = ("line", "col", "kind", "text", "space_before")
+
+    def __init__(self, line, col, kind, text, space_before):
+        self.line = line  # 1-based
+        self.col = col  # 1-based character column
+        self.kind = kind  # "kw", "id", "op", "punct", "lit"
+        self.text = text
+        self.space_before = space_before
+
+    @property
+    def pos(self):
+        return (self.line, self.col)
+
+    def __repr__(self):
+        return f"Token({self.line}:{self.col} {self.kind} {self.text!r})"
+
+
+def _is_ident_start(c):
+    return c == "_" or c == "$" or c.isalpha()
+
+
+def _is_ident_char(c):
+    return c == "_" or c == "$" or c.isalnum()
+
+
+class _Lexer:
+    """Single-pass Swift lexer. Comments and literal text never produce tokens; code inside string
+    interpolations does. Lines of `#if`-style directives are dropped entirely."""
+
+    def __init__(self, text):
+        self.s = text
+        self.n = len(text)
+        self.i = 0
+        self.line = 1
+        self.col = 1
+        self.tokens = []
+        self.space = True
+
+    # -- cursor -------------------------------------------------------------------------------------
+    def peek(self, k=0):
+        j = self.i + k
+        return self.s[j] if j < self.n else ""
+
+    def startswith(self, lit):
+        return self.s.startswith(lit, self.i)
+
+    def advance(self, k=1):
+        for _ in range(k):
+            if self.i >= self.n:
+                return
+            if self.s[self.i] == "\n":
+                self.line += 1
+                self.col = 1
+            else:
+                self.col += 1
+            self.i += 1
+
+    def emit(self, kind, text, line, col):
+        self.tokens.append(Token(line, col, kind, text, self.space))
+        self.space = False
+
+    # -- code ---------------------------------------------------------------------------------------
+    def lex_code(self, interpolation=False):
+        """Lexes code. In an interpolation, returns after the `)` that closes it."""
+        depth = 0
+        while self.i < self.n:
+            c = self.peek()
+            if c in " \t\r\n":
+                self.space = True
+                self.advance()
+            elif self.startswith("//"):
+                self.skip_line_comment()
+            elif self.startswith("/*"):
+                self.skip_block_comment()
+            elif c == "#" and self._string_start(self.i) is not None:
+                self.lex_string()
+            elif c == '"':
+                self.lex_string()
+            elif c == "#":
+                self.lex_pound()
+            elif c == "`":
+                self.lex_backtick()
+            elif _is_ident_start(c):
+                self.lex_ident()
+            elif c.isdigit():
+                self.lex_number()
+            elif c in OPERATOR_CHARS:
+                self.lex_operator()
+            else:
+                if interpolation and c == "(":
+                    depth += 1
+                elif interpolation and c == ")":
+                    if depth == 0:
+                        self.advance()
+                        return
+                    depth -= 1
+                self.emit("punct", c, self.line, self.col)
+                self.advance()
+
+    def skip_line_comment(self):
+        while self.i < self.n and self.peek() != "\n":
+            self.advance()
+        self.space = True
+
+    def skip_block_comment(self):
+        nest = 0
+        while self.i < self.n:
+            if self.startswith("/*"):
+                nest += 1
+                self.advance(2)
+            elif self.startswith("*/"):
+                nest -= 1
+                self.advance(2)
+                if nest == 0:
+                    break
+            else:
+                self.advance()
+        self.space = True
+
+    def lex_ident(self):
+        line, col, start = self.line, self.col, self.i
+        while self.i < self.n and _is_ident_char(self.peek()):
+            self.advance()
+        word = self.s[start:self.i]
+        self.emit("kw" if word in KEYWORDS else "id", word, line, col)
+
+    def lex_backtick(self):
+        line, col, start = self.line, self.col, self.i
+        self.advance()
+        while self.i < self.n and self.peek() not in "`\n":
+            self.advance()
+        self.advance()
+        self.emit("id", self.s[start:self.i], line, col)
+
+    def lex_number(self):
+        line, col, start = self.line, self.col, self.i
+        hexadecimal = self.s.startswith(("0x", "0X"), start)
+        exponent = "pP" if hexadecimal else "eE"
+        while self.i < self.n:
+            c = self.peek()
+            if _is_ident_char(c):
+                self.advance()
+            elif c == "." and self.peek(1).isdigit():
+                self.advance()
+            elif c in "+-" and self.s[self.i - 1] in exponent:
+                self.advance()
+            else:
+                break
+        self.emit("lit", self.s[start:self.i], line, col)
+
+    def lex_operator(self):
+        line, col, start = self.line, self.col, self.i
+        dot_operator = self.peek() == "."
+        while self.i < self.n:
+            c = self.peek()
+            if c not in OPERATOR_CHARS or self.startswith("//") or self.startswith("/*"):
+                break
+            if c == "." and not dot_operator:
+                break
+            self.advance()
+        self.emit("op", self.s[start:self.i], line, col)
+
+    def lex_pound(self):
+        line, col, start = self.line, self.col, self.i
+        self.advance()
+        while self.i < self.n and _is_ident_char(self.peek()):
+            self.advance()
+        word = self.s[start:self.i]
+        if word in DIRECTIVES:
+            # A compile-time condition is not a runtime branch: drop the rest of the line.
+            while self.i < self.n and self.peek() != "\n":
+                if self.startswith("//"):
+                    break
+                if self.startswith("/*"):
+                    self.skip_block_comment()
+                    continue
+                self.advance()
+            self.space = True
+        else:
+            self.emit("id", word, line, col)
+
+    # -- strings ------------------------------------------------------------------------------------
+    def _string_start(self, j):
+        """Returns (hashes, quote) when a string literal starts at j, else None."""
+        h = 0
+        while j + h < self.n and self.s[j + h] == "#":
+            h += 1
+        if j + h < self.n and self.s[j + h] == '"':
+            quote = '"""' if self.s.startswith('"""', j + h) else '"'
+            return h, quote
+        return None
+
+    def lex_string(self):
+        line, col = self.line, self.col
+        hashes, quote = self._string_start(self.i)
+        self.advance(hashes + len(quote))
+        closer = quote + "#" * hashes
+        escape = "\\" + "#" * hashes
+        self.emit("lit", "<string>", line, col)
+        while self.i < self.n:
+            if self.startswith(closer):
+                self.advance(len(closer))
+                break
+            if self.startswith(escape):
+                self.advance(len(escape))
+                if self.peek() == "(":
+                    self.advance()
+                    self.space = True
+                    self.lex_code(interpolation=True)
+                else:
+                    self.advance()  # escaped character
+                continue
+            if quote == '"' and self.peek() == "\n":
+                break  # unterminated single-line string
+            self.advance()
+        self.space = False
+
+
+def lex_swift(text):
+    lexer = _Lexer(text)
+    lexer.lex_code()
+    return lexer.tokens
+
+
+# ---------------------------------------------------------------------------------------------------
+# Complexity
+# ---------------------------------------------------------------------------------------------------
+
+CONDITION_KEYWORDS = {"if", "guard", "while"}
+
+
+def complexity_of_tokens(tokens):
+    """
+    Cyclomatic complexity: 1 + one per decision point.
+      if, guard, while (repeat-while counts once, on its `while`), for-in, catch    +1 each
+      switch `case` label (one per label, however many patterns it lists)          +1 each
+      each extra condition in an if/guard/while condition list (`if a, let b`)     +1 each
+      &&, ||, ??                                                                    +1 each
+      ternary `?:`                                                                  +1 each
+    Not counted: `default`, `else`, `where`, `#if` directives, `case` inside a condition
+    (`if case`, `for case`), keywords used as member names (`.default`, `x.for`).
+    """
+    total = 1
+    n = len(tokens)
+    i = 0
+    while i < n:
+        t = tokens[i]
+        prev = tokens[i - 1] if i > 0 else None
+        member = prev is not None and prev.text == "." or (prev is not None and prev.kind == "op" and prev.text.endswith("."))
+        if t.kind == "kw" and not member:
+            if t.text in CONDITION_KEYWORDS:
+                total += 1
+                total += _extra_conditions(tokens, i + 1)
+            elif t.text in ("for", "catch"):
+                total += 1
+            elif t.text == "case":
+                if prev is None or prev.text not in ("if", "guard", "while", "for", ","):
+                    total += 1
+        elif t.kind == "op":
+            if t.text in ("&&", "||", "??"):
+                total += 1
+            elif t.text == "?" and t.space_before:
+                total += 1
+        i += 1
+    return total
+
+
+def _extra_conditions(tokens, i):
+    """Counts the top-level commas of the condition list that starts at i (up to its `{`)."""
+    depth = 0
+    extra = 0
+    n = len(tokens)
+    while i < n:
+        t = tokens[i]
+        if t.kind == "punct":
+            if t.text in "([":
+                depth += 1
+            elif t.text in ")]":
+                depth -= 1
+            elif t.text == "{" and depth == 0:
+                break
+            elif t.text == "," and depth == 0:
+                extra += 1
+        elif t.kind == "kw" and t.text == "else" and depth == 0:
+            break  # guard ... else
+        i += 1
+    return extra
 
 
 def calculate_cyclomatic_complexity(source_code: str) -> int:
-    """
-    Calculates cyclomatic complexity for a Swift function body.
-    Base complexity is 1.
-    Each decision point adds 1:
-      - if, guard, for, while, repeat, catch, case
-      - logical operators: &&, ||
-      - nil-coalescing: ??
-      - ternary conditional: ? :
-    """
-    clean = strip_comments_and_strings(source_code)
-    # Control flow keywords
-    kw_count = len(re.findall(r"\b(if|guard|for|while|repeat|catch)\b", clean))
-    # Switch cases (excluding default)
-    case_count = len(re.findall(r"\bcase\b", clean))
-    # Logical & nil-coalescing operators
-    ops_count = len(re.findall(r"(&&|\|\||\?\?)", clean))
-    # Ternary operator: ? with spaces around it
-    ternary_count = len(re.findall(r"(?<=\s)\?(?=\s)", clean))
-
-    return 1 + kw_count + case_count + ops_count + ternary_count
+    """Complexity of a snippet of Swift source."""
+    return complexity_of_tokens(lex_swift(source_code))
 
 
 def calculate_crap(complexity: int, coverage_fraction: float) -> float:
-    """
-    Computes CRAP score:
-      CRAP = comp^2 * (1 - cov)^3 + comp
-    """
     cov = max(0.0, min(1.0, coverage_fraction))
     comp = float(complexity)
-    crap = (comp**2) * ((1.0 - cov) ** 3) + comp
-    return round(crap, 2)
+    return round((comp ** 2) * ((1.0 - cov) ** 3) + comp, 2)
 
+
+# ---------------------------------------------------------------------------------------------------
+# Coverage records
+# ---------------------------------------------------------------------------------------------------
 
 def demangle_symbols(symbols: list) -> list:
-    """Batch-demangles Swift symbols using xcrun swift-demangle."""
+    """Batch-demangles Swift symbols with `xcrun swift-demangle`."""
     if not symbols:
         return []
     try:
@@ -85,11 +362,10 @@ def demangle_symbols(symbols: list) -> list:
             check=True,
         )
         results = proc.stdout.splitlines()
-        # If output line count matches, return; otherwise fallback
         if len(results) == len(symbols):
             cleaned = []
             for item in results:
-                # Strip file path prefixes like "Sources/App/Foo.swift:"
+                # Private symbols carry a "Sources/App/Foo.swift:" prefix.
                 if ":" in item and "Sources/App/" in item:
                     item = item.split(":", 1)[1].strip()
                 cleaned.append(item)
@@ -99,12 +375,67 @@ def demangle_symbols(symbols: list) -> list:
     return symbols
 
 
+class _SourceFile:
+    def __init__(self, path):
+        try:
+            with open(path, "rb") as f:
+                raw = f.read()
+        except OSError:
+            raw = b""
+        self.byte_lines = raw.split(b"\n")
+        self.tokens = lex_swift(raw.decode("utf-8", errors="replace"))
+        self.positions = [t.pos for t in self.tokens]
+
+    def char_pos(self, line, byte_col):
+        """llvm-cov columns count bytes; tokens count characters."""
+        if 1 <= line <= len(self.byte_lines):
+            prefix = self.byte_lines[line - 1][: max(0, byte_col - 1)]
+            return (line, len(prefix.decode("utf-8", errors="replace")) + 1)
+        return (line, byte_col)
+
+    def tokens_in(self, start, end, holes):
+        """Tokens starting in [start, end) and in none of the hole ranges."""
+        lo = bisect.bisect_left(self.positions, start)
+        hi = bisect.bisect_left(self.positions, end)
+        out = []
+        for t in self.tokens[lo:hi]:
+            p = t.pos
+            if not any(hs <= p < he for hs, he in holes):
+                out.append(t)
+        return out
+
+
+def _merge_duplicates(functions):
+    """One record per source location; execution counts of identical region layouts are summed."""
+    merged = {}
+    order = []
+    for fn in functions:
+        regions = fn.get("regions") or []
+        if not regions:
+            continue
+        key = (fn["filenames"][0], regions[0][0], regions[0][1])
+        if key not in merged:
+            merged[key] = {**fn, "regions": [list(r) for r in regions]}
+            order.append(key)
+            continue
+        kept = merged[key]
+        same_layout = len(kept["regions"]) == len(regions) and all(
+            a[:4] == b[:4] for a, b in zip(kept["regions"], regions)
+        )
+        if same_layout:
+            for a, b in zip(kept["regions"], regions):
+                a[4] += b[4]
+            kept["count"] = kept.get("count", 0) + fn.get("count", 0)
+        elif sum(r[4] > 0 for r in regions) > sum(r[4] > 0 for r in kept["regions"]):
+            merged[key] = {**fn, "regions": [list(r) for r in regions]}
+    return [merged[k] for k in order]
+
+
 def extract_function_data(
     export_json_path: str,
     project_dir: str,
     include_implicit: bool = False,
-    threshold: float = 6.0,
-    warning_threshold: float = 4.0,
+    threshold: float = THRESHOLD,
 ) -> dict:
     """Parses llvm-cov export.json and computes CRAP scores for all functions in Sources/App/."""
     if not os.path.exists(export_json_path):
@@ -115,145 +446,139 @@ def extract_function_data(
 
     root = os.path.abspath(project_dir) + "/"
     all_functions = cov_data.get("data", [{}])[0].get("functions", [])
+    app_funcs = _merge_duplicates(
+        fn for fn in all_functions if fn.get("filenames") and "Sources/App/" in fn["filenames"][0]
+    )
+    names = demangle_symbols([fn["name"] for fn in app_funcs])
 
-    # Filter for functions belonging to Sources/App/
-    app_funcs = []
-    for fn in all_functions:
-        filenames = fn.get("filenames", [])
-        if filenames and "Sources/App/" in filenames[0]:
-            app_funcs.append(fn)
+    sources = {}
+    entries = []  # (fn, name, file, start, end, skipped ranges) in character positions
+    for fn, name in zip(app_funcs, names):
+        path = fn["filenames"][0]
+        if path not in sources:
+            sources[path] = _SourceFile(path)
+        src = sources[path]
+        regions = fn["regions"]
+        start = src.char_pos(regions[0][0], regions[0][1])
+        end = max(src.char_pos(r[2], r[3]) for r in regions)
+        skipped = [
+            (src.char_pos(r[0], r[1]), src.char_pos(r[2], r[3]))
+            for r in regions
+            if len(r) > 7 and r[7] == REGION_SKIPPED
+        ]
+        entries.append((fn, name, path, start, end, skipped))
 
-    raw_symbols = [fn["name"] for fn in app_funcs]
-    demangled = demangle_symbols(raw_symbols)
+    # Explicit closures and local functions are scored on their own: cut them out of their parents.
+    # Implicit closures (the right side of &&, ||, ??, autoclosure arguments) stay in their parent.
+    by_file = {}
+    for e in entries:
+        if "implicit closure" not in e[1]:
+            by_file.setdefault(e[2], []).append((e[3], e[4]))
 
-    file_cache = {}
     records = []
     skipped_implicit = 0
-
-    for fn, dname in zip(app_funcs, demangled):
-        if not include_implicit and "implicit closure" in dname:
+    for fn, name, path, start, end, skipped in entries:
+        implicit = "implicit closure" in name
+        if implicit and not include_implicit:
             skipped_implicit += 1
             continue
-
-        filepath = fn["filenames"][0]
-        rel_path = filepath.replace(root, "")
-        regions = [
-            r for r in fn.get("regions", []) if len(r) <= 7 or r[7] == 0
+        holes = [
+            (s, e) for s, e in by_file.get(path, [])
+            if start <= s and e <= end and (s, e) != (start, end)
         ]
-        if not regions:
-            continue
+        tokens = sources[path].tokens_in(start, end, holes + skipped)
+        complexity = complexity_of_tokens(tokens)
 
-        start_line = regions[0][0]
-        end_line = max(r[2] for r in regions)
-
-        if filepath not in file_cache:
-            try:
-                with open(filepath, "r", encoding="utf-8", errors="replace") as sf:
-                    file_cache[filepath] = sf.readlines()
-            except IOError:
-                file_cache[filepath] = []
-
-        lines = file_cache[filepath]
-        body = "".join(lines[max(0, start_line - 1) : min(len(lines), end_line)])
-        complexity = calculate_cyclomatic_complexity(body)
-
-        # Region coverage
-        cov_regions = sum(1 for r in regions if r[4] > 0)
-        tot_regions = len(regions)
-        reg_cov_fraction = (
-            (cov_regions / tot_regions)
-            if tot_regions > 0
-            else (1.0 if fn.get("count", 0) > 0 else 0.0)
-        )
-
-        # Line coverage
-        line_hits = {}
-        for r in regions:
-            for ln in range(r[0], r[2] + 1):
-                line_hits[ln] = line_hits.get(ln, 0) + r[4]
-        tot_lines = len(line_hits)
-        cov_lines = sum(1 for cnt in line_hits.values() if cnt > 0)
-        line_cov_fraction = (cov_lines / tot_lines) if tot_lines > 0 else 1.0
-
-        # We use region coverage as the primary metric for CRAP as it covers expression branches
-        cov_fraction = reg_cov_fraction
+        code = [r for r in fn["regions"] if len(r) <= 7 or r[7] == REGION_CODE]
+        covered = sum(1 for r in code if r[4] > 0)
+        cov_fraction = covered / len(code) if code else (1.0 if fn.get("count", 0) > 0 else 0.0)
         crap_score = calculate_crap(complexity, cov_fraction)
-        is_crap = crap_score > threshold
-
+        rel_path = path.replace(root, "")
         records.append(
             {
-                "id": f"{rel_path}:{start_line}:{dname}",
+                "id": f"{rel_path}:{start[0]}:{name}",
                 "file": rel_path,
-                "line": start_line,
-                "end_line": end_line,
-                "name": dname,
+                "line": start[0],
+                "end_line": end[0],
+                "name": name,
                 "raw_symbol": fn["name"],
                 "call_count": fn.get("count", 0),
                 "complexity": complexity,
                 "coverage": round(cov_fraction * 100, 1),
-                "line_coverage": round(line_cov_fraction * 100, 1),
-                "covered_regions": cov_regions,
-                "total_regions": tot_regions,
+                "covered_regions": covered,
+                "total_regions": len(code),
                 "crap": crap_score,
-                "is_crap": is_crap,
+                "is_crap": crap_score > threshold,
             }
         )
 
-    # Sort descending by CRAP score
-    records.sort(key=lambda r: (r["crap"], r["complexity"]), reverse=True)
+    records.sort(key=lambda r: (-r["crap"], -r["complexity"], r["file"], r["line"]))
+    _assign_keys(records)
 
     total_funcs = len(records)
     crap_funcs = sum(1 for r in records if r["is_crap"])
-    warning_funcs = sum(
-        1 for r in records if warning_threshold <= r["crap"] <= threshold
-    )
-    healthy_funcs = sum(1 for r in records if r["crap"] < warning_threshold)
-    zero_cov_funcs = sum(1 for r in records if r["coverage"] == 0.0)
 
-    avg_crap = (
-        round(sum(r["crap"] for r in records) / total_funcs, 2)
-        if total_funcs
-        else 0.0
-    )
-    max_crap = max((r["crap"] for r in records), default=0.0)
-    avg_comp = (
-        round(sum(r["complexity"] for r in records) / total_funcs, 2)
-        if total_funcs
-        else 0.0
-    )
-    avg_cov = (
-        round(sum(r["coverage"] for r in records) / total_funcs, 1)
-        if total_funcs
-        else 0.0
-    )
+    def avg(field, digits):
+        return round(sum(r[field] for r in records) / total_funcs, digits) if total_funcs else 0.0
 
     summary = {
         "total_functions": total_funcs,
         "crap_functions": crap_funcs,
-        "crap_percentage": (
-            round((crap_funcs / total_funcs) * 100, 2) if total_funcs else 0.0
-        ),
-        "warning_functions": warning_funcs,
-        "healthy_functions": healthy_funcs,
-        "zero_coverage_functions": zero_cov_funcs,
-        "average_crap": avg_crap,
-        "max_crap": max_crap,
-        "average_complexity": avg_comp,
-        "average_coverage": avg_cov,
+        "crap_percentage": round(crap_funcs / total_funcs * 100, 2) if total_funcs else 0.0,
+        "pass_functions": total_funcs - crap_funcs,
+        "zero_coverage_functions": sum(1 for r in records if r["covered_regions"] == 0),
+        "average_crap": avg("crap", 2),
+        "max_crap": max((r["crap"] for r in records), default=0.0),
+        "average_complexity": avg("complexity", 2),
+        "average_coverage": avg("coverage", 1),
         "skipped_implicit_closures": skipped_implicit,
     }
 
     return {
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "threshold": threshold,
-        "warning_threshold": warning_threshold,
         "summary": summary,
         "functions": records,
     }
 
 
+def _assign_keys(records):
+    """A key that survives line shifts: file + name, with an ordinal for same-named functions
+    (e.g. two `closure #1 in` of overloads) in source order."""
+    seen = {}
+    for r in sorted(records, key=lambda r: (r["file"], r["line"])):
+        base = f"{r['file']}::{r['name']}"
+        n = seen.get(base, 0)
+        seen[base] = n + 1
+        r["key"] = base if n == 0 else f"{base}#{n}"
+
+
+def compare_with_baseline(data: dict, baseline: dict) -> dict:
+    """Failing functions that are new, or that score worse than in the baseline."""
+    before = {}
+    for r in baseline.get("functions", []):
+        if "key" in r:
+            before[r["key"]] = r
+    new, worse = [], []
+    for r in data["functions"]:
+        if not r["is_crap"]:
+            continue
+        old = before.get(r["key"])
+        if old is None:
+            new.append(r)
+        elif r["crap"] > old["crap"] + 0.005:
+            worse.append({**r, "baseline_crap": old["crap"]})
+    fixed = sum(
+        1 for r in data["functions"]
+        if not r["is_crap"] and before.get(r["key"], {}).get("is_crap")
+    )
+    return {"new": new, "worse": worse, "fixed": fixed, "usable": bool(before)}
+
+
+
+
 def _risk_hotspots(functions: list, limit: int = 8) -> list:
-    """Groups over-limit and warning functions by file, worst files first."""
+    """Groups over-limit functions by file, worst files first."""
     by_file = {}
     for fn in functions:
         entry = by_file.setdefault(
@@ -282,7 +607,7 @@ def _format_generated_at(stamp: str) -> str:
 def _hotspots_html(hotspots: list) -> str:
     """Renders the hotspot list items; each one filters the table to its file."""
     if not hotspots:
-        return '<li class="hs-empty">No function is over the limit.</li>'
+        return '<li class="hs-empty">No function is fail (CRAP > %%T%%).</li>'
     top = hotspots[0]["crap"]
     items = []
     for spot in hotspots:
@@ -305,7 +630,6 @@ def generate_html_report(data: dict) -> str:
     """Generates a self-contained, offline HTML report with live filtering, sorting, and stats."""
     summary = data["summary"]
     threshold = data["threshold"]
-    warning_threshold = data.get("warning_threshold", 4.0)
     functions = data["functions"]
     total = summary["total_functions"] or 1
 
@@ -323,22 +647,18 @@ def generate_html_report(data: dict) -> str:
         "%%TOTAL%%": f"{summary['total_functions']:,}",
         "%%CRAP_N%%": f"{summary['crap_functions']:,}",
         "%%CRAP_PCT%%": f"{summary['crap_percentage']:.1f}",
-        "%%WARN_N%%": f"{summary['warning_functions']:,}",
-        "%%OK_N%%": f"{summary['healthy_functions']:,}",
+        "%%OK_N%%": f"{summary['pass_functions']:,}",
         "%%ZERO_N%%": f"{summary['zero_coverage_functions']:,}",
         "%%CRAP_W%%": share(summary["crap_functions"]),
-        "%%WARN_W%%": share(summary["warning_functions"]),
-        "%%OK_W%%": share(summary["healthy_functions"]),
+        "%%OK_W%%": share(summary["pass_functions"]),
         "%%MAX%%": f"{summary['max_crap']:.1f}",
         "%%AVG_CX%%": f"{summary['average_complexity']:.1f}",
         "%%AVG_COV%%": f"{summary['average_coverage']:.1f}",
         "%%SKIPPED%%": f"{summary.get('skipped_implicit_closures', 0):,}",
         "%%T%%": f"{threshold:g}",
-        "%%W%%": f"{warning_threshold:g}",
         "%%DIR_OPTIONS%%": dir_options,
         "%%HOTSPOTS%%": _hotspots_html(_risk_hotspots(functions)),
         "%%T_JS%%": json.dumps(threshold),
-        "%%W_JS%%": json.dumps(warning_threshold),
         # Escape "</" so no identifier can ever close the <script> element.
         "%%DATA%%": json.dumps(functions, separators=(",", ":")).replace("</", "<\\/"),
     }
@@ -367,9 +687,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     --track: #ebe9e3;
     --crap: #b3261e;
     --crap-tint: #fbe8e5;
-    --warn: #9a5b00;
-    --warn-tint: #fcf0d9;
-    --ok: #2e6b4c;
+        --ok: #2e6b4c;
     --ok-tint: #e3f0e8;
     --ok-bar: #8fb9a1;
     --focus: #2357d9;
@@ -388,8 +706,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       --track: #2a2c30;
       --crap: #ff8a7a;
       --crap-tint: #3a1d1a;
-      --warn: #f0b75a;
-      --warn-tint: #36290f;
       --ok: #79c99e;
       --ok-tint: #17301f;
       --ok-bar: #3f7a5b;
@@ -437,7 +753,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .dist { display: flex; height: 10px; margin: 26px 0 10px; border-radius: 2px; overflow: hidden; gap: 2px; }
   .dist i { display: block; min-width: 2px; }
   .dist .d-ok { background: var(--ok-bar); }
-  .dist .d-warn { background: var(--warn); opacity: .75; }
   .dist .d-crap { background: var(--crap); }
   .legend { display: flex; gap: 6px 22px; flex-wrap: wrap; margin: 0; padding: 0; list-style: none; font-size: 13px; color: var(--ink-2); }
   .legend li { display: flex; align-items: center; gap: 7px; }
@@ -534,13 +849,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .score { display: flex; align-items: center; gap: 10px; }
   .score b { width: 34px; text-align: right; font-weight: 600; font-size: 14px; }
   .lvl-crap b { color: var(--crap); }
-  .lvl-warn b { color: var(--warn); }
   .lvl-ok b { color: var(--ink-2); font-weight: 500; }
   .meter { position: relative; width: 72px; height: 4px; background: var(--track); border-radius: 2px; }
   .meter span { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; }
   .meter i { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--surface); box-shadow: inset 0 0 0 1px var(--rule-2); z-index: 1; }
   .lvl-crap .meter span { background: var(--crap); }
-  .lvl-warn .meter span { background: var(--warn); }
   .lvl-ok .meter span { background: var(--ok-bar); }
 
   .cov-low { color: var(--crap); }
@@ -602,20 +915,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
   <section class="overview" aria-label="Summary">
     <div>
-      <p class="eyebrow">Functions over the CRAP limit of %%T%%</p>
+      <p class="eyebrow">Pass / fail against CRAP threshold %%T%%</p>
       <div class="verdict-n">
         <strong>%%CRAP_N%%</strong>
         <span>of <b>%%TOTAL%%</b> functions · %%CRAP_PCT%%%</span>
       </div>
       <div class="dist" aria-hidden="true">
         <i class="d-ok" style="flex-basis:%%OK_W%%%"></i>
-        <i class="d-warn" style="flex-basis:%%WARN_W%%%"></i>
         <i class="d-crap" style="flex-basis:%%CRAP_W%%%"></i>
       </div>
       <ul class="legend">
-        <li><span class="sw" style="background:var(--ok-bar)"></span><b>%%OK_N%%</b> healthy, below %%W%%</li>
-        <li><span class="sw" style="background:var(--warn)"></span><b>%%WARN_N%%</b> warning, %%W%%–%%T%%</li>
-        <li><span class="sw" style="background:var(--crap)"></span><b>%%CRAP_N%%</b> over limit</li>
+        <li><span class="sw" style="background:var(--ok-bar)"></span><b>%%OK_N%%</b> pass (CRAP ≤ %%T%%)</li>
+        <li><span class="sw" style="background:var(--crap)"></span><b>%%CRAP_N%%</b> fail (CRAP > %%T%%)</li>
       </ul>
       <dl class="facts">
         <div><dt>Worst score</dt><dd>%%MAX%%</dd></div>
@@ -648,9 +959,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       </label>
       <div class="seg" role="group" aria-label="Risk level">
         <button type="button" data-risk="all" aria-pressed="true">All <span class="c">%%TOTAL%%</span></button>
-        <button type="button" data-risk="crap" aria-pressed="false">Over limit <span class="c">%%CRAP_N%%</span></button>
-        <button type="button" data-risk="warning" aria-pressed="false">Warning <span class="c">%%WARN_N%%</span></button>
-        <button type="button" data-risk="healthy" aria-pressed="false">Healthy <span class="c">%%OK_N%%</span></button>
+        <button type="button" data-risk="crap" aria-pressed="false">Fail <span class="c">%%CRAP_N%%</span></button>
+        <button type="button" data-risk="pass" aria-pressed="false">Pass <span class="c">%%OK_N%%</span></button>
         <button type="button" data-risk="uncovered" aria-pressed="false">Untested <span class="c">%%ZERO_N%%</span></button>
       </div>
       <label class="field">Area
@@ -701,12 +1011,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <p><code>CRAP = cx² × (1 − cov)³ + cx</code>. Complexity that tests never reach grows the score fast; a fully covered function scores exactly its complexity.</p>
     </div>
     <div>
-      <h3>Thresholds</h3>
-      <p>Healthy below %%W%%, warning %%W%%–%%T%%, over the limit above %%T%%. The common industry limit is 30; this project uses %%T%%.</p>
+      <h3>Threshold</h3>
+      <p>Pass when CRAP ≤ %%T%%; fail when CRAP > %%T%%. The common industry limit is 30; this project uses %%T%%.</p>
     </div>
     <div>
       <h3>Inputs</h3>
-      <p>Region coverage from <code>llvm-cov export</code>, cyclomatic complexity counted from source. %%SKIPPED%% compiler-generated implicit closures are left out.</p>
+      <p>Region coverage from <code>llvm-cov export</code>; cyclomatic complexity from lexed Swift tokens over each function's exact source range, nested closures scored separately. %%SKIPPED%% implicit closures are counted in their parents.</p>
     </div>
   </section>
 </div>
@@ -714,7 +1024,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <script>
 const DATA = %%DATA%%;
 const LIMIT = %%T_JS%%;
-const WARN = %%W_JS%%;
 const SCALE = Math.max(LIMIT * 2, ...DATA.map(f => f.crap));
 
 const $ = id => document.getElementById(id);
@@ -723,8 +1032,7 @@ const state = { q: '', risk: 'all', dir: '', file: '', min: 0, col: 'crap', asc:
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 function level(f) {
-  if (f.is_crap) return 'crap';
-  return f.crap >= WARN ? 'warn' : 'ok';
+  return f.is_crap ? 'crap' : 'ok';
 }
 
 // "closure #1 in static Foo.bar(_:)" -> context, type, member
@@ -742,8 +1050,7 @@ function splitName(name) {
 
 function matches(f) {
   if (state.risk === 'crap' && !f.is_crap) return false;
-  if (state.risk === 'warning' && (f.is_crap || f.crap < WARN)) return false;
-  if (state.risk === 'healthy' && f.crap >= WARN) return false;
+  if (state.risk === 'pass' && f.is_crap) return false;
   if (state.risk === 'uncovered' && f.coverage > 0) return false;
   if (f.crap < state.min) return false;
   if (state.file && f.file !== state.file) return false;
@@ -770,9 +1077,9 @@ function row(f) {
   const n = splitName(f.name);
   const fill = Math.min(100, f.crap / SCALE * 100);
   const covCls = f.coverage === 0 ? 'cov-zero' : f.coverage < 50 ? 'cov-low' : '';
-  const label = lvl === 'crap' ? 'over limit' : lvl === 'warn' ? 'warning' : 'healthy';
+  const label = lvl === 'crap' ? 'fail' : 'pass';
   return `<tr>
-    <td><div class="score lvl-${lvl}" title="${label}"><b>${f.crap.toFixed(1)}</b><span class="meter"><span style="width:${fill}%"></span><i style="left:${WARN / SCALE * 100}%"></i><i style="left:${LIMIT / SCALE * 100}%"></i></span></div></td>
+    <td><div class="score lvl-${lvl}" title="${label}"><b>${f.crap.toFixed(1)}</b><span class="meter"><span style="width:${fill}%"></span><i style="left:${LIMIT / SCALE * 100}%"></i></span></div></td>
     <td class="r col-cx">${f.complexity}</td>
     <td class="r ${covCls}">${f.coverage.toFixed(f.coverage % 1 ? 1 : 0)}<span class="muted">%</span></td>
     <td><div class="fn"><span class="ctx">${esc(n.ctx)}</span><span class="typ">${esc(n.typ)}</span><span class="mem">${esc(n.mem)}</span></div>
@@ -848,24 +1155,20 @@ update();
 """
 
 
-def print_terminal_summary(data: dict, baseline_data: dict = None) -> None:
+def print_terminal_summary(data: dict, comparison: dict = None) -> None:
     """Prints a styled terminal summary of CRAP scores and comparison against baseline."""
     s = data["summary"]
     thresh = data["threshold"]
-    warn_thresh = data.get("warning_threshold", 4.0)
 
     print("\n" + "=" * 70)
     print("                    CRAP SCORE RISK ANALYSIS")
     print("=" * 70)
     print(f"Evaluated Functions : {s['total_functions']:,}")
     print(
-        f"CRAP Errors (> {thresh:g})  : \033[1;31m{s['crap_functions']:,} ({s['crap_percentage']}%)\033[0m"
+        f"Fail (> {thresh:g})  : \033[1;31m{s['crap_functions']:,} ({s['crap_percentage']}%)\033[0m"
     )
     print(
-        f"Warning Functions   : \033[1;33m{s['warning_functions']:,}\033[0m ({warn_thresh:g} ≤ CRAP ≤ {thresh:g})"
-    )
-    print(
-        f"Healthy Functions   : \033[1;32m{s['healthy_functions']:,}\033[0m (CRAP < {warn_thresh:g})"
+        f"Passing Functions   : \033[1;32m{s['pass_functions']:,}\033[0m (CRAP ≤ {thresh:g})"
     )
     print(f"Zero Coverage Count : {s['zero_coverage_functions']:,}")
     print(
@@ -875,20 +1178,8 @@ def print_terminal_summary(data: dict, baseline_data: dict = None) -> None:
     print(f"Average Complexity  : {s['average_complexity']:.1f}")
     print(f"Average Coverage    : {s['average_coverage']:.1f}%")
 
-    if baseline_data:
-        bs = baseline_data.get("summary", {})
-        b_crap = bs.get("crap_functions", 0)
-        diff_crap = s["crap_functions"] - b_crap
-        diff_str = (
-            f"+{diff_crap}"
-            if diff_crap > 0
-            else (f"{diff_crap}" if diff_crap < 0 else "0")
-        )
-        color = "\033[1;31m" if diff_crap > 0 else "\033[1;32m"
-        print(f"Baseline Comparison : {color}{diff_str} CRAP functions vs baseline\033[0m")
-
     print("-" * 70)
-    print(f"TOP HIGH-RISK FUNCTIONS (CRAP > {thresh:g}):")
+    print(f"FAILING FUNCTIONS (CRAP > {thresh:g}):")
     print("  CRAP   COMP    COV%  LOCATION & FUNCTION")
     print("-" * 70)
 
@@ -904,6 +1195,19 @@ def print_terminal_summary(data: dict, baseline_data: dict = None) -> None:
 
     if len(crap_list) > 15:
         print(f"  ... and {len(crap_list) - 15} more high-risk functions.")
+
+    if comparison is not None:
+        print("-" * 70)
+        if not comparison["usable"]:
+            print("\033[1;33mBaseline has no per-function keys; regenerate it with --baseline.\033[0m")
+        else:
+            print(f"BASELINE: {len(comparison['new'])} new failing, "
+                  f"{len(comparison['worse'])} worse, {comparison['fixed']} fixed")
+            for item in comparison["new"]:
+                print(f" \033[1;31mNEW  \033[0m {item['crap']:6.1f}  {item['file']}:{item['line']} ({item['name']})")
+            for item in comparison["worse"]:
+                print(f" \033[1;31mWORSE\033[0m {item['baseline_crap']:6.1f} → {item['crap']:.1f}  "
+                      f"{item['file']}:{item['line']} ({item['name']})")
     print("=" * 70 + "\n")
 
 
@@ -921,8 +1225,8 @@ def main():
     )
     parser.add_argument(
         "--baseline-json",
-        default="tools/crap/baseline.json",
-        help="Baseline JSON file for comparison",
+        default=None,
+        help="Baseline JSON to gate against: exit 1 on new or worse failing functions",
     )
     parser.add_argument(
         "--out-json",
@@ -935,14 +1239,8 @@ def main():
     parser.add_argument(
         "--threshold",
         type=float,
-        default=6.0,
-        help="CRAP error threshold (default: 6.0)",
-    )
-    parser.add_argument(
-        "--warning-threshold",
-        type=float,
-        default=4.0,
-        help="CRAP warning threshold (default: 4.0)",
+        default=THRESHOLD,
+        help=f"CRAP error threshold (default: {THRESHOLD:g})",
     )
     parser.add_argument(
         "--include-implicit",
@@ -969,16 +1267,18 @@ def main():
         project_dir=project_dir,
         include_implicit=args.include_implicit,
         threshold=args.threshold,
-        warning_threshold=args.warning_threshold,
     )
 
-    baseline_data = None
-    if os.path.exists(args.baseline_json) and args.baseline_json != args.out_json:
-        try:
-            with open(args.baseline_json, "r", encoding="utf-8") as bf:
-                baseline_data = json.load(bf)
-        except Exception:
-            pass
+    comparison = None
+    compare = args.baseline_json and os.path.abspath(args.baseline_json) != (
+        os.path.abspath(args.out_json) if args.out_json else None
+    )
+    if compare:
+        if not os.path.exists(args.baseline_json):
+            sys.stderr.write(f"Error: baseline not found at {args.baseline_json}; create it with --baseline.\n")
+            sys.exit(2)
+        with open(args.baseline_json, "r", encoding="utf-8") as bf:
+            comparison = compare_with_baseline(data, json.load(bf))
 
     # Save JSON output if requested
     if args.out_json:
@@ -998,7 +1298,12 @@ def main():
         print(f"Saved CRAP HTML report: {out_html_path}")
 
     if not args.silent:
-        print_terminal_summary(data, baseline_data=baseline_data)
+        print_terminal_summary(data, comparison)
+
+    if comparison is not None and (
+        not comparison["usable"] or comparison["new"] or comparison["worse"]
+    ):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

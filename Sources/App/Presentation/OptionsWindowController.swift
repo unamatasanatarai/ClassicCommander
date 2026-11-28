@@ -261,21 +261,22 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
             noMatchLabel.isHidden = true
             return
         }
-        var found: [Int] = []
-        for (i, page) in pages.enumerated() {
-            let hits = Self.allViews(in: page).filter { Self.searchableText(of: $0).map { Self.matches($0, words) } ?? false }
-            let commandHit = page === shortcutsPage && !shortcutsPage.actions.isEmpty
-            if !hits.isEmpty || commandHit { found.append(i) }
-            for view in hits where page !== shortcutsPage {
-                view.wantsLayer = true
-                view.layer?.cornerRadius = 3
-                view.layer?.backgroundColor = NSColor.systemYellow.withAlphaComponent(0.35).cgColor
-                highlighted.append(view)
-            }
-        }
+        let found = pages.indices.filter { highlightMatches(on: pages[$0], words: words) }
         pageList.show(found)
         noMatchLabel.isHidden = !found.isEmpty
         if let first = found.first, !found.contains(where: { !pages[$0].isHidden }) { showPage(first) }
+    }
+
+    private func highlightMatches(on page: NSView, words: [String]) -> Bool {
+        let hits = Self.allViews(in: page).filter { Self.searchableText(of: $0).map { Self.matches($0, words) } ?? false }
+        let commandHit = page === shortcutsPage && !shortcutsPage.actions.isEmpty
+        for view in hits where page !== shortcutsPage {
+            view.wantsLayer = true
+            view.layer?.cornerRadius = 3
+            view.layer?.backgroundColor = NSColor.systemYellow.withAlphaComponent(0.35).cgColor
+            highlighted.append(view)
+        }
+        return !hits.isEmpty || commandHit
     }
 
     var visiblePageTitle: String? {
@@ -513,33 +514,7 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
         presetRow.spacing = 8
 
         // Two label/well pairs per row.
-        let slots = ThemeSlot.allCases
-        var rows: [[NSView]] = []
-        for i in stride(from: 0, to: slots.count, by: 2) {
-            var row: [NSView] = []
-            for slot in slots[i..<min(i + 2, slots.count)] {
-                let well = NSColorWell()
-                well.target = self
-                well.action = #selector(wellChanged(_:))
-                well.translatesAutoresizingMaskIntoConstraints = false
-                well.widthAnchor.constraint(equalToConstant: 38).isActive = true
-                well.heightAnchor.constraint(equalToConstant: 18).isActive = true
-                wells[slot] = well
-                let lbl = NSTextField(labelWithString: slot.label + ":")
-                lbl.font = .systemFont(ofSize: 12)
-                row.append(lbl)
-                row.append(well)
-            }
-            while row.count < 4 { row.append(NSGridCell.emptyContentView) }
-            rows.append(row)
-        }
-        let grid = NSGridView(views: rows)
-        grid.rowSpacing = 3
-        grid.columnSpacing = 8
-        grid.column(at: 0).xPlacement = .trailing
-        grid.column(at: 2).xPlacement = .trailing
-        grid.column(at: 2).leadingPadding = 16
-        for r in 0..<grid.numberOfRows { grid.row(at: r).yPlacement = .center }
+        let grid = buildColorWellGrid()
 
         let previewLabel = NSTextField(labelWithString: "Preview:")
         let preview = previewPair
@@ -605,22 +580,61 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
             (renameExtensionCheckbox, working.operation.renameSelectsExtension),
         ]
         for (box, on) in checkboxes { box.state = on ? .on : .off }
+        syncOperationControls()
+        shortcutsPage.bindings = working.keys
+    }
 
-        let qsIdx = QuickSearchOptions.Activation.allCases.firstIndex(of: working.quickSearch.activation) ?? 0
-        for (i, r) in quickSearchRadios.enumerated() { r.state = i == qsIdx ? .on : .off }
+    private func syncOperationControls() {
+        Self.selectRadio(quickSearchRadios, at: QuickSearchOptions.Activation.allCases.firstIndex(of: working.quickSearch.activation) ?? 0)
         holdField.doubleValue = working.operation.contextMenuHold
         holdStepper.doubleValue = working.operation.contextMenuHold
         finderPanelControl.selectedSegment = FinderPanel.allCases.firstIndex(of: working.operation.finderOpensIn) ?? 0
-        let arIdx = AutoRefresh.allCases.firstIndex(of: working.operation.autoRefresh) ?? 1
-        for (i, r) in autoRefreshRadios.enumerated() { r.state = i == arIdx ? .on : .off }
+        Self.selectRadio(autoRefreshRadios, at: AutoRefresh.allCases.firstIndex(of: working.operation.autoRefresh) ?? 1)
         reloadTerminalPopup()
         terminalArgumentsField.stringValue = working.operation.terminalArguments
+        syncTransferLimitControls()
+    }
+
+    private func syncTransferLimitControls() {
         let values = [working.operation.maxTransfers, working.operation.maxUploads, working.operation.maxDownloads]
         for i in 0..<3 {
             transferFields[i].integerValue = values[i]
             transferSteppers[i].integerValue = values[i]
         }
-        shortcutsPage.bindings = working.keys
+    }
+
+    private static func selectRadio(_ radios: [NSButton], at index: Int) {
+        for (i, r) in radios.enumerated() { r.state = i == index ? .on : .off }
+    }
+
+    private func buildColorWellGrid() -> NSGridView {
+        let slots = ThemeSlot.allCases
+        let rows: [[NSView]] = stride(from: 0, to: slots.count, by: 2).map { i in
+            var row: [NSView] = slots[i..<min(i + 2, slots.count)].flatMap { makeColorSlotViews($0) }
+            while row.count < 4 { row.append(NSGridCell.emptyContentView) }
+            return row
+        }
+        let grid = NSGridView(views: rows)
+        grid.rowSpacing = 3
+        grid.columnSpacing = 8
+        grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 2).xPlacement = .trailing
+        grid.column(at: 2).leadingPadding = 16
+        for r in 0..<grid.numberOfRows { grid.row(at: r).yPlacement = .center }
+        return grid
+    }
+
+    private func makeColorSlotViews(_ slot: ThemeSlot) -> [NSView] {
+        let well = NSColorWell()
+        well.target = self
+        well.action = #selector(wellChanged(_:))
+        well.translatesAutoresizingMaskIntoConstraints = false
+        well.widthAnchor.constraint(equalToConstant: 38).isActive = true
+        well.heightAnchor.constraint(equalToConstant: 18).isActive = true
+        wells[slot] = well
+        let lbl = NSTextField(labelWithString: slot.label + ":")
+        lbl.font = .systemFont(ofSize: 12)
+        return [lbl, well]
     }
 
     private func syncThemeAndPreview() {
@@ -755,7 +769,7 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
 
     @objc func autoRefreshChosen(_ sender: NSButton? = nil) {
         let i = sender?.tag ?? autoRefreshRadios.firstIndex { $0.state == .on } ?? 1
-        for (idx, r) in autoRefreshRadios.enumerated() { r.state = idx == i ? .on : .off }
+        Self.selectRadio(autoRefreshRadios, at: i)
         working.operation.autoRefresh = AutoRefresh.allCases.indices.contains(i) ? AutoRefresh.allCases[i] : .structure
     }
 

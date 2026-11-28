@@ -153,44 +153,39 @@ public final class UIGallery: NSObject {
 
     private func arrangeGalleryColumns() {
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 20, y: 20, width: 1440, height: 900)
-        let numCols: CGFloat = 4
-        let colWidth = (screen.width - 40) / numCols
+        let colWidth = (screen.width - 40) / 4
+        for (colIdx, wins) in groupedGalleryColumns().enumerated() {
+            placeGalleryColumn(wins, colX: screen.minX + 10 + CGFloat(colIdx) * colWidth, colWidth: colWidth, screen: screen)
+        }
+    }
 
-        var colTools: [NSWindow] = []      // 1. Full Tools & Viewers
-        var colOps: [NSWindow] = []        // 2. Transfers & Operations
-        var colSettings: [NSWindow] = []   // 3. Permissions & Network
-        var colPrompts: [NSWindow] = []    // 4. Prompts & Confirmation Alerts
-
+    private func groupedGalleryColumns() -> [[NSWindow]] {
+        var cols: [[NSWindow]] = [[], [], [], []]
         for ctrl in activeControllers {
             guard let win = ctrl.window else { continue }
-            let t = win.title.lowercased()
-            if ["find files", "synchronize", "multi-rename", "lister", "compare"].contains(where: { t.contains($0) }) {
-                colTools.append(win)
-            } else if ["copy", "move", "conflict", "transfer", "pack", "queue", "target file"].contains(where: { t.contains($0) }) {
-                colOps.append(win)
-            } else if ["chmod", "permission", "options", "connection", "profile", "problem"].contains(where: { t.contains($0) }) {
-                colSettings.append(win)
-            } else {
-                colPrompts.append(win)
-            }
+            cols[columnIndex(for: win.title.lowercased())].append(win)
         }
+        return cols
+    }
 
-        let columns = [colTools, colOps, colSettings, colPrompts]
-        for (colIdx, wins) in columns.enumerated() {
-            let colX = screen.minX + 10 + CGFloat(colIdx) * colWidth
-            var currentY = screen.maxY - 10
-            for win in wins {
-                let winW = min(win.frame.width, colWidth - 8)
-                let winH = win.frame.height
-                if currentY - winH < screen.minY {
-                    currentY = screen.maxY - 40
-                }
-                let targetX = max(screen.minX, min(colX, screen.maxX - winW))
-                let targetY = max(screen.minY, currentY - winH)
-                win.setFrameOrigin(NSPoint(x: targetX, y: targetY))
-                win.makeKeyAndOrderFront(nil)
-                currentY = targetY - 14
-            }
+    private func columnIndex(for title: String) -> Int {
+        if ["find files", "synchronize", "multi-rename", "lister", "compare"].contains(where: { title.contains($0) }) { return 0 }
+        if ["copy", "move", "conflict", "transfer", "pack", "queue", "target file"].contains(where: { title.contains($0) }) { return 1 }
+        if ["chmod", "permission", "options", "connection", "profile", "problem"].contains(where: { title.contains($0) }) { return 2 }
+        return 3
+    }
+
+    private func placeGalleryColumn(_ wins: [NSWindow], colX: CGFloat, colWidth: CGFloat, screen: NSRect) {
+        var currentY = screen.maxY - 10
+        for win in wins {
+            let winW = min(win.frame.width, colWidth - 8)
+            let winH = win.frame.height
+            if currentY - winH < screen.minY { currentY = screen.maxY - 40 }
+            let targetX = max(screen.minX, min(colX, screen.maxX - winW))
+            let targetY = max(screen.minY, currentY - winH)
+            win.setFrameOrigin(NSPoint(x: targetX, y: targetY))
+            win.makeKeyAndOrderFront(nil)
+            currentY = targetY - 14
         }
     }
 

@@ -184,18 +184,13 @@ public enum CommandAction: String, CaseIterable, Codable {
 
     public var label: String { Self.labels[self] ?? rawValue }
 
+    private static let buttonTitles: [CommandAction: String] = [
+        .view: "View", .copy: "Copy", .move: "Move", .newFolder: "NewFolder",
+        .delete: "Delete", .ftpDisconnect: "FTP Disconnect",
+    ]
+
     /// Short name for the function key bar at the bottom of the window.
-    public var buttonTitle: String {
-        switch self {
-        case .view: return "View"
-        case .copy: return "Copy"
-        case .move: return "Move"
-        case .newFolder: return "NewFolder"
-        case .delete: return "Delete"
-        case .ftpDisconnect: return "FTP Disconnect"
-        default: return label
-        }
-    }
+    public var buttonTitle: String { Self.buttonTitles[self] ?? label }
 }
 
 /// Which keys trigger which action. An action may have several keys; a key belongs to one action.
@@ -300,13 +295,15 @@ public struct KeyBindings: Equatable, Codable {
     @discardableResult
     public mutating func add(_ combo: KeyCombo, to action: CommandAction) -> CommandAction? {
         let previous = self.action(for: combo)
-        if let previous = previous, previous != action {
-            map[previous] = keys(for: previous).filter { $0 != combo }
-        }
+        if let previous = previous, previous != action { remove(combo, from: previous) }
+        appendComboIfMissing(combo, to: action)
+        return previous == action ? nil : previous
+    }
+
+    private mutating func appendComboIfMissing(_ combo: KeyCombo, to action: CommandAction) {
         if !keys(for: action).contains(combo) {
             map[action] = keys(for: action) + [combo]
         }
-        return previous == action ? nil : previous
     }
 
     public mutating func remove(_ combo: KeyCombo, from action: CommandAction) {

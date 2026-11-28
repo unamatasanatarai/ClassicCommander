@@ -95,46 +95,51 @@ final class ShortcutsPage: NSView, NSTableViewDataSource, NSTableViewDelegate, N
     func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
         let action = actions[row]
         if column?.identifier.rawValue == "keys" {
-            if recordingAction == action {
-                let label = NSTextField(labelWithString: "Press keys…  (Esc cancels)")
-                label.lineBreakMode = .byTruncatingTail
-                label.textColor = AppWindows.accent
-                return AppWindows.centeredCell(label)
-            }
-            let keys = bindings.keys(for: action)
-            if keys.isEmpty {
-                return AppWindows.centeredCell(NSTextField(labelWithString: ""))
-            }
-            let container = NSStackView()
-            container.orientation = .horizontal
-            container.spacing = 5
-            container.alignment = .centerY
-            for combo in keys {
-                let pill = KeyPillView(action: action, combo: combo) { [weak self] act, c in
-                    self?.removeSingle(combo: c, from: act)
-                }
-                pill.setContentHuggingPriority(.required, for: .horizontal)
-                pill.setContentCompressionResistancePriority(.required, for: .horizontal)
-                container.addArrangedSubview(pill)
-            }
-            let spacer = NSView()
-            spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            container.addArrangedSubview(spacer)
-            let cell = NSTableCellView()
-            container.translatesAutoresizingMaskIntoConstraints = false
-            cell.addSubview(container)
-            NSLayoutConstraint.activate([
-                container.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
-                container.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
-                container.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            ])
-            return cell
-        } else {
-            let label = NSTextField(labelWithString: action.label)
+            return keysCell(for: action)
+        }
+        let label = NSTextField(labelWithString: action.label)
+        label.lineBreakMode = .byTruncatingTail
+        return AppWindows.centeredCell(label)
+    }
+
+    private func keysCell(for action: CommandAction) -> NSView {
+        if recordingAction == action {
+            let label = NSTextField(labelWithString: "Press keys…  (Esc cancels)")
             label.lineBreakMode = .byTruncatingTail
+            label.textColor = AppWindows.accent
             return AppWindows.centeredCell(label)
         }
+        let keys = bindings.keys(for: action)
+        if keys.isEmpty { return AppWindows.centeredCell(NSTextField(labelWithString: "")) }
+        return makeKeyPillsCell(action: action, keys: keys)
+    }
+
+    private func makeKeyPillsCell(action: CommandAction, keys: [KeyCombo]) -> NSView {
+        let container = NSStackView()
+        container.orientation = .horizontal
+        container.spacing = 5
+        container.alignment = .centerY
+        for combo in keys {
+            let pill = KeyPillView(action: action, combo: combo) { [weak self] act, c in
+                self?.removeSingle(combo: c, from: act)
+            }
+            pill.setContentHuggingPriority(.required, for: .horizontal)
+            pill.setContentCompressionResistancePriority(.required, for: .horizontal)
+            container.addArrangedSubview(pill)
+        }
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        container.addArrangedSubview(spacer)
+        let cell = NSTableCellView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(container)
+        NSLayoutConstraint.activate([
+            container.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+            container.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+            container.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        return cell
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -149,15 +154,15 @@ final class ShortcutsPage: NSView, NSTableViewDataSource, NSTableViewDelegate, N
     /// Searchable text of a command: its name, its keys (as shown and spelled out) and its id.
     func searchText(for action: CommandAction) -> String {
         let keys = bindings.keys(for: action)
-        let spelled = keys.map { combo -> String in
-            var words: [String] = []
-            if combo.modifiers.contains(.control) { words.append("ctrl control") }
-            if combo.modifiers.contains(.option) { words.append("alt option") }
-            if combo.modifiers.contains(.shift) { words.append("shift") }
-            if combo.modifiers.contains(.command) { words.append("cmd command") }
-            return words.joined(separator: " ")
-        }
+        let spelled = keys.map(Self.spelledModifiers(for:))
         return ([action.label] + keys.map(\.displayName) + spelled + [action.rawValue]).joined(separator: "  ")
+    }
+
+    private static func spelledModifiers(for combo: KeyCombo) -> String {
+        let pairs: [(KeyCombo.Modifiers, String)] = [
+            (.control, "ctrl control"), (.option, "alt option"), (.shift, "shift"), (.command, "cmd command"),
+        ]
+        return pairs.compactMap { combo.modifiers.contains($0.0) ? $0.1 : nil }.joined(separator: " ")
     }
 
     @objc func filterChanged() {
@@ -225,6 +230,10 @@ final class ShortcutsPage: NSView, NSTableViewDataSource, NSTableViewDelegate, N
             note.stringValue = "\(combo.displayName) belongs to the app menu and can’t be used here."
             return
         }
+        assignCombo(combo, to: action)
+    }
+
+    private func assignCombo(_ combo: KeyCombo, to action: CommandAction) {
         let previous = bindings.add(combo, to: action)
         note.stringValue = previous.map { "\(combo.displayName) moved here from “\($0.label)”." }
             ?? "\(combo.displayName) added to “\(action.label)”."
@@ -255,31 +264,40 @@ final class ShortcutsPage: NSView, NSTableViewDataSource, NSTableViewDelegate, N
         stopRecording()
         let keys = bindings.keys(for: action)
         guard !keys.isEmpty else { return }
+        if !presentRemoveMenuIfMouse(keys: keys) { removeAllCombos() }
+    }
 
-        let isMouse = NSApp.currentEvent?.type == .leftMouseUp || NSApp.currentEvent?.type == .leftMouseDown
-        if keys.count > 1 && isMouse {
-            let menu = makeRemoveMenu(for: keys)
-            let pt = NSPoint(x: 0, y: removeButton.bounds.height + 2)
-            menu.popUp(positioning: nil, at: pt, in: removeButton)
-            return
-        }
+    private func presentRemoveMenuIfMouse(keys: [KeyCombo]) -> Bool {
+        guard shouldShowRemoveMenu(count: keys.count) else { return false }
+        let menu = makeRemoveMenu(for: keys)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: removeButton.bounds.height + 2), in: removeButton)
+        return true
+    }
 
-        removeAllCombos()
+    private func shouldShowRemoveMenu(count: Int) -> Bool {
+        count > 1 && isMouseRemoveEvent()
+    }
+
+    private func isMouseRemoveEvent() -> Bool {
+        let t = NSApp.currentEvent?.type
+        return t == .leftMouseUp || t == .leftMouseDown
     }
 
     private func makeRemoveMenu(for keys: [KeyCombo]) -> NSMenu {
         let menu = NSMenu(title: "Remove Shortcut")
-        for combo in keys {
-            let item = NSMenuItem(title: "Remove \(combo.displayName)", action: #selector(removeSpecificComboItem(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = combo
-            menu.addItem(item)
-        }
+        keys.map(makeRemoveItem).forEach(menu.addItem)
         menu.addItem(.separator())
         let allItem = NSMenuItem(title: "Remove All (\(keys.count) shortcuts)", action: #selector(removeAllCombos), keyEquivalent: "")
         allItem.target = self
         menu.addItem(allItem)
         return menu
+    }
+
+    private func makeRemoveItem(for combo: KeyCombo) -> NSMenuItem {
+        let item = NSMenuItem(title: "Remove \(combo.displayName)", action: #selector(removeSpecificComboItem(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = combo
+        return item
     }
 
     @objc private func resetPressed() {
@@ -320,25 +338,14 @@ final class KeyPillView: NSView {
         setContentHuggingPriority(.required, for: .horizontal)
         setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        let pillText = NSColor(srgbRed: isDark ? 0.92 : 0.12, green: isDark ? 0.92 : 0.12, blue: isDark ? 0.94 : 0.13, alpha: 1)
-        let pillMute = NSColor(srgbRed: isDark ? 0.65 : 0.40, green: isDark ? 0.65 : 0.40, blue: isDark ? 0.68 : 0.43, alpha: 1)
+        let (pillText, pillMute) = Self.pillColors()
 
         let label = NSTextField(labelWithString: combo.displayName)
         label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         label.textColor = pillText
         label.lineBreakMode = .byClipping
 
-        let closeBtn = NSButton()
-        closeBtn.bezelStyle = .inline
-        closeBtn.isBordered = false
-        closeBtn.attributedTitle = NSAttributedString(string: "×", attributes: [
-            .foregroundColor: pillMute,
-            .font: NSFont.systemFont(ofSize: 12, weight: .bold),
-        ])
-        closeBtn.target = self
-        closeBtn.action = #selector(removeClicked)
-        closeBtn.toolTip = "Remove shortcut \(combo.displayName)"
+        let closeBtn = makeCloseButton(combo: combo, color: pillMute)
 
         let stack = NSStackView(views: [label, closeBtn])
         stack.spacing = 3
@@ -376,6 +383,28 @@ final class KeyPillView: NSView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    private static func pillColors() -> (text: NSColor, mute: NSColor) {
+        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let t: CGFloat = isDark ? 0.92 : 0.12
+        let m: CGFloat = isDark ? 0.65 : 0.40
+        return (NSColor(srgbRed: t, green: t, blue: t + (isDark ? 0.02 : 0.01), alpha: 1),
+                NSColor(srgbRed: m, green: m, blue: m + 0.03, alpha: 1))
+    }
+
+    private func makeCloseButton(combo: KeyCombo, color: NSColor) -> NSButton {
+        let closeBtn = NSButton()
+        closeBtn.bezelStyle = .inline
+        closeBtn.isBordered = false
+        closeBtn.attributedTitle = NSAttributedString(string: "×", attributes: [
+            .foregroundColor: color,
+            .font: NSFont.systemFont(ofSize: 12, weight: .bold),
+        ])
+        closeBtn.target = self
+        closeBtn.action = #selector(removeClicked)
+        closeBtn.toolTip = "Remove shortcut \(combo.displayName)"
+        return closeBtn
+    }
 }
 
 /// Custom table view with right-click context menu to remove individual shortcuts or add shortcuts.
@@ -389,27 +418,32 @@ private final class ShortcutsTableView: NSTableView {
             return super.menu(for: event)
         }
         selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        let action = page.actions[row]
+        return buildRowMenu(for: page.actions[row], page: page)
+    }
+
+    private func buildRowMenu(for action: CommandAction, page: ShortcutsPage) -> NSMenu {
         let keys = page.bindings.keys(for: action)
         let menu = NSMenu(title: action.label)
         let addItem = NSMenuItem(title: "Add Shortcut…", action: #selector(page.addPressed), keyEquivalent: "")
         addItem.target = page
         menu.addItem(addItem)
-        if !keys.isEmpty {
-            menu.addItem(.separator())
-            for combo in keys {
-                let item = NSMenuItem(title: "Remove \(combo.displayName)", action: #selector(page.removeSpecificComboItem(_:)), keyEquivalent: "")
-                item.target = page
-                item.representedObject = combo
-                menu.addItem(item)
-            }
-            if keys.count > 1 {
-                menu.addItem(.separator())
-                let allItem = NSMenuItem(title: "Remove All (\(keys.count) shortcuts)", action: #selector(page.removeAllCombos), keyEquivalent: "")
-                allItem.target = page
-                menu.addItem(allItem)
-            }
+        guard !keys.isEmpty else { return menu }
+        menu.addItem(.separator())
+        for combo in keys {
+            let item = NSMenuItem(title: "Remove \(combo.displayName)", action: #selector(page.removeSpecificComboItem(_:)), keyEquivalent: "")
+            item.target = page
+            item.representedObject = combo
+            menu.addItem(item)
         }
+        appendRemoveAllItem(keys: keys, to: menu, page: page)
         return menu
+    }
+
+    private func appendRemoveAllItem(keys: [KeyCombo], to menu: NSMenu, page: ShortcutsPage) {
+        guard keys.count > 1 else { return }
+        menu.addItem(.separator())
+        let allItem = NSMenuItem(title: "Remove All (\(keys.count) shortcuts)", action: #selector(page.removeAllCombos), keyEquivalent: "")
+        allItem.target = page
+        menu.addItem(allItem)
     }
 }

@@ -36,12 +36,16 @@ public struct DisplayOptions: Equatable, Codable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        showFolderBrackets = try c.decodeIfPresent(Bool.self, forKey: .showFolderBrackets) ?? true
-        showFunctionKeyBar = try c.decodeIfPresent(Bool.self, forKey: .showFunctionKeyBar) ?? true
-        showStatusBarIcon = try c.decodeIfPresent(Bool.self, forKey: .showStatusBarIcon) ?? true
-        showHiddenFiles = try c.decodeIfPresent(Bool.self, forKey: .showHiddenFiles) ?? false
+        showFolderBrackets = try Self.decodeBool(c, .showFolderBrackets, default: true)
+        showFunctionKeyBar = try Self.decodeBool(c, .showFunctionKeyBar, default: true)
+        showStatusBarIcon = try Self.decodeBool(c, .showStatusBarIcon, default: true)
+        showHiddenFiles = try Self.decodeBool(c, .showHiddenFiles, default: false)
         sizeFormat = (try? c.decodeIfPresent(SizeFormat.self, forKey: .sizeFormat)) ?? .readable
         tabBar = (try? c.decodeIfPresent(TabBarMode.self, forKey: .tabBar)) ?? .whenSeveral
+    }
+
+    private static func decodeBool<K: CodingKey>(_ c: KeyedDecodingContainer<K>, _ key: K, default fallback: Bool) throws -> Bool {
+        try c.decodeIfPresent(Bool.self, forKey: key) ?? fallback
     }
 
     public static let standard = DisplayOptions()
@@ -231,23 +235,38 @@ public enum SettingsFile {
 
     /// Reads an exported file over `current`. Throws a readable message for anything else.
     public static func importing(_ data: Data, onto current: Settings) throws -> Settings {
-        let file: File
-        do {
-            file = try JSONDecoder().decode(File.self, from: data)
-        } catch {
-            throw SearchValidationError(message: "This is not a ClassicCommander settings file (or it is damaged).")
-        }
+        let file = try decodeFile(data)
         guard file.format == format else {
             throw SearchValidationError(message: "This is not a ClassicCommander settings file.")
         }
+        return merge(file, onto: current)
+    }
+
+    private static func decodeFile(_ data: Data) throws -> File {
+        do {
+            return try JSONDecoder().decode(File.self, from: data)
+        } catch {
+            throw SearchValidationError(message: "This is not a ClassicCommander settings file (or it is damaged).")
+        }
+    }
+
+    private static func merge(_ file: File, onto current: Settings) -> Settings {
         var s = current
+        mergeAppearanceAndBehavior(file, onto: &s)
+        mergeKeysAndLocations(file, onto: &s)
+        return s
+    }
+
+    private static func mergeAppearanceAndBehavior(_ file: File, onto s: inout Settings) {
         if let t = file.theme { s.theme = t }
         if let d = file.display { s.display = d }
         if let o = file.operation { s.operation = o }
+    }
+
+    private static func mergeKeysAndLocations(_ file: File, onto s: inout Settings) {
         if let k = file.keys { s.keys = k }
         if let q = file.quickSearch { s.quickSearch = q }
         if let l = file.quickLocations { s.quickLocations = l }
-        return s
     }
 }
 
@@ -273,32 +292,42 @@ public final class SettingsStore {
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        var theme = Self.load(Theme.self, Key.theme, defaults) ?? .standard
-        // One-time: themes saved with the old blue column header get Total Commander's grey header.
-        if !defaults.bool(forKey: Key.headerMigration) {
-            defaults.set(true, forKey: Key.headerMigration)
-            if theme.headerBackground == RGBColor(hex: "#0000A8") {
-                theme.headerBackground = Theme.classicBlue.headerBackground
-                theme.headerText = Theme.classicBlue.headerText
-                if let data = try? JSONEncoder().encode(theme) { defaults.set(data, forKey: Key.theme) }
-            }
+        let theme = Self.migrateTheme(Self.load(Theme.self, Key.theme, defaults) ?? .standard, defaults: defaults)
+        let operation = Self.migrateOperation(Self.load(OperationOptions.self, Key.operation, defaults) ?? .standard, defaults: defaults)
+        settings = Self.loadSettings(theme: theme, operation: operation, defaults: defaults)
+    }
+
+    private static func migrateTheme(_ initial: Theme, defaults: UserDefaults) -> Theme {
+        var theme = initial
+        guard !defaults.bool(forKey: Key.headerMigration) else { return theme }
+        defaults.set(true, forKey: Key.headerMigration)
+        if theme.headerBackground == RGBColor(hex: "#0000A8") {
+            theme.headerBackground = Theme.classicBlue.headerBackground
+            theme.headerText = Theme.classicBlue.headerText
+            if let data = try? JSONEncoder().encode(theme) { defaults.set(data, forKey: Key.theme) }
         }
-        var operation = Self.load(OperationOptions.self, Key.operation, defaults) ?? .standard
-        // One-time: the long right-click went from 3 s to 1 s by default; an untouched 3 s follows.
-        if !defaults.bool(forKey: Key.holdMigration) {
-            defaults.set(true, forKey: Key.holdMigration)
-            if operation.contextMenuHold == 3 {
-                operation.contextMenuHold = 1
-                if let data = try? JSONEncoder().encode(operation) { defaults.set(data, forKey: Key.operation) }
-            }
+        return theme
+    }
+
+    private static func migrateOperation(_ initial: OperationOptions, defaults: UserDefaults) -> OperationOptions {
+        var operation = initial
+        guard !defaults.bool(forKey: Key.holdMigration) else { return operation }
+        defaults.set(true, forKey: Key.holdMigration)
+        if operation.contextMenuHold == 3 {
+            operation.contextMenuHold = 1
+            if let data = try? JSONEncoder().encode(operation) { defaults.set(data, forKey: Key.operation) }
         }
-        settings = Settings(
+        return operation
+    }
+
+    private static func loadSettings(theme: Theme, operation: OperationOptions, defaults: UserDefaults) -> Settings {
+        Settings(
             theme: theme,
-            display: Self.load(DisplayOptions.self, Key.display, defaults) ?? .standard,
+            display: load(DisplayOptions.self, Key.display, defaults) ?? .standard,
             operation: operation,
-            keys: Self.load(KeyBindings.self, Key.keys, defaults) ?? .standard,
-            quickSearch: Self.load(QuickSearchOptions.self, Key.quickSearch, defaults) ?? .standard,
-            quickLocations: Self.load([QuickLocation].self, Key.quickLocations, defaults) ?? []
+            keys: load(KeyBindings.self, Key.keys, defaults) ?? .standard,
+            quickSearch: load(QuickSearchOptions.self, Key.quickSearch, defaults) ?? .standard,
+            quickLocations: load([QuickLocation].self, Key.quickLocations, defaults) ?? []
         )
     }
 
@@ -350,14 +379,18 @@ public final class SettingsStore {
 
     public func save(_ new: Settings) {
         guard new != settings else { return }
-        if new.theme != settings.theme { store(new.theme, Key.theme) }
-        if new.display != settings.display { store(new.display, Key.display) }
-        if new.operation != settings.operation { store(new.operation, Key.operation) }
-        if new.keys != settings.keys { store(new.keys, Key.keys) }
-        if new.quickSearch != settings.quickSearch { store(new.quickSearch, Key.quickSearch) }
-        if new.quickLocations != settings.quickLocations { store(new.quickLocations, Key.quickLocations) }
+        storeIfChanged(new.theme, settings.theme, Key.theme)
+        storeIfChanged(new.display, settings.display, Key.display)
+        storeIfChanged(new.operation, settings.operation, Key.operation)
+        storeIfChanged(new.keys, settings.keys, Key.keys)
+        storeIfChanged(new.quickSearch, settings.quickSearch, Key.quickSearch)
+        storeIfChanged(new.quickLocations, settings.quickLocations, Key.quickLocations)
         settings = new
         NotificationCenter.default.post(name: Self.didChange, object: self)
+    }
+
+    private func storeIfChanged<T: Encodable & Equatable>(_ value: T, _ old: T, _ key: String) {
+        if value != old { store(value, key) }
     }
 
     private static func load<T: Decodable>(_ type: T.Type, _ key: String, _ defaults: UserDefaults) -> T? {

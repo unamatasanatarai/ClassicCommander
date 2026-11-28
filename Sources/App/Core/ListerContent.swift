@@ -19,26 +19,29 @@ public enum ListerMode: Int, CaseIterable {
 public enum ListerEncoding: String, CaseIterable {
     case auto, utf8, utf16LE, utf16BE, ansi, ascii
 
+    private static let fixedTitles: [ListerEncoding: String] = [
+        .auto: "Auto",
+        .utf8: "UTF-8",
+        .utf16LE: "UTF-16 LE",
+        .utf16BE: "UTF-16 BE",
+        .ascii: "ASCII (DOS)",
+    ]
+
     public var title: String {
-        switch self {
-        case .auto: return "Auto"
-        case .utf8: return "UTF-8"
-        case .utf16LE: return "UTF-16 LE"
-        case .utf16BE: return "UTF-16 BE"
-        case .ansi: return "ANSI (\(ContentCharset.ansiName))"
-        case .ascii: return "ASCII (DOS)"
-        }
+        Self.fixedTitles[self] ?? "ANSI (\(ContentCharset.ansiName))"
     }
 
+    private static let fixedEncodings: [ListerEncoding: String.Encoding] = [
+        .utf8: .utf8,
+        .utf16LE: .utf16LittleEndian,
+        .utf16BE: .utf16BigEndian,
+    ]
+
     var stringEncoding: String.Encoding? {
-        switch self {
-        case .auto: return nil
-        case .utf8: return .utf8
-        case .utf16LE: return .utf16LittleEndian
-        case .utf16BE: return .utf16BigEndian
-        case .ansi: return ContentCharset.ansi.stringEncoding
-        case .ascii: return ContentCharset.ascii.stringEncoding
-        }
+        if let fixed = Self.fixedEncodings[self] { return fixed }
+        if self == .ansi { return ContentCharset.ansi.stringEncoding }
+        if self == .ascii { return ContentCharset.ascii.stringEncoding }
+        return nil
     }
 }
 
@@ -65,6 +68,10 @@ public enum ListerContent {
         guard !sample.isEmpty else { return false }
         if detectUTF16(sample) != nil { return false }
         if sample.contains(0) { return true }
+        return hasHighControlRatio(sample)
+    }
+
+    private static func hasHighControlRatio(_ sample: Data.SubSequence) -> Bool {
         let controls = sample.filter { $0 < 0x20 && $0 != 0x09 && $0 != 0x0A && $0 != 0x0D && $0 != 0x0C && $0 != 0x1B }
         return Double(controls.count) / Double(sample.count) > 0.1
     }
@@ -72,17 +79,34 @@ public enum ListerContent {
     /// UTF-16 by byte-order mark, or by a NUL in every other byte of mostly-ASCII text.
     static func detectUTF16(_ data: Data) -> String.Encoding? {
         let bytes = [UInt8](data.prefix(4096))
-        if bytes.count >= 2 {
-            if bytes[0] == 0xFF && bytes[1] == 0xFE { return .utf16LittleEndian }
-            if bytes[0] == 0xFE && bytes[1] == 0xFF { return .utf16BigEndian }
-        }
+        if let bom = detectUTF16BOM(bytes) { return bom }
+        return detectUTF16ByZeros(bytes)
+    }
+
+    private static func detectUTF16ByZeros(_ bytes: [UInt8]) -> String.Encoding? {
         guard bytes.count >= 8 else { return nil }
-        var evenZeros = 0, oddZeros = 0
-        for (i, b) in bytes.enumerated() where b == 0 { if i % 2 == 0 { evenZeros += 1 } else { oddZeros += 1 } }
+        let (evenZeros, oddZeros) = countZeroBytes(bytes)
         let half = bytes.count / 2
         if oddZeros > half * 8 / 10 && evenZeros < half / 10 { return .utf16LittleEndian }
         if evenZeros > half * 8 / 10 && oddZeros < half / 10 { return .utf16BigEndian }
         return nil
+    }
+
+    private static func detectUTF16BOM(_ bytes: [UInt8]) -> String.Encoding? {
+        guard bytes.count >= 2 else { return nil }
+        switch (bytes[0], bytes[1]) {
+        case (0xFF, 0xFE): return .utf16LittleEndian
+        case (0xFE, 0xFF): return .utf16BigEndian
+        default: return nil
+        }
+    }
+
+    private static func countZeroBytes(_ bytes: [UInt8]) -> (even: Int, odd: Int) {
+        var even = 0, odd = 0
+        for (i, b) in bytes.enumerated() where b == 0 {
+            if i % 2 == 0 { even += 1 } else { odd += 1 }
+        }
+        return (even, odd)
     }
 
     /// Auto detection: BOM / UTF-16 pattern, then valid UTF-8, else the user's Windows code page.
@@ -103,22 +127,37 @@ public enum ListerContent {
         var i = bytes.count - 1
         while i >= 0 && bytes[i] & 0xC0 == 0x80 { i -= 1 }
         guard i >= 0 else { return data }
-        let lead = bytes[i]
-        let needed = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1
+        let needed = utf8SequenceLength(bytes[i])
         let have = bytes.count - i
         return have < needed ? data.prefix(data.count - have) : data
+    }
+
+    private static func utf8SequenceLength(_ lead: UInt8) -> Int {
+        if lead >= 0xF0 { return 4 }
+        if lead >= 0xE0 { return 3 }
+        if lead >= 0xC0 { return 2 }
+        return 1
     }
 
     /// The text of `data` in an encoding (auto-detected when `.auto`). Never fails: bad bytes become U+FFFD.
     public static func text(_ data: Data, encoding: ListerEncoding, cut: Bool = false) -> (String, ListerEncoding) {
         let chosen = encoding == .auto ? detectEncoding(data, cut: cut) : encoding
         guard let enc = chosen.stringEncoding else { return ("", chosen) }
-        var body = data
-        if chosen == .utf8 && body.starts(with: [0xEF, 0xBB, 0xBF]) { body = body.dropFirst(3) }
-        if (chosen == .utf16LE && body.starts(with: [0xFF, 0xFE])) || (chosen == .utf16BE && body.starts(with: [0xFE, 0xFF])) {
-            body = body.dropFirst(2)
+        let body = stripBOM(data, encoding: chosen)
+        return (ContentMatcher.decoder(for: enc)(body), chosen)
+    }
+
+    private static let boms: [ListerEncoding: [UInt8]] = [
+        .utf8: [0xEF, 0xBB, 0xBF],
+        .utf16LE: [0xFF, 0xFE],
+        .utf16BE: [0xFE, 0xFF],
+    ]
+
+    private static func stripBOM(_ data: Data, encoding: ListerEncoding) -> Data {
+        if let bom = boms[encoding], data.starts(with: bom) {
+            return Data(data.dropFirst(bom.count))
         }
-        return (ContentMatcher.decoder(for: enc)(Data(body)), chosen)
+        return data
     }
 
     /// Fixed-width "binary" view: every byte as a character, control bytes as "·", lines of `width`.

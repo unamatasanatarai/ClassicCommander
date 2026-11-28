@@ -181,22 +181,21 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
 
     public func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let node = item as? Node else { return nil }
-        let text: String
-        if let folder = node.folder {
-            text = tableColumn?.identifier.rawValue == "name" ? folder : ""
-        } else if let p = node.profileID.flatMap(repository.profile) {
-            text = tableColumn?.identifier.rawValue == "name" ? p.name : p.summary
-        } else {
-            text = ""
-        }
-        let label = NSTextField(labelWithString: text)
+        let colID = tableColumn?.identifier.rawValue
+        let profile = node.profileID.flatMap(repository.profile)
+        let label = NSTextField(labelWithString: Self.cellText(node: node, profile: profile, columnID: colID))
         if node.folder != nil { label.font = .boldSystemFont(ofSize: 13) }
-        if tableColumn?.identifier.rawValue == "detail" {
-            label.textColor = .secondaryLabelColor
-            if let p = node.profileID.flatMap(repository.profile), !p.isEncrypted { label.textColor = .systemOrange }
+        if colID == "detail" {
+            label.textColor = (profile?.isEncrypted == false) ? .systemOrange : .secondaryLabelColor
         }
         label.lineBreakMode = .byTruncatingTail
         return Self.centered(label)
+    }
+
+    private static func cellText(node: Node, profile: FTPProfile?, columnID: String?) -> String {
+        if let folder = node.folder { return columnID == "name" ? folder : "" }
+        guard let p = profile else { return "" }
+        return columnID == "name" ? p.name : p.summary
     }
 
     /// A cell with its text vertically centred in the row (a bare label sits at the top).
@@ -236,11 +235,23 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
     }
 
     private func resolveCredentials(for profile: FTPProfile) -> (password: String?, remember: Bool)? {
-        let existing = profile.anonymous ? nil : repository.credentials.password(for: profile.id)
-        guard requiresSecret(profile) && existing == nil else { return (existing, false) }
+        let existing = existingPassword(for: profile)
+        if !requiresSecret(profile) || existing != nil { return (existing, false) }
+        return promptedCredentials(for: profile)
+    }
+
+    private func existingPassword(for profile: FTPProfile) -> String? {
+        profile.anonymous ? nil : repository.credentials.password(for: profile.id)
+    }
+
+    private func promptedCredentials(for profile: FTPProfile) -> (password: String?, remember: Bool)? {
         guard let typed = askPassword(for: profile) else { return nil }
-        let password = typed.password.isEmpty ? nil : typed.password
-        return (password, typed.save && password != nil)
+        return Self.normalizedPromptedCredentials(password: typed.password, save: typed.save)
+    }
+
+    private static func normalizedPromptedCredentials(password: String, save: Bool) -> (password: String?, remember: Bool) {
+        let nonEmpty = password.isEmpty ? nil : password
+        return (nonEmpty, save && nonEmpty != nil)
     }
 
     private func requiresSecret(_ profile: FTPProfile) -> Bool {
@@ -252,28 +263,54 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
         status.stringValue = "Connecting to \(profile.hostAndPort)…"
         guard let ftp = ftp, let commander = ftp.commander else { return }
         ftp.connect(profile, password: password, side: commander.model.activeSide) { [weak self] result in
-            guard let self = self else { return }
-            switch result {
-            case .success:
-                if remember, let password = password {
-                    var saved = profile
-                    saved.savePassword = true
-                    self.repository.save(saved, password: password)
-                }
-                self.status.stringValue = "Connected to \(profile.hostAndPort)."
-                self.close()
-            case .failure(let e):
-                // Stay open with the profile still selected, and say what to do.
-                self.status.stringValue = "Could not connect to \(profile.hostAndPort): \(e.message)"
-                self.reload(select: profile.id)
-                if self.ftp?.runSynchronously != true { NSSound.beep() }
+            self?.handleConnectResult(result, profile: profile, password: password, remember: remember)
+        }
+    }
+
+    private func handleConnectResult(_ result: Result<Void, FTPError>, profile: FTPProfile, password: String?, remember: Bool) {
+        switch result {
+        case .success:
+            if remember, let password = password {
+                var saved = profile
+                saved.savePassword = true
+                repository.save(saved, password: password)
             }
+            status.stringValue = "Connected to \(profile.hostAndPort)."
+            close()
+        case .failure(let e):
+            // Stay open with the profile still selected, and say what to do.
+            status.stringValue = "Could not connect to \(profile.hostAndPort): \(e.message)"
+            reload(select: profile.id)
+            if ftp?.runSynchronously != true { NSSound.beep() }
         }
     }
 
     /// The password (or key passphrase) prompt, with "Save in Keychain" (ticked when the profile saves passwords).
     private func askPassword(for profile: FTPProfile) -> (password: String, save: Bool)? {
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        let alert = makePasswordAlert(for: profile, field: field)
+        guard Modal.run(alert) == .alertFirstButtonReturn else { return nil }
+        return (field.stringValue, alert.suppressionButton?.state == .on)
+    }
+
+    private func makePasswordAlert(for profile: FTPProfile, field: NSSecureTextField) -> NSAlert {
         let alert = NSAlert()
+        configurePasswordPromptText(for: profile, on: alert)
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        alert.addButton(withTitle: "Connect")
+        alert.addButton(withTitle: "Cancel")
+        configurePasswordSuppression(for: profile, on: alert)
+        return alert
+    }
+
+    private func configurePasswordSuppression(for profile: FTPProfile, on alert: NSAlert) {
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = profile.usesKeyFile ? "Save passphrase in Keychain" : "Save password in Keychain"
+        alert.suppressionButton?.state = profile.savePassword ? .on : .off
+    }
+
+    private func configurePasswordPromptText(for profile: FTPProfile, on alert: NSAlert) {
         if profile.usesKeyFile {
             alert.messageText = "Passphrase for the key \(profile.keyFile)"
             alert.informativeText = "Used to unlock the key on this Mac; it is not sent to the server. Leave it empty to use ssh-agent."
@@ -281,16 +318,6 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
             alert.messageText = "Password for \(profile.loginName)@\(profile.hostAndPort)"
             alert.informativeText = profile.isEncrypted ? "" : "Warning: this connection is not encrypted; the password is sent in plain text."
         }
-        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-        alert.accessoryView = field
-        alert.window.initialFirstResponder = field
-        alert.addButton(withTitle: "Connect")
-        alert.addButton(withTitle: "Cancel")
-        alert.showsSuppressionButton = true
-        alert.suppressionButton?.title = profile.usesKeyFile ? "Save passphrase in Keychain" : "Save password in Keychain"
-        alert.suppressionButton?.state = profile.savePassword ? .on : .off
-        guard Modal.run(alert) == .alertFirstButtonReturn else { return nil }
-        return (field.stringValue, alert.suppressionButton?.state == .on)
     }
 
     @objc func newProfile() {
@@ -352,6 +379,17 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
 
     @objc private func deleteSelected() {
         guard let node = outline.item(atRow: outline.selectedRow) as? Node else { return NSSound.beep() }
+        guard Modal.run(makeDeleteAlert(for: node)) == .alertFirstButtonReturn else { return }
+        deleteNode(node)
+        reload()
+    }
+
+    private func deleteNode(_ node: Node) {
+        if let folder = node.folder { repository.deleteFolder(folder) }
+        else if let id = node.profileID { repository.delete(id) }
+    }
+
+    private func makeDeleteAlert(for node: Node) -> NSAlert {
         let alert = NSAlert()
         if let folder = node.folder {
             alert.messageText = "Delete the folder “\(folder)”?"
@@ -362,9 +400,7 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
         }
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
-        guard Modal.run(alert) == .alertFirstButtonReturn else { return }
-        if let folder = node.folder { repository.deleteFolder(folder) } else if let id = node.profileID { repository.delete(id) }
-        reload()
+        return alert
     }
 
 }

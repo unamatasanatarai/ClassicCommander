@@ -52,10 +52,16 @@ public enum FTPError: Error, Hashable {
         switch self {
         case .tlsFailed(let d): return "The encrypted (TLS) connection failed: \(d)"
         case .keyFile(let d): return "The key file could not be used: \(d)"
-        case .permissionDenied(let d): return "Permission denied\(d.isEmpty ? "" : ": \(d)")."
-        case .notFound(let d): return "Not found on the server\(d.isEmpty ? "" : ": \(d)")."
         case .verificationFailed(let d): return "The transfer could not be verified: \(d)"
         case .invalid(let d): return d
+        default: return pathOrServerMessage
+        }
+    }
+
+    private var pathOrServerMessage: String {
+        switch self {
+        case .permissionDenied(let d): return "Permission denied\(d.isEmpty ? "" : ": \(d)")."
+        case .notFound(let d): return "Not found on the server\(d.isEmpty ? "" : ": \(d)")."
         case .server(let d): return "Server error: \(d)"
         default: return ""
         }
@@ -84,6 +90,10 @@ public final class FTPClient: RemoteClient {
     public func url(for path: String, directory: Bool) -> String {
         let scheme = profile.security == .implicitTLS ? "ftps" : "ftp"
         let host = profile.host.contains(":") ? "[\(profile.host)]" : profile.host
+        return "\(scheme)://\(host):\(profile.port)/\(Self.encodePath(path, directory: directory))"
+    }
+
+    private static func encodePath(_ path: String, directory: Bool) -> String {
         var allowed = CharacterSet.urlPathAllowed
         allowed.remove(charactersIn: "/;?#%")
         let segments = path.split(separator: "/", omittingEmptySubsequences: true)
@@ -91,25 +101,14 @@ public final class FTPClient: RemoteClient {
         var p = segments.joined(separator: "/")
         if path.hasPrefix("/") { p = "%2F" + p }
         if directory && !p.isEmpty && !p.hasSuffix("/") { p += "/" }
-        return "\(scheme)://\(host):\(profile.port)/\(p)"
+        return p
     }
 
     /// curl options for every call. The second value is the config text fed on stdin (credentials).
     func baseArguments(textMode: Bool = false) -> (args: [String], config: String) {
         var args = ["--disable", "-K", "-", "--silent", "--show-error", "--path-as-is",
                     "--connect-timeout", "20", "--speed-limit", "1", "--speed-time", "90"]
-        switch profile.security {
-        case .none: break
-        case .explicitTLS: args.append("--ssl-reqd")          // TLS or nothing: never downgrade
-        case .implicitTLS: break                               // ftps:// URL is TLS from the start
-        }
-        if profile.security.isEncrypted, let pin = profile.pinnedPublicKey {
-            // The user trusted this exact key: skip CA validation but insist on the pinned key.
-            args += ["--insecure", "--pinnedpubkey", pin]
-        }
-        // Passive mode connects to the control connection's host, never to an address the server names.
-        args += profile.passive ? ["--ftp-pasv", "--ftp-skip-pasv-ip"] : ["--ftp-port", "-"]
-        if textMode { args.append("--use-ascii") }
+        appendSecurityAndTransferArgs(to: &args, textMode: textMode)
         for command in profile.commandsAfterLogin where !command.trimmingCharacters(in: .whitespaces).isEmpty {
             args += ["-Q", command]
         }
@@ -118,11 +117,31 @@ public final class FTPClient: RemoteClient {
         return (args, config)
     }
 
+    private func appendSecurityAndTransferArgs(to args: inout [String], textMode: Bool) {
+        if profile.security == .explicitTLS {
+            args.append("--ssl-reqd")          // TLS or nothing: never downgrade
+        }
+        if profile.security.isEncrypted, let pin = profile.pinnedPublicKey {
+            // The user trusted this exact key: skip CA validation but insist on the pinned key.
+            args += ["--insecure", "--pinnedpubkey", pin]
+        }
+        // Passive mode connects to the control connection's host, never to an address the server names.
+        args += profile.passive ? ["--ftp-pasv", "--ftp-skip-pasv-ip"] : ["--ftp-port", "-"]
+        if textMode { args.append("--use-ascii") }
+    }
+
     private func appendProxyArguments(to args: inout [String], config: inout String) {
         guard profile.proxyKind != .none else { return }
-        let scheme = profile.proxyKind == .http ? "http" : "socks5h"
-        args += ["--proxy", "\(scheme)://\(profile.proxyHost)"]
+        args += ["--proxy", "\(proxyScheme())://\(profile.proxyHost)"]
         if profile.proxyKind == .http { args.append("--proxytunnel") }
+        appendProxyUserConfig(to: &config)
+    }
+
+    private func proxyScheme() -> String {
+        profile.proxyKind == .http ? "http" : "socks5h"
+    }
+
+    private func appendProxyUserConfig(to config: inout String) {
         if !profile.proxyUsername.isEmpty {
             config += "proxy-user = \"\(Self.escape(profile.proxyUsername)):\"\n"
         }
@@ -239,18 +258,30 @@ public final class FTPClient: RemoteClient {
 
     /// Maps curl's exit status (and the server reply in its message) to an FTPError.
     static func error(for result: Result, path: String = "") -> FTPError {
-        let msg = result.errorText.components(separatedBy: "\n").first { $0.hasPrefix("curl:") }?
-            .replacingOccurrences(of: "curl: ", with: "") ?? result.errorText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let msg = extractCurlMessage(from: result.errorText)
         if let fixed = fixedExitErrors[result.exitCode] { return fixed }
-        switch result.exitCode {
-        case 35, 80: return .tlsFailed(msg)
-        case 9, 78:
-            return hasReply(msg, "550") && msg.lowercased().contains("perm") ? .permissionDenied(path) : .notFound(path)
-        case 25, 21, 19:
-            return commandRefusedError(msg: msg, path: path)
-        default:
-            return .server(msg.isEmpty ? "curl exit code \(result.exitCode)" : msg)
-        }
+        return exitCodeError(result.exitCode, msg: msg, path: path)
+    }
+
+    private static func exitCodeError(_ code: Int32, msg: String, path: String) -> FTPError {
+        if code == 35 || code == 80 { return .tlsFailed(msg) }
+        if code == 9 || code == 78 { return notFoundOrPermissionError(msg: msg, path: path) }
+        return nonTLSError(code, msg: msg, path: path)
+    }
+
+    private static func nonTLSError(_ code: Int32, msg: String, path: String) -> FTPError {
+        if [25, 21, 19].contains(code) { return commandRefusedError(msg: msg, path: path) }
+        return .server(msg.isEmpty ? "curl exit code \(code)" : msg)
+    }
+
+    private static func notFoundOrPermissionError(msg: String, path: String) -> FTPError {
+        hasReply(msg, "550") && msg.lowercased().contains("perm") ? .permissionDenied(path) : .notFound(path)
+    }
+
+    private static func extractCurlMessage(from errorText: String) -> String {
+        errorText.components(separatedBy: "\n").first { $0.hasPrefix("curl:") }?
+            .replacingOccurrences(of: "curl: ", with: "")
+            ?? errorText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func hasReply(_ msg: String, _ code: String) -> Bool {
@@ -259,11 +290,12 @@ public final class FTPClient: RemoteClient {
 
     private static func commandRefusedError(msg: String, path: String) -> FTPError {
         if hasReply(msg, "552") || msg.contains("quota") { return .quotaExceeded }
-        if hasReply(msg, "550") || hasReply(msg, "553") || hasReply(msg, "530") || msg.lowercased().contains("denied") {
-            return .permissionDenied(path)
-        }
-        if hasReply(msg, "450") || hasReply(msg, "451") { return .server(msg) }
+        if isPermissionReply(msg) { return .permissionDenied(path) }
         return .server(msg.isEmpty ? "the server refused the command" : msg)
+    }
+
+    private static func isPermissionReply(_ msg: String) -> Bool {
+        hasReply(msg, "550") || hasReply(msg, "553") || hasReply(msg, "530") || msg.lowercased().contains("denied")
     }
 
     // MARK: Operations
@@ -271,26 +303,31 @@ public final class FTPClient: RemoteClient {
     /// Logs in and lists the start directory; learns the login directory. Used by Connect and Test connection.
     @discardableResult
     public func connect(cancel: CancelFlag? = nil) throws -> [RemoteEntry] {
-        let start = profile.remoteDirectory.isEmpty ? "" : profile.remoteDirectory
+        let start = profile.remoteDirectory
         let marker = "\n@@CC-ENTRY@@"
         let result = try run(listArguments(for: start, mlsd: profile.serverType != .unixList && profile.serverType != .dosList)
                                 + ["-w", "\(marker)%{ftp_entry_path}"], cancel: cancel)
-        var text = String(decoding: result.output, as: UTF8.self)
-        if let r = text.range(of: marker, options: .backwards) {
-            let entry = String(text[r.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
-            if entry.hasPrefix("/") { entryPath = entry }
-            text = String(text[..<r.lowerBound])
-        }
+        let text = stripEntryPathMarker(from: String(decoding: result.output, as: UTF8.self), marker: marker)
         if result.exitCode != 0 {
             let err = Self.error(for: result, path: start)
-            // MLSD not understood: fall back to LIST (only for "server said no", not network/login problems).
-            if case .server = err, profile.serverType == .automatic, useMLSD {
-                useMLSD = false
-                return try connect(cancel: cancel)
-            }
+            if shouldFallbackFromMLSD(err) { return try connect(cancel: cancel) }
             throw err
         }
         return FTPListingParser.parse(text, type: listingType)
+    }
+
+    private func stripEntryPathMarker(from raw: String, marker: String) -> String {
+        guard let r = raw.range(of: marker, options: .backwards) else { return raw }
+        let entry = String(raw[r.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if entry.hasPrefix("/") { entryPath = entry }
+        return String(raw[..<r.lowerBound])
+    }
+
+    private func shouldFallbackFromMLSD(_ error: FTPError) -> Bool {
+        // MLSD not understood: fall back to LIST (only for "server said no", not network/login problems).
+        guard case .server = error, profile.serverType == .automatic, useMLSD else { return false }
+        useMLSD = false
+        return true
     }
 
     /// The directory to show after login: the profile's remote dir, else the server's login directory.
@@ -316,14 +353,15 @@ public final class FTPClient: RemoteClient {
         let mlsd = profile.serverType == .mlsd || (profile.serverType == .automatic && useMLSD)
         let result = try run(listArguments(for: path, mlsd: mlsd), cancel: cancel)
         if result.exitCode != 0 {
-            let err = Self.error(for: result, path: path)
-            if case .server = err, profile.serverType == .automatic, useMLSD {
-                useMLSD = false
-                return try list(path, cancel: cancel)
-            }
-            throw err
+            return try retryOrThrowListError(result: result, path: path, cancel: cancel)
         }
         return FTPListingParser.parse(String(decoding: result.output, as: UTF8.self), type: listingType)
+    }
+
+    private func retryOrThrowListError(result: Result, path: String, cancel: CancelFlag?) throws -> [RemoteEntry] {
+        let err = Self.error(for: result, path: path)
+        if shouldFallbackFromMLSD(err) { return try list(path, cancel: cancel) }
+        throw err
     }
 
     /// Downloads to `local` + ".ccpart" and renames it into place only after curl reports success
@@ -334,43 +372,68 @@ public final class FTPClient: RemoteClient {
         let fm = FileManager.default
         if !resume { try? fm.removeItem(at: part) }
         try fm.createDirectory(at: local.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let args = downloadArguments(for: path, part: part, resume: resume)
+        let textMode = profile.transferMode.usesText(for: local.lastPathComponent)
+        let result = try runDownload(args, part: part, textMode: textMode, cancel: cancel, progress: progress)
+        guard result.exitCode == 0 else { throw Self.error(for: result, path: path) }
+        let got = try finalizeDownload(part: part, to: local, remotePath: path, expectedSize: expectedSize, textMode: textMode)
+        progress?(got)
+    }
+
+    private func downloadArguments(for path: String, part: URL, resume: Bool) -> [String] {
         var args = ["-o", part.path]
-        if resume && fm.fileExists(atPath: part.path) { args += ["-C", "-"] }
+        if resume && FileManager.default.fileExists(atPath: part.path) { args += ["-C", "-"] }
         args.append(url(for: path, directory: false))
-        let result: Result
+        return args
+    }
+
+    private func runDownload(
+        _ args: [String], part: URL, textMode: Bool, cancel: CancelFlag?, progress: ((Int64) -> Void)?
+    ) throws -> Result {
         do {
-            result = try run(args, textMode: profile.transferMode.usesText(for: local.lastPathComponent), cancel: cancel,
-                             poll: { progress?(Self.fileSize(part)) })
+            return try run(args, textMode: textMode, cancel: cancel, poll: { progress?(Self.fileSize(part)) })
         } catch FTPError.cancelled {
-            try? fm.removeItem(at: part)
+            try? FileManager.default.removeItem(at: part)
             throw FTPError.cancelled
         }
-        guard result.exitCode == 0 else { throw Self.error(for: result, path: path) }
+    }
+
+    private func finalizeDownload(part: URL, to local: URL, remotePath: String, expectedSize: Int64?, textMode: Bool) throws -> Int64 {
+        let fm = FileManager.default
         let got = Self.fileSize(part)
         if !fm.fileExists(atPath: part.path) { fm.createFile(atPath: part.path, contents: Data()) }   // empty file
-        if let expected = expectedSize, !profile.transferMode.usesText(for: local.lastPathComponent), got != expected {
+        if let expected = expectedSize, !textMode, got != expected {
             throw FTPError.verificationFailed("received \(got) of \(expected) bytes")
         }
-        if fm.fileExists(atPath: local.path) { try fm.removeItem(at: local) }
-        try fm.moveItem(at: part, to: local)
-        Quarantine.mark(local, origin: url(for: path, directory: false))
-        progress?(got)
+        try LocalCopy.replace(local, with: part)
+        Quarantine.mark(local, origin: url(for: remotePath, directory: false))
+        return got
     }
 
     /// Uploads a file, creating missing remote folders, then checks the size the server reports.
     public func upload(_ local: URL, to path: String, resume: Bool = false, cancel: CancelFlag? = nil,
                        progress: ((Int64) -> Void)? = nil) throws {
         let size = Self.fileSize(local)
+        let textMode = profile.transferMode.usesText(for: local.lastPathComponent)
+        let args = uploadArguments(local: local, path: path, resume: resume)
+        let result = try run(args, textMode: textMode, cancel: cancel,
+                             progress: { pct in progress?(Int64(Double(size) * pct / 100)) })
+        guard result.exitCode == 0 else { throw Self.error(for: result, path: path) }
+        try verifyUpload(localSize: size, path: path, textMode: textMode)
+        progress?(size)
+    }
+
+    private func uploadArguments(local: URL, path: String, resume: Bool) -> [String] {
         var args = ["--ftp-create-dirs", "-T", local.path]
         if resume { args += ["-C", "-"] }
         args.append(url(for: path, directory: false))
-        let result = try run(args, textMode: profile.transferMode.usesText(for: local.lastPathComponent), cancel: cancel,
-                             progress: { pct in progress?(Int64(Double(size) * pct / 100)) })
-        guard result.exitCode == 0 else { throw Self.error(for: result, path: path) }
-        if !profile.transferMode.usesText(for: local.lastPathComponent), let remote = try? self.size(of: path), remote != size {
-            throw FTPError.verificationFailed("the server has \(remote) of \(size) bytes")
+        return args
+    }
+
+    private func verifyUpload(localSize: Int64, path: String, textMode: Bool) throws {
+        if !textMode, let remote = try? self.size(of: path), remote != localSize {
+            throw FTPError.verificationFailed("the server has \(remote) of \(localSize) bytes")
         }
-        progress?(size)
     }
 
     /// The size of a remote file (SIZE command), or nil when the server does not say.
@@ -386,7 +449,7 @@ public final class FTPClient: RemoteClient {
 
     /// Sends raw commands (MKD, DELE, RMD, RNFR/RNTO, …) after login, from the given directory.
     func quote(_ commands: [String], in directory: String = "/") throws {
-        for c in commands where c.contains("\r") || c.contains("\n") || c.contains("\0") {
+        for c in commands where Self.hasControlCharacters(c) {
             throw FTPError.invalid("Invalid characters in a remote name: \(c)")
         }
         let args = commands.flatMap { ["-Q", $0] } + ["--list-only", "-o", "/dev/null", url(for: directory, directory: true)]
@@ -430,30 +493,31 @@ public final class FTPClient: RemoteClient {
     /// The server's certificate summary and public-key pin ("sha256//…"), for the trust dialog.
     /// Uses LibreSSL's s_client (with STARTTLS for explicit FTPS). Reads only public data.
     public static func fetchCertificate(host: String, port: Int, explicit: Bool) -> (summary: String, pin: String)? {
-        func shell(_ command: String, input: Data? = nil) -> Data? {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/bin/sh")
-            p.arguments = ["-c", command]
-            let inPipe = Pipe(), out = Pipe()
-            p.standardInput = inPipe
-            p.standardOutput = out
-            p.standardError = FileHandle.nullDevice
-            guard (try? p.run()) != nil else { return nil }
-            if let input = input { inPipe.fileHandleForWriting.write(input) }
-            try? inPipe.fileHandleForWriting.close()
-            let data = out.fileHandleForReading.readDataToEndOfFile()
-            p.waitUntilExit()
-            return data
-        }
         guard FTPProfile.isValidHost(host), (1...65535).contains(port) else { return nil }
         let starttls = explicit ? "-starttls ftp " : ""
-        guard let pem = shell("/usr/bin/openssl s_client \(starttls)-connect '\(host):\(port)' -servername '\(host)' </dev/null 2>/dev/null | /usr/bin/openssl x509"),
+        guard let pem = runShell("/usr/bin/openssl s_client \(starttls)-connect '\(host):\(port)' -servername '\(host)' </dev/null 2>/dev/null | /usr/bin/openssl x509"),
               !pem.isEmpty,
-              let info = shell("/usr/bin/openssl x509 -noout -subject -issuer -dates -fingerprint -sha256", input: pem),
-              let pin = shell("/usr/bin/openssl x509 -pubkey -noout | /usr/bin/openssl pkey -pubin -outform der | /usr/bin/openssl dgst -sha256 -binary | /usr/bin/openssl base64", input: pem)
+              let info = runShell("/usr/bin/openssl x509 -noout -subject -issuer -dates -fingerprint -sha256", input: pem),
+              let pin = runShell("/usr/bin/openssl x509 -pubkey -noout | /usr/bin/openssl pkey -pubin -outform der | /usr/bin/openssl dgst -sha256 -binary | /usr/bin/openssl base64", input: pem)
         else { return nil }
         let pinText = String(decoding: pin, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !pinText.isEmpty else { return nil }
         return (String(decoding: info, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines), "sha256//" + pinText)
+    }
+
+    private static func runShell(_ command: String, input: Data? = nil) -> Data? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", command]
+        let inPipe = Pipe(), out = Pipe()
+        p.standardInput = inPipe
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        if let input = input { inPipe.fileHandleForWriting.write(input) }
+        try? inPipe.fileHandleForWriting.close()
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return data
     }
 }

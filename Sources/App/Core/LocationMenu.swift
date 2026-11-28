@@ -36,11 +36,13 @@ public struct LocationMenu: Equatable {
         case .home(let url):
             return "Home  ~  (\(url.path))"
         case let .drive(name, _, available, total):
-            if let a = available, let t = total {
-                return formatter.volume(VolumeInfo(name: name, available: a, total: t))
-            }
-            return "[\(name)]"
+            return driveTitle(name: name, available: available, total: total, formatter: formatter)
         }
+    }
+
+    private static func driveTitle(name: String, available: Int64?, total: Int64?, formatter: EntryFormatter) -> String {
+        guard let a = available, let t = total else { return "[\(name)]" }
+        return formatter.volume(VolumeInfo(name: name, available: a, total: t))
     }
 
     /// The mounted, user-visible volumes, boot volume first.

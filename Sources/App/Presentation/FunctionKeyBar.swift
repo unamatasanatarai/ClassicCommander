@@ -40,22 +40,34 @@ public final class FunctionKeyBar: NSView {
             .font: NSFont.systemFont(ofSize: 13), .foregroundColor: theme.chromeText.nsColor, .paragraphStyle: style,
         ]
         for (i, action) in shownActions.enumerated() {
-            let rect = buttonRect(i).insetBy(dx: 2, dy: 2)
-            // Classic raised button in the window grey; pressed buttons look sunken.
-            let light = chrome.blended(withFraction: 0.6, of: .white) ?? chrome
-            let shadow = chrome.blended(withFraction: 0.35, of: .black) ?? chrome
-            let isDown = pressed == i
-            (isDown ? shadow : light).setFill()
-            rect.fill()
-            (isDown ? light : shadow).setFill()
-            NSRect(x: rect.minX + 1, y: rect.minY + 1, width: rect.width - 1, height: rect.height - 1).fill()
-            chrome.setFill()
-            rect.insetBy(dx: 1, dy: 1).fill()
-            let font = NSFont.systemFont(ofSize: 13)
-            let h = ceil(font.ascender - font.descender)
-            let textRect = NSRect(x: rect.minX + 4, y: rect.minY + floor((rect.height - h) / 2), width: rect.width - 8, height: h)
-            (title(for: action) as NSString).draw(in: textRect, withAttributes: attrs)
+            drawButton(at: i, action: action, chrome: chrome, attrs: attrs)
         }
+    }
+
+    private func drawButton(at index: Int, action: CommandAction, chrome: NSColor, attrs: [NSAttributedString.Key: Any]) {
+        let rect = buttonRect(index).insetBy(dx: 2, dy: 2)
+        drawButtonBezel(in: rect, chrome: chrome, isDown: pressed == index)
+        let font = NSFont.systemFont(ofSize: 13)
+        let h = ceil(font.ascender - font.descender)
+        let textRect = NSRect(x: rect.minX + 4, y: rect.minY + floor((rect.height - h) / 2), width: rect.width - 8, height: h)
+        (title(for: action) as NSString).draw(in: textRect, withAttributes: attrs)
+    }
+
+    private func drawButtonBezel(in rect: NSRect, chrome: NSColor, isDown: Bool) {
+        // Classic raised button in the window grey; pressed buttons look sunken.
+        let (topLeft, bottomRight) = Self.bezelShades(from: chrome, isDown: isDown)
+        topLeft.setFill()
+        rect.fill()
+        bottomRight.setFill()
+        NSRect(x: rect.minX + 1, y: rect.minY + 1, width: rect.width - 1, height: rect.height - 1).fill()
+        chrome.setFill()
+        rect.insetBy(dx: 1, dy: 1).fill()
+    }
+
+    private static func bezelShades(from chrome: NSColor, isDown: Bool) -> (NSColor, NSColor) {
+        let light = chrome.blended(withFraction: 0.6, of: .white) ?? chrome
+        let shadow = chrome.blended(withFraction: 0.35, of: .black) ?? chrome
+        return isDown ? (shadow, light) : (light, shadow)
     }
 
     private func index(at event: NSEvent) -> Int? {

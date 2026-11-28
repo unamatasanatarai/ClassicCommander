@@ -220,19 +220,27 @@ final class FTPProfileEditorController: NSWindowController, NSTabViewDelegate {
         passwordField.stringValue = initialPassword ?? ""
         remoteDirField.stringValue = profile.remoteDirectory
         localDirField.stringValue = profile.localDirectory
-        securityPopup.selectItem(at: FTPSecurity.allCases.firstIndex(of: profile.security) ?? 0)
-        protocolPopup.selectItem(at: RemoteProtocol.allCases.firstIndex(of: profile.connectionProtocol) ?? 0)
-        authPopup.selectItem(at: SSHAuthMethod.allCases.firstIndex(of: profile.sshAuth) ?? 0)
         keyFileField.stringValue = profile.keyFile
-        if let folder = profile.folder { folderPopup.selectItem(withTitle: folder) } else { folderPopup.selectItem(at: 0) }
-        anonymousBox.state = profile.anonymous ? .on : .off
-        passiveBox.state = profile.passive ? .on : .off
-        savePasswordBox.state = profile.savePassword ? .on : .off
+        loadPopupsAndBoxes()
         loadAdvancedSettings()
         updateSecurityWarning()
         updatePin()
         anonymousChanged()
         updateProtocolControls()
+    }
+
+    private func selectEnum<T: Equatable>(_ value: T, in allCases: [T], on popup: NSPopUpButton) {
+        popup.selectItem(at: allCases.firstIndex(of: value) ?? 0)
+    }
+
+    private func loadPopupsAndBoxes() {
+        selectEnum(profile.security, in: FTPSecurity.allCases, on: securityPopup)
+        selectEnum(profile.connectionProtocol, in: RemoteProtocol.allCases, on: protocolPopup)
+        selectEnum(profile.sshAuth, in: SSHAuthMethod.allCases, on: authPopup)
+        if let folder = profile.folder { folderPopup.selectItem(withTitle: folder) } else { folderPopup.selectItem(at: 0) }
+        anonymousBox.state = profile.anonymous ? .on : .off
+        passiveBox.state = profile.passive ? .on : .off
+        savePasswordBox.state = profile.savePassword ? .on : .off
     }
 
     private func loadAdvancedSettings() {
@@ -261,9 +269,7 @@ final class FTPProfileEditorController: NSWindowController, NSTabViewDelegate {
         general.row(at: Row.auth).isHidden = !sftp
         general.row(at: Row.keyFile).isHidden = !key
         general.row(at: Row.ftpOptions).isHidden = sftp
-        passwordLabel.stringValue = key ? "Key passphrase:" : "Password:"
-        passwordField.placeholderString = key ? "empty if the key has none (or it is in ssh-agent)" : nil
-        savePasswordBox.title = key ? "Save passphrase in Keychain" : "Save password in Keychain"
+        updatePasswordFieldLabels(isKey: key)
         if sftp { anonymousBox.state = .off }
         anonymousChanged()
         for c in [serverTypePopup, transferPopup, proxyUserField] as [NSControl] { c.isEnabled = !sftp }
@@ -272,6 +278,12 @@ final class FTPProfileEditorController: NSWindowController, NSTabViewDelegate {
         updateSecurityWarning()
         updatePin()
         updateTabOrder()
+    }
+
+    private func updatePasswordFieldLabels(isKey: Bool) {
+        passwordLabel.stringValue = isKey ? "Key passphrase:" : "Password:"
+        passwordField.placeholderString = isKey ? "empty if the key has none (or it is in ssh-agent)" : nil
+        savePasswordBox.title = isKey ? "Save passphrase in Keychain" : "Save password in Keychain"
     }
 
     @objc private func protocolChanged() {
@@ -308,14 +320,20 @@ final class FTPProfileEditorController: NSWindowController, NSTabViewDelegate {
     func read() -> (FTPProfile, String?) {
         var p = profile
         p.name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
-        p.security = FTPSecurity.allCases[max(0, securityPopup.indexOfSelectedItem)]
-        p.connectionProtocol = selectedProtocol
-        p.sshAuth = selectedAuth
         p.keyFile = keyFileField.stringValue.trimmingCharacters(in: .whitespaces)
         if !p.setHostAndPort(hostField.stringValue) { p.host = hostField.stringValue.trimmingCharacters(in: .whitespaces) }
         p.username = userField.stringValue
         p.remoteDirectory = remoteDirField.stringValue.trimmingCharacters(in: .whitespaces)
         p.localDirectory = localDirField.stringValue.trimmingCharacters(in: .whitespaces)
+        readSelections(into: &p)
+        let password = showPassword.state == .on ? plainPasswordField.stringValue : passwordField.stringValue
+        return (p, p.anonymous || password.isEmpty ? nil : password)
+    }
+
+    private func readSelections(into p: inout FTPProfile) {
+        p.security = FTPSecurity.allCases[max(0, securityPopup.indexOfSelectedItem)]
+        p.connectionProtocol = selectedProtocol
+        p.sshAuth = selectedAuth
         p.folder = folderPopup.indexOfSelectedItem > 0 ? folderPopup.titleOfSelectedItem : nil
         p.anonymous = anonymousBox.state == .on && !p.isSFTP
         p.passive = passiveBox.state == .on
@@ -328,8 +346,6 @@ final class FTPProfileEditorController: NSWindowController, NSTabViewDelegate {
         p.proxyKind = FTPProxyKind.allCases[max(0, proxyPopup.indexOfSelectedItem)]
         p.proxyHost = proxyHostField.stringValue.trimmingCharacters(in: .whitespaces)
         p.proxyUsername = proxyUserField.stringValue
-        let password = showPassword.state == .on ? plainPasswordField.stringValue : passwordField.stringValue
-        return (p, p.anonymous || password.isEmpty ? nil : password)
     }
 
     @objc private func securityChanged() {
@@ -406,17 +422,21 @@ final class FTPProfileEditorController: NSWindowController, NSTabViewDelegate {
             let result = Result { try client.connect(cancel: nil) }
             client.close()
             DispatchQueue.main.async { [weak self] in
-                switch result {
-                case .success(let entries):
-                    self?.testResult.stringValue = "Connected (\(p.securityLabel)). \(entries.count) entries in \(client.startPath)."
-                    self?.testResult.textColor = .systemGreen
-                case .failure(let e):
-                    let message = (e as? FTPError)?.message ?? e.localizedDescription
-                    self?.testResult.stringValue = (e as? FTPError) == .hostKeyUnknown
-                        ? message + " Use Connect to see its fingerprint and trust it." : message
-                    self?.testResult.textColor = .systemRed
-                }
+                self?.showTestResult(result, profile: p, startPath: client.startPath)
             }
+        }
+    }
+
+    private func showTestResult(_ result: Result<[RemoteEntry], Error>, profile p: FTPProfile, startPath: String) {
+        switch result {
+        case .success(let entries):
+            testResult.stringValue = "Connected (\(p.securityLabel)). \(entries.count) entries in \(startPath)."
+            testResult.textColor = .systemGreen
+        case .failure(let e):
+            let message = (e as? FTPError)?.message ?? e.localizedDescription
+            testResult.stringValue = (e as? FTPError) == .hostKeyUnknown
+                ? message + " Use Connect to see its fingerprint and trust it." : message
+            testResult.textColor = .systemRed
         }
     }
 

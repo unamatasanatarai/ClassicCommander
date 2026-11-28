@@ -30,30 +30,36 @@ public struct FileSystemLister: DirectoryListing {
         let base = real.path.hasSuffix("/") ? real.path : real.path + "/"
         var result: [FileEntry] = []
         result.reserveCapacity(names.count)
-        var st = stat()
-        for name in names {
-            if !showHidden && name.hasPrefix(".") { continue }
-            let full = base + name
-            guard lstat(full, &st) == 0 else { continue }
-            let isSymlink = (st.st_mode & S_IFMT) == S_IFLNK
-            var isDirectory = (st.st_mode & S_IFMT) == S_IFDIR
-            if isSymlink {
-                // A link to a directory (e.g. /tmp, /etc) must be enterable like one: stat() follows the link.
-                var target = stat()
-                isDirectory = stat(full, &target) == 0 && (target.st_mode & S_IFMT) == S_IFDIR
+        for name in names where showHidden || !name.hasPrefix(".") {
+            if let entry = Self.makeEntry(name: name, fullPath: base + name, directory: directory) {
+                result.append(entry)
             }
-            let mtime = st.st_mtimespec
-            result.append(FileEntry(
-                name: name,
-                url: directory.appendingPathComponent(name, isDirectory: isDirectory),
-                kind: isDirectory ? .directory : .file,
-                size: isDirectory ? nil : Int64(st.st_size),
-                modified: Date(timeIntervalSince1970: TimeInterval(mtime.tv_sec) + TimeInterval(mtime.tv_nsec) / 1e9),
-                isSymlink: isSymlink,
-                permissions: Int(st.st_mode & 0o777)
-            ))
         }
         return result
+    }
+
+    private static func makeEntry(name: String, fullPath: String, directory: URL) -> FileEntry? {
+        var st = stat()
+        guard lstat(fullPath, &st) == 0 else { return nil }
+        let isSymlink = (st.st_mode & S_IFMT) == S_IFLNK
+        let isDirectory = resolvesToDirectory(fullPath: fullPath, stat: st, isSymlink: isSymlink)
+        let mtime = st.st_mtimespec
+        return FileEntry(
+            name: name,
+            url: directory.appendingPathComponent(name, isDirectory: isDirectory),
+            kind: isDirectory ? .directory : .file,
+            size: isDirectory ? nil : Int64(st.st_size),
+            modified: Date(timeIntervalSince1970: TimeInterval(mtime.tv_sec) + TimeInterval(mtime.tv_nsec) / 1e9),
+            isSymlink: isSymlink,
+            permissions: Int(st.st_mode & 0o777)
+        )
+    }
+
+    private static func resolvesToDirectory(fullPath: String, stat st: stat, isSymlink: Bool) -> Bool {
+        guard isSymlink else { return (st.st_mode & S_IFMT) == S_IFDIR }
+        // A link to a directory (e.g. /tmp, /etc) must be enterable like one: stat() follows the link.
+        var target = stat()
+        return stat(fullPath, &target) == 0 && (target.st_mode & S_IFMT) == S_IFDIR
     }
 }
 
@@ -90,24 +96,38 @@ public enum EntrySorting {
         if order.column == .unsorted {
             return sortedUnsorted(entries, ascending: order.ascending)
         }
-        // Sort indices over precomputed keys: names bridged to NSString once (not on every comparison),
-        // extensions computed once, and the entries themselves moved only once at the end.
-        let names = entries.map { $0.name as NSString }
-        let exts: [NSString] = order.column == .ext ? entries.map { $0.displayExtension as NSString } : []
-        let ranks = entries.map { rank($0.kind) }
-        let isFile = entries.map { $0.kind == .file }
-        let sizes: [Int64] = order.column == .size ? entries.map { $0.size ?? 0 } : []
-        let dates: [Date] = order.column == .date ? entries.map { $0.modified ?? .distantPast } : []
-        func byName(_ i: Int, _ j: Int) -> ComparisonResult { names[i].localizedStandardCompare(names[j] as String) }
-        let sortedIndices = entries.indices.sorted { i, j in
-            if ranks[i] != ranks[j] { return ranks[i] < ranks[j] }
-            let column = isFile[i] ? order.column : .name
-            var result = compareColumn(column, i: i, j: j, exts: exts, sizes: sizes, dates: dates, names: names)
-            // The (costly) localized name comparison only breaks ties.
-            if result == .orderedSame && column != .name && column != .unsorted { result = byName(i, j) }
-            return order.ascending ? result == .orderedAscending : result == .orderedDescending
-        }
+        let keys = SortKeys(entries: entries, column: order.column)
+        let sortedIndices = entries.indices.sorted { compareEntries($0, $1, keys: keys, order: order) }
         return sortedIndices.map { entries[$0] }
+    }
+
+    private struct SortKeys {
+        let names: [NSString]
+        let exts: [NSString]
+        let ranks: [Int]
+        let isFile: [Bool]
+        let sizes: [Int64]
+        let dates: [Date]
+
+        init(entries: [FileEntry], column: SortColumn) {
+            names = entries.map { $0.name as NSString }
+            exts = column == .ext ? entries.map { $0.displayExtension as NSString } : []
+            ranks = entries.map { EntrySorting.rank($0.kind) }
+            isFile = entries.map { $0.kind == .file }
+            sizes = column == .size ? entries.map { $0.size ?? 0 } : []
+            dates = column == .date ? entries.map { $0.modified ?? .distantPast } : []
+        }
+    }
+
+    private static func compareEntries(_ i: Int, _ j: Int, keys: SortKeys, order: SortOrder) -> Bool {
+        if keys.ranks[i] != keys.ranks[j] { return keys.ranks[i] < keys.ranks[j] }
+        let column = keys.isFile[i] ? order.column : .name
+        var result = compareColumn(column, i: i, j: j, exts: keys.exts, sizes: keys.sizes, dates: keys.dates, names: keys.names)
+        // The (costly) localized name comparison only breaks ties.
+        if result == .orderedSame && column != .name {
+            result = keys.names[i].localizedStandardCompare(keys.names[j] as String)
+        }
+        return order.ascending ? result == .orderedAscending : result == .orderedDescending
     }
 
     private static func compareColumn(

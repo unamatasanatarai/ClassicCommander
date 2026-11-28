@@ -13,25 +13,17 @@ public enum DuplicateFinder {
         public let items: [SearchItem]
     }
 
+    private struct BucketKey: Hashable { let name: String?; let size: Int64? }
+
     public static func groups(of items: [SearchItem], config: DuplicateSearchConfiguration,
                               errors: inout [String], isCancelled: () -> Bool = { false }) -> [Group] {
-        let files = items.filter { !$0.isDirectory }
-        // Name and size form the first key; contents need equal sizes anyway.
-        struct Key: Hashable { let name: String?; let size: Int64? }
-        var buckets: [Key: [SearchItem]] = [:]
-        for f in files {
-            let key = Key(name: config.sameName ? NameMatcher.normalize(f.name).lowercased() : nil,
-                          size: (config.sameSize || config.sameContents) ? f.size : nil)
-            buckets[key, default: []].append(f)
+        var buckets: [BucketKey: [SearchItem]] = [:]
+        for f in items where !f.isDirectory {
+            buckets[bucketKey(for: f, config: config), default: []].append(f)
         }
         var found: [[SearchItem]] = []
-        for (_, bucket) in buckets where bucket.count > 1 {
-            if isCancelled() { break }
-            if config.sameContents {
-                found += contentGroups(bucket, errors: &errors, isCancelled: isCancelled)
-            } else {
-                found.append(bucket)
-            }
+        for (_, bucket) in buckets where bucket.count > 1 && !isCancelled() {
+            found += config.sameContents ? contentGroups(bucket, errors: &errors, isCancelled: isCancelled) : [bucket]
         }
         let sorted = found
             .map { $0.sorted { $0.url.path < $1.url.path } }
@@ -39,31 +31,45 @@ public enum DuplicateFinder {
         return sorted.enumerated().map { Group(id: $0.offset + 1, items: $0.element) }
     }
 
+    private static func bucketKey(for item: SearchItem, config: DuplicateSearchConfiguration) -> BucketKey {
+        BucketKey(name: config.sameName ? NameMatcher.normalize(item.name).lowercased() : nil,
+                  size: (config.sameSize || config.sameContents) ? item.size : nil)
+    }
+
     /// Splits same-size files into groups of identical contents.
     private static func contentGroups(_ files: [SearchItem], errors: inout [String],
                                       isCancelled: () -> Bool) -> [[SearchItem]] {
+        let byHash = groupByHash(files, errors: &errors, isCancelled: isCancelled)
+        var result: [[SearchItem]] = []
+        for (_, candidates) in byHash where candidates.count > 1 {
+            result += splitIdentical(candidates)
+        }
+        return result
+    }
+
+    private static func groupByHash(_ files: [SearchItem], errors: inout [String],
+                                    isCancelled: () -> Bool) -> [Data: [SearchItem]] {
         var byHash: [Data: [SearchItem]] = [:]
         for f in files {
-            if isCancelled() { return [] }
+            if isCancelled() { return [:] }
             guard let digest = hash(f.url) else {
                 errors.append("\(f.url.path): could not be read (skipped for duplicates)")
                 continue
             }
             byHash[digest, default: []].append(f)
         }
+        return byHash
+    }
+
+    private static func splitIdentical(_ candidates: [SearchItem]) -> [[SearchItem]] {
+        // Confirm byte by byte against each group's first member; a hash collision splits off.
         var result: [[SearchItem]] = []
-        for (_, candidates) in byHash where candidates.count > 1 {
-            // Confirm byte by byte against each group's first member; a hash collision splits off.
-            var remaining = candidates
-            while remaining.count > 1 {
-                let first = remaining.removeFirst()
-                var same = [first], other: [SearchItem] = []
-                for c in remaining {
-                    if identical(first.url, c.url) { same.append(c) } else { other.append(c) }
-                }
-                if same.count > 1 { result.append(same) }
-                remaining = other
-            }
+        var remaining = candidates
+        while remaining.count > 1 {
+            let first = remaining.removeFirst()
+            let same = [first] + remaining.filter { identical(first.url, $0.url) }
+            if same.count > 1 { result.append(same) }
+            remaining = remaining.filter { c in !same.contains { $0.url == c.url } }
         }
         return result
     }
@@ -86,16 +92,25 @@ public enum DuplicateFinder {
     static func identical(_ a: URL, _ b: URL) -> Bool {
         guard let ha = try? FileHandle(forReadingFrom: a), let hb = try? FileHandle(forReadingFrom: b) else { return false }
         defer { try? ha.close(); try? hb.close() }
+        return handlesIdentical(ha, hb)
+    }
+
+    private static func handlesIdentical(_ ha: FileHandle, _ hb: FileHandle) -> Bool {
         do {
-            while true {
-                // nil at the end of a file counts as "no more data".
-                let ca = try ha.read(upToCount: 1 << 20) ?? Data()
-                let cb = try hb.read(upToCount: 1 << 20) ?? Data()
-                if ca != cb { return false }
-                if ca.isEmpty { return true }
+            while let same = try compareNextChunk(ha, hb) {
+                if !same { return false }
             }
+            return true
         } catch {
             return false
         }
+    }
+
+    private static func compareNextChunk(_ ha: FileHandle, _ hb: FileHandle) throws -> Bool? {
+        // nil at the end of a file counts as "no more data".
+        let ca = try ha.read(upToCount: 1 << 20) ?? Data()
+        let cb = try hb.read(upToCount: 1 << 20) ?? Data()
+        if ca != cb { return false }
+        return ca.isEmpty ? nil : true
     }
 }

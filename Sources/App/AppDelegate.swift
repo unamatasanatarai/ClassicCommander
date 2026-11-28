@@ -120,55 +120,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         // Select Menu (Total Commander's "Mark" menu): every way to select, copy names, compare folders.
         let selectMenuItem = NSMenuItem()
         mainMenu.addItem(selectMenuItem)
-        let selectMenu = NSMenu(title: "Select")
-        selectMenu.delegate = self
-        let selectGroups: [[CommandAction]] = [
-            [.selectByMask, .deselectByMask, .selectAll, .deselectAll, .invertSelection],
-            [.selectSameExtension, .deselectSameExtension, .restoreSelection, .showMarkedOnly],
-            [.copyNames, .copyPaths, .copyNamesWithDetails, .copyPathsWithDetails],
-            [.compareByDate, .compareBySize],
-        ]
-        for (i, group) in selectGroups.enumerated() {
-            if i > 0 { selectMenu.addItem(.separator()) }
-            for action in group {
-                let item = NSMenuItem(title: Self.menuTitles[action] ?? action.label, action: #selector(netCommand(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = action.rawValue
-                selectMenu.addItem(item)
-            }
-        }
-        selectMenuItem.submenu = selectMenu
+        selectMenuItem.submenu = buildSelectMenu()
 
         // Commands Menu (Total Commander's tools)
         let commandsMenuItem = NSMenuItem()
         mainMenu.addItem(commandsMenuItem)
-        let commandsMenu = NSMenu(title: "Commands")
-        commandsMenu.delegate = self
-        for action in [CommandAction.findFiles, .synchronizeDirs, .multiRename, .changeAttributes, .packFiles, .unpackFiles, nil, .openTerminal, .openInFinder, .swapPanels] {
-            guard let action = action else { commandsMenu.addItem(.separator()); continue }
-            let item = NSMenuItem(title: Self.menuTitles[action] ?? action.label, action: #selector(netCommand(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = action.rawValue
-            commandsMenu.addItem(item)
-        }
-        commandsMenuItem.submenu = commandsMenu
+        commandsMenuItem.submenu = buildCommandsMenu()
 
         // Net Menu (FTP, as in Total Commander)
         let netMenuItem = NSMenuItem()
         mainMenu.addItem(netMenuItem)
-        let netMenu = NSMenu(title: "Net")
-        netMenu.delegate = self
-        for (title, action) in [("FTP Connect…", CommandAction.ftpConnect),
-                                ("FTP New Connection…", .ftpNewConnection),
-                                ("FTP Disconnect", .ftpDisconnect),
-                                ("Queue…", .ftpTransfers)] {
-            let item = NSMenuItem(title: title, action: #selector(netCommand(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = action.rawValue
-            netMenu.addItem(item)
-            if action == .ftpDisconnect { netMenu.addItem(.separator()) }
-        }
-        netMenuItem.submenu = netMenu
+        netMenuItem.submenu = buildNetMenu()
 
         // Debug (UI Gallery) Menu
         let galleryMenuItem = NSMenuItem()
@@ -339,23 +301,26 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
     /// the menu is open (removed in menuDidClose), so a closed menu never takes a key: keys keep
     /// going to the panels, text fields and the shortcut recorder exactly as before.
     public func menuNeedsUpdate(_ menu: NSMenu) {
-        if menu.title == "Window" {
-            for item in menu.items where item.action == #selector(closeWindowOrTab(_:)) {
-                let hasTabs = commanderView?.hasMultipleTabs(in: commanderView?.model.activeSide ?? .left) ?? false
-                item.title = hasTabs ? "Close Tab" : "Close Window"
-            }
-        }
+        if menu.title == "Window" { updateWindowMenu(menu) }
         let keys = commanderView?.settings.keys ?? settings.settings.keys
-        for item in menu.items {
-            guard let raw = item.representedObject as? String, let action = CommandAction(rawValue: raw) else { continue }
-            item.title = Self.menuTitles[action] ?? action.label
-            if let combo = keys.keys(for: action).first, let equivalent = Self.keyEquivalent(for: combo) {
-                item.keyEquivalent = equivalent.key
-                item.keyEquivalentModifierMask = equivalent.modifiers
-            } else {
-                item.keyEquivalent = ""
-                item.keyEquivalentModifierMask = []
-            }
+        for item in menu.items { updateItemKeyEquivalent(item, keys: keys) }
+    }
+
+    private func updateWindowMenu(_ menu: NSMenu) {
+        let hasTabs = commanderView?.hasMultipleTabs(in: commanderView?.model.activeSide ?? .left) ?? false
+        let title = hasTabs ? "Close Tab" : "Close Window"
+        for item in menu.items where item.action == #selector(closeWindowOrTab(_:)) { item.title = title }
+    }
+
+    private func updateItemKeyEquivalent(_ item: NSMenuItem, keys: KeyBindings) {
+        guard let raw = item.representedObject as? String, let action = CommandAction(rawValue: raw) else { return }
+        item.title = Self.menuTitles[action] ?? action.label
+        if let combo = keys.keys(for: action).first, let equivalent = Self.keyEquivalent(for: combo) {
+            item.keyEquivalent = equivalent.key
+            item.keyEquivalentModifierMask = equivalent.modifiers
+        } else {
+            item.keyEquivalent = ""
+            item.keyEquivalentModifierMask = []
         }
     }
 
@@ -378,11 +343,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
 
     /// The menu-shortcut form of a key (character plus modifiers), or nil when a menu cannot show it.
     static func keyEquivalent(for combo: KeyCombo) -> (key: String, modifiers: NSEvent.ModifierFlags)? {
-        var mods: NSEvent.ModifierFlags = []
-        if combo.modifiers.contains(.control) { mods.insert(.control) }
-        if combo.modifiers.contains(.option) { mods.insert(.option) }
-        if combo.modifiers.contains(.shift) { mods.insert(.shift) }
-        if combo.modifiers.contains(.command) { mods.insert(.command) }
+        let mods = modifierFlags(from: combo.modifiers)
         func fn(_ code: Int) -> String { String(Character(UnicodeScalar(code)!)) }
         let special: [UInt16: String] = [
             KeyCode.returnKey: "\r", KeyCode.tab: "\t", KeyCode.space: " ", KeyCode.delete: "\u{8}", KeyCode.escape: "\u{1b}",
@@ -397,6 +358,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         // Letters, digits and punctuation: their (unshifted) character.
         guard let name = KeyCode.names[combo.keyCode], name.count == 1 else { return nil }
         return (name.lowercased(), mods)
+    }
+
+    private static func modifierFlags(from modifiers: KeyCombo.Modifiers) -> NSEvent.ModifierFlags {
+        let pairs: [(KeyCombo.Modifiers, NSEvent.ModifierFlags)] = [
+            (.control, .control), (.option, .option), (.shift, .shift), (.command, .command),
+        ]
+        return pairs.reduce(into: []) { if modifiers.contains($1.0) { $0.insert($1.1) } }
     }
 
     /// Ticks for the active panel's sort, Show filter and the View toggles.
@@ -471,41 +439,57 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         showWindow()
     }
 
-    private func createWindow() -> NSWindow {
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1100, height: 680),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        win.title = AppConfig.appName
-        // Closing only hides it: the app keeps this window and shows it again from the Dock.
-        // (Released on close, the Dock icon would bring back a freed window and crash.)
-        win.isReleasedWhenClosed = false
-        win.minSize = NSSize(width: 640, height: 320)
-        AppWindows.apply(settings.theme)
-        AppWindows.style(win)
-        AppWindows.mainWindow = win
-        win.center()
-        if !windowAutosaveName.isEmpty { win.setFrameAutosaveName(windowAutosaveName) }
+    private func buildSelectMenu() -> NSMenu {
+        let selectMenu = NSMenu(title: "Select")
+        selectMenu.delegate = self
+        let selectGroups: [[CommandAction]] = [
+            [.selectByMask, .deselectByMask, .selectAll, .deselectAll, .invertSelection],
+            [.selectSameExtension, .deselectSameExtension, .restoreSelection, .showMarkedOnly],
+            [.copyNames, .copyPaths, .copyNamesWithDetails, .copyPathsWithDetails],
+            [.compareByDate, .compareBySize],
+        ]
+        for (i, group) in selectGroups.enumerated() {
+            if i > 0 { selectMenu.addItem(.separator()) }
+            for action in group {
+                let item = NSMenuItem(title: Self.menuTitles[action] ?? action.label, action: #selector(netCommand(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = action.rawValue
+                selectMenu.addItem(item)
+            }
+        }
+        return selectMenu
+    }
 
-        // Titlebar button accessory for instant UI debugging
-        let debugAccessory = NSTitlebarAccessoryViewController()
-        debugAccessory.layoutAttribute = .trailing
-        let accessoryStack = NSStackView()
-        accessoryStack.orientation = .horizontal
-        accessoryStack.spacing = 6
-        let openAllBtn = NSButton(title: "🐞 Open All UI Debug Windows", target: UIGallery.shared, action: #selector(UIGallery.openAllWindows))
-        openAllBtn.bezelStyle = .texturedRounded
-        openAllBtn.controlSize = .small
-        let closeAllBtn = NSButton(title: "✕ Close All", target: UIGallery.shared, action: #selector(UIGallery.closeAllGalleryWindows))
-        closeAllBtn.bezelStyle = .texturedRounded
-        closeAllBtn.controlSize = .small
-        accessoryStack.addView(openAllBtn, in: .trailing)
-        accessoryStack.addView(closeAllBtn, in: .trailing)
-        debugAccessory.view = accessoryStack
-        win.addTitlebarAccessoryViewController(debugAccessory)
+    private func buildCommandsMenu() -> NSMenu {
+        let commandsMenu = NSMenu(title: "Commands")
+        commandsMenu.delegate = self
+        for action in [CommandAction.findFiles, .synchronizeDirs, .multiRename, .changeAttributes, .packFiles, .unpackFiles, nil, .openTerminal, .openInFinder, .swapPanels] {
+            guard let action = action else { commandsMenu.addItem(.separator()); continue }
+            let item = NSMenuItem(title: Self.menuTitles[action] ?? action.label, action: #selector(netCommand(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = action.rawValue
+            commandsMenu.addItem(item)
+        }
+        return commandsMenu
+    }
 
+    private func buildNetMenu() -> NSMenu {
+        let netMenu = NSMenu(title: "Net")
+        netMenu.delegate = self
+        for (title, action) in [("FTP Connect…", CommandAction.ftpConnect),
+                                ("FTP New Connection…", .ftpNewConnection),
+                                ("FTP Disconnect", .ftpDisconnect),
+                                ("Queue…", .ftpTransfers)] {
+            let item = NSMenuItem(title: title, action: #selector(netCommand(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = action.rawValue
+            netMenu.addItem(item)
+            if action == .ftpDisconnect { netMenu.addItem(.separator()) }
+        }
+        return netMenu
+    }
+
+    private func makeCommanderView() -> CommanderView {
         let home = FileManager.default.homeDirectoryForCurrentUser
         // Both panels open where they were when the app was last used.
         let model = CommanderModel(
@@ -529,6 +513,49 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         commander.onTabsChange = { [weak self] side, tabs in self?.settings.saveTabs(tabs, side: side) }
         commander.splitRatio = settings.splitRatio
         commander.onSplitChange = { [weak self] ratio in self?.settings.splitRatio = ratio }
+        return commander
+    }
+
+    private func makeDebugTitlebarAccessory() -> NSTitlebarAccessoryViewController {
+        let debugAccessory = NSTitlebarAccessoryViewController()
+        debugAccessory.layoutAttribute = .trailing
+        let accessoryStack = NSStackView()
+        accessoryStack.orientation = .horizontal
+        accessoryStack.spacing = 6
+        let openAllBtn = NSButton(title: "🐞 Open All UI Debug Windows", target: UIGallery.shared, action: #selector(UIGallery.openAllWindows))
+        openAllBtn.bezelStyle = .texturedRounded
+        openAllBtn.controlSize = .small
+        let closeAllBtn = NSButton(title: "✕ Close All", target: UIGallery.shared, action: #selector(UIGallery.closeAllGalleryWindows))
+        closeAllBtn.bezelStyle = .texturedRounded
+        closeAllBtn.controlSize = .small
+        accessoryStack.addView(openAllBtn, in: .trailing)
+        accessoryStack.addView(closeAllBtn, in: .trailing)
+        debugAccessory.view = accessoryStack
+        return debugAccessory
+    }
+
+    private func createWindow() -> NSWindow {
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1100, height: 680),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        win.title = AppConfig.appName
+        // Closing only hides it: the app keeps this window and shows it again from the Dock.
+        // (Released on close, the Dock icon would bring back a freed window and crash.)
+        win.isReleasedWhenClosed = false
+        win.minSize = NSSize(width: 640, height: 320)
+        AppWindows.apply(settings.theme)
+        AppWindows.style(win)
+        AppWindows.mainWindow = win
+        win.center()
+        if !windowAutosaveName.isEmpty { win.setFrameAutosaveName(windowAutosaveName) }
+
+        // Titlebar button accessory for instant UI debugging
+        win.addTitlebarAccessoryViewController(makeDebugTitlebarAccessory())
+
+        let commander = makeCommanderView()
         self.commanderView = commander
 
         win.contentView = commander

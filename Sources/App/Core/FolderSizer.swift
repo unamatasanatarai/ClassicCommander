@@ -6,23 +6,35 @@ import Foundation
 public enum FolderSizer {
     public static func totalSize(of folder: URL, isCancelled: () -> Bool = { false }) -> Int64 {
         let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey]
-        // A linked folder (e.g. ~/bin) is measured through its target; links inside are not followed.
-        guard let walker = FileManager.default.enumerator(
-            at: FileSystemLister.realPath(of: folder),
-            includingPropertiesForKeys: keys,
-            options: [],
-            errorHandler: { _, _ in true }
-        ) else { return 0 }
+        guard let walker = makeWalker(for: folder, keys: keys) else { return 0 }
+        return accumulateSizes(from: walker, keys: Set(keys), isCancelled: isCancelled)
+    }
 
-        let keySet = Set(keys)   // built once, not per file
+    private static func accumulateSizes(
+        from walker: FileManager.DirectoryEnumerator, keys: Set<URLResourceKey>, isCancelled: () -> Bool
+    ) -> Int64 {
         var total: Int64 = 0
         var count = 0
         for case let url as URL in walker {
             count += 1
             if count % 512 == 0 && isCancelled() { break }
-            guard let v = try? url.resourceValues(forKeys: keySet), v.isRegularFile == true else { continue }
-            total = total.addingSaturated(Int64(v.fileSize ?? 0))
+            total = total.addingSaturated(regularFileSize(at: url, keys: keys))
         }
         return total
+    }
+
+    private static func makeWalker(for folder: URL, keys: [URLResourceKey]) -> FileManager.DirectoryEnumerator? {
+        // A linked folder (e.g. ~/bin) is measured through its target; links inside are not followed.
+        FileManager.default.enumerator(
+            at: FileSystemLister.realPath(of: folder),
+            includingPropertiesForKeys: keys,
+            options: [],
+            errorHandler: { _, _ in true }
+        )
+    }
+
+    private static func regularFileSize(at url: URL, keys: Set<URLResourceKey>) -> Int64 {
+        guard let v = try? url.resourceValues(forKeys: keys), v.isRegularFile == true else { return 0 }
+        return Int64(v.fileSize ?? 0)
     }
 }
