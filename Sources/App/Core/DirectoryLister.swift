@@ -88,13 +88,7 @@ public enum EntrySorting {
     /// sort reverses each group, as Total Commander does.
     public static func sorted(_ entries: [FileEntry], by order: SortOrder = SortOrder()) -> [FileEntry] {
         if order.column == .unsorted {
-            // Keep the listing order within each group; "reverse" reverses it.
-            let indexed = entries.enumerated().sorted { x, y in
-                let rx = rank(x.element.kind), ry = rank(y.element.kind)
-                if rx != ry { return rx < ry }
-                return order.ascending ? x.offset < y.offset : x.offset > y.offset
-            }
-            return indexed.map(\.element)
+            return sortedUnsorted(entries, ascending: order.ascending)
         }
         // Sort indices over precomputed keys: names bridged to NSString once (not on every comparison),
         // extensions computed once, and the entries themselves moved only once at the end.
@@ -108,18 +102,33 @@ public enum EntrySorting {
         let sortedIndices = entries.indices.sorted { i, j in
             if ranks[i] != ranks[j] { return ranks[i] < ranks[j] }
             let column = isFile[i] ? order.column : .name
-            var result: ComparisonResult
-            switch column {
-            case .name, .unsorted: result = byName(i, j)
-            case .ext: result = exts[i].localizedStandardCompare(exts[j] as String)
-            case .size: result = compareValues(sizes[i], sizes[j])
-            case .date: result = compareValues(dates[i], dates[j])
-            }
+            var result = compareColumn(column, i: i, j: j, exts: exts, sizes: sizes, dates: dates, names: names)
             // The (costly) localized name comparison only breaks ties.
             if result == .orderedSame && column != .name && column != .unsorted { result = byName(i, j) }
             return order.ascending ? result == .orderedAscending : result == .orderedDescending
         }
         return sortedIndices.map { entries[$0] }
+    }
+
+    private static func compareColumn(
+        _ column: SortColumn, i: Int, j: Int,
+        exts: [NSString], sizes: [Int64], dates: [Date], names: [NSString]
+    ) -> ComparisonResult {
+        switch column {
+        case .name, .unsorted: return names[i].localizedStandardCompare(names[j] as String)
+        case .ext: return exts[i].localizedStandardCompare(exts[j] as String)
+        case .size: return compareValues(sizes[i], sizes[j])
+        case .date: return compareValues(dates[i], dates[j])
+        }
+    }
+
+    private static func sortedUnsorted(_ entries: [FileEntry], ascending: Bool) -> [FileEntry] {
+        let indexed = entries.enumerated().sorted { x, y in
+            let rx = rank(x.element.kind), ry = rank(y.element.kind)
+            if rx != ry { return rx < ry }
+            return ascending ? x.offset < y.offset : x.offset > y.offset
+        }
+        return indexed.map(\.element)
     }
 
     private static func compareValues<T: Comparable>(_ a: T, _ b: T) -> ComparisonResult {

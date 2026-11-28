@@ -77,6 +77,9 @@ struct TestMain {
         print("\n--- Coverage Suite ---")
         CoverageTests.run(testRunner: runTest)
 
+        print("\n--- ZipArchive Suite ---")
+        ZipArchiveTests.run(testRunner: runTest)
+
         let totalElapsedMs = (CFAbsoluteTimeGetCurrent() - totalStart) * 1000.0
 
         print("\n--------------------------------------------------")

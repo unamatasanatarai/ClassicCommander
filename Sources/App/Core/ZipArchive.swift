@@ -122,18 +122,18 @@ public enum ZipArchive {
     }
 
     /// Extracts `items` (files and/or directories) from `archive` into `targetDirectory`,
-    /// asking `resolveConflict` before overwriting any existing destination file.
-    public static func extractItems(
-        _ items: [FileEntry],
-        to targetDirectory: URL,
-        resolveConflict: ((TransferConflict) -> ConflictDecision)? = nil
-    ) throws {
-        guard !items.isEmpty else { return }
+    private struct ExtractConflictResolver {
         var replaceAll = false
         var skipAll = false
         var replaceAllOlder = false
+        let resolveConflict: ((TransferConflict) -> ConflictDecision)?
 
-        func shouldWrite(sourceURL: URL, sourceSize: Int64, sourceDate: Date?, dest: inout URL) -> (write: Bool, cancelled: Bool) {
+        mutating func shouldWrite(
+            sourceURL: URL,
+            sourceSize: Int64,
+            sourceDate: Date?,
+            dest: inout URL
+        ) -> (write: Bool, cancelled: Bool) {
             guard FileManager.default.fileExists(atPath: dest.path) else { return (true, false) }
             if replaceAll { return (true, false) }
             if skipAll { return (false, false) }
@@ -141,8 +141,7 @@ public enum ZipArchive {
             let targetSize = (attrs?[.size] as? NSNumber)?.int64Value
             let targetDate = attrs?[.modificationDate] as? Date
             if replaceAllOlder {
-                let isOlder = targetDate.map { ($0) < (sourceDate ?? .distantPast) } ?? true
-                return (isOlder, false)
+                return (isTargetOlder(targetDate, sourceDate: sourceDate), false)
             }
             guard let resolve = resolveConflict else { return (true, false) }
             let conflict = TransferConflict(
@@ -153,7 +152,16 @@ public enum ZipArchive {
                 targetSize: targetSize,
                 targetDate: targetDate
             )
-            switch resolve(conflict) {
+            return applyDecision(resolve(conflict), targetDate: targetDate, sourceDate: sourceDate, dest: &dest)
+        }
+
+        private mutating func applyDecision(
+            _ decision: ConflictDecision,
+            targetDate: Date?,
+            sourceDate: Date?,
+            dest: inout URL
+        ) -> (write: Bool, cancelled: Bool) {
+            switch decision {
             case .replace:
                 return (true, false)
             case .replaceAll:
@@ -166,8 +174,7 @@ public enum ZipArchive {
                 return (false, false)
             case .replaceAllOlder:
                 replaceAllOlder = true
-                let isOlder = targetDate.map { ($0) < (sourceDate ?? .distantPast) } ?? true
-                return (isOlder, false)
+                return (isTargetOlder(targetDate, sourceDate: sourceDate), false)
             case .rename(let newName):
                 dest = dest.deletingLastPathComponent().appendingPathComponent(newName, isDirectory: false)
                 return (true, false)
@@ -175,6 +182,50 @@ public enum ZipArchive {
                 return (false, true)
             }
         }
+
+        private func isTargetOlder(_ targetDate: Date?, sourceDate: Date?) -> Bool {
+            targetDate.map { $0 < (sourceDate ?? .distantPast) } ?? true
+        }
+    }
+
+    private static func extractDirectory(
+        archive: URL,
+        innerPath: String,
+        name: String,
+        allEntries: [Entry],
+        to targetDirectory: URL,
+        resolver: inout ExtractConflictResolver
+    ) throws -> Bool {
+        let dirPrefix = innerPath + "/"
+        let destRoot = targetDirectory.appendingPathComponent(name, isDirectory: true)
+        try FileManager.default.createDirectory(at: destRoot, withIntermediateDirectories: true)
+        for sub in allEntries where sub.path.hasPrefix(dirPrefix) {
+            let rel = String(sub.path.dropFirst(dirPrefix.count))
+            guard !rel.isEmpty else { continue }
+            var dest = destRoot.appendingPathComponent(rel, isDirectory: sub.isDirectory)
+            if sub.isDirectory {
+                try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+                continue
+            }
+            let srcURL = archive.appendingPathComponent(sub.path, isDirectory: false)
+            let decision = resolver.shouldWrite(sourceURL: srcURL, sourceSize: sub.size, sourceDate: sub.modified, dest: &dest)
+            if decision.cancelled { return true }
+            if decision.write {
+                try FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try extractFile(archive: archive, innerPath: sub.path, to: dest)
+            }
+        }
+        return false
+    }
+
+    /// asking `resolveConflict` before overwriting any existing destination file.
+    public static func extractItems(
+        _ items: [FileEntry],
+        to targetDirectory: URL,
+        resolveConflict: ((TransferConflict) -> ConflictDecision)? = nil
+    ) throws {
+        guard !items.isEmpty else { return }
+        var resolver = ExtractConflictResolver(resolveConflict: resolveConflict)
 
         let allByArchive = Dictionary(grouping: items, by: { split($0.url)?.archive })
         for (archiveOpt, group) in allByArchive {
@@ -184,31 +235,26 @@ public enum ZipArchive {
                 guard let (_, innerPath) = split(item.url), !innerPath.isEmpty else { continue }
                 if item.kind == .file {
                     var dest = targetDirectory.appendingPathComponent(item.name, isDirectory: false)
-                    let decision = shouldWrite(sourceURL: item.url, sourceSize: item.size ?? 0, sourceDate: item.modified, dest: &dest)
+                    let decision = resolver.shouldWrite(
+                        sourceURL: item.url,
+                        sourceSize: item.size ?? 0,
+                        sourceDate: item.modified,
+                        dest: &dest
+                    )
                     if decision.cancelled { return }
                     if decision.write {
                         try extractFile(archive: archive, innerPath: innerPath, to: dest)
                     }
                 } else if item.kind == .directory {
-                    let dirPrefix = innerPath + "/"
-                    let destRoot = targetDirectory.appendingPathComponent(item.name, isDirectory: true)
-                    try FileManager.default.createDirectory(at: destRoot, withIntermediateDirectories: true)
-                    for sub in allEntries where sub.path.hasPrefix(dirPrefix) {
-                        let rel = String(sub.path.dropFirst(dirPrefix.count))
-                        guard !rel.isEmpty else { continue }
-                        var dest = destRoot.appendingPathComponent(rel, isDirectory: sub.isDirectory)
-                        if sub.isDirectory {
-                            try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
-                        } else {
-                            let srcURL = archive.appendingPathComponent(sub.path, isDirectory: false)
-                            let decision = shouldWrite(sourceURL: srcURL, sourceSize: sub.size, sourceDate: sub.modified, dest: &dest)
-                            if decision.cancelled { return }
-                            if decision.write {
-                                try FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-                                try extractFile(archive: archive, innerPath: sub.path, to: dest)
-                            }
-                        }
-                    }
+                    let cancelled = try extractDirectory(
+                        archive: archive,
+                        innerPath: innerPath,
+                        name: item.name,
+                        allEntries: allEntries,
+                        to: targetDirectory,
+                        resolver: &resolver
+                    )
+                    if cancelled { return }
                 }
             }
         }
@@ -328,37 +374,40 @@ public enum ZipArchive {
     }
 
     static func parseZipInfo(_ output: String) -> [Entry] {
-        var entries: [Entry] = []
-        for rawLine in output.split(separator: "\n", omittingEmptySubsequences: true) {
-            let line = String(rawLine)
-            // Entry lines start with permissions (e.g., "-rw-r--r--", "drwxrwxr-x", "?rw-------")
-            guard let first = line.first, first == "-" || first == "d" || first == "?" || first == "l" else {
-                continue
-            }
-            // Split into at most 8 whitespace-separated fields; the 8th is the rest of the line (the path).
-            var fields: [Substring] = []
-            var idx = line.startIndex
-            while fields.count < 7 && idx < line.endIndex {
-                while idx < line.endIndex && line[idx].isWhitespace { idx = line.index(after: idx) }
-                guard idx < line.endIndex else { break }
-                let start = idx
-                while idx < line.endIndex && !line[idx].isWhitespace { idx = line.index(after: idx) }
-                fields.append(line[start..<idx])
-            }
-            guard fields.count == 7, idx < line.endIndex else { continue }
-            // Skip the single space before the filename.
-            if line[idx].isWhitespace { idx = line.index(after: idx) }
-            guard idx < line.endIndex else { continue }
-            var path = String(line[idx...])
-            let isDir = first == "d" || path.hasSuffix("/")
-            if path.hasSuffix("/") { path.removeLast() }
-            guard !path.isEmpty else { continue }
+        output.split(separator: "\n", omittingEmptySubsequences: true)
+            .compactMap { parseZipInfoLine(String($0)) }
+    }
 
-            let size = Int64(fields[3]) ?? 0
-            let modified = dateFormatter.date(from: String(fields[6])) ?? Date(timeIntervalSince1970: 0)
-            let perms = isDir ? 0o755 : 0o644
-            entries.append(Entry(path: path, isDirectory: isDir, size: size, modified: modified, permissions: perms))
+    private static func parseZipInfoLine(_ line: String) -> Entry? {
+        // Entry lines start with permissions (e.g., "-rw-r--r--", "drwxrwxr-x", "?rw-------")
+        guard let first = line.first, ["-", "d", "?", "l"].contains(first) else {
+            return nil
         }
-        return entries
+        guard let (fields, pathStart) = splitZipInfoFields(line) else { return nil }
+
+        var path = String(line[pathStart...])
+        let isDir = first == "d" || path.hasSuffix("/")
+        if path.hasSuffix("/") { path.removeLast() }
+        guard !path.isEmpty else { return nil }
+
+        let size = Int64(fields[3]) ?? 0
+        let modified = dateFormatter.date(from: String(fields[6])) ?? Date(timeIntervalSince1970: 0)
+        return Entry(path: path, isDirectory: isDir, size: size, modified: modified, permissions: isDir ? 0o755 : 0o644)
+    }
+
+    private static func splitZipInfoFields(_ line: String) -> ([Substring], String.Index)? {
+        var fields: [Substring] = []
+        var idx = line.startIndex
+        while fields.count < 7 && idx < line.endIndex {
+            idx = line[idx...].firstIndex(where: { !$0.isWhitespace }) ?? line.endIndex
+            guard idx < line.endIndex else { break }
+            let end = line[idx...].firstIndex(where: { $0.isWhitespace }) ?? line.endIndex
+            fields.append(line[idx..<end])
+            idx = end
+        }
+        guard fields.count == 7, idx < line.endIndex else { return nil }
+        if line[idx].isWhitespace { idx = line.index(after: idx) }
+        guard idx < line.endIndex else { return nil }
+        return (fields, idx)
     }
 }

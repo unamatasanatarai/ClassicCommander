@@ -158,6 +158,33 @@ public enum FTPTests {
             try expect(err(67) == .authentication && err(6) == .hostNotFound && err(7) == .refused && err(28) == .timeout, "errors")
             try expect(err(64) == .tlsUnavailable && err(60) == .certificateUntrusted && err(90) == .pinnedKeyChanged, "TLS errors")
             try expect(err(25, "curl: (25) Failed FTP upload: 552") == .quotaExceeded && err(23) == .localDiskFull && err(56) == .connectionLost, "transfer errors")
+            try expect(err(35, "curl: tls bad") == .tlsFailed("tls bad") && err(80, "ssl") == .tlsFailed("ssl"), "tlsFailed")
+            try expect(err(9, "curl: (9) 550 permission") == .permissionDenied("") && err(78, "curl: (78) 550 missing") == .notFound(""), "9/78 perm vs notFound")
+            try expect(err(25, "curl: (25) 550 denied") == .permissionDenied("") && err(21, "curl: (21) 450 busy") == .server("(21) 450 busy"), "25/21 denied/450")
+            try expect(err(19, "") == .server("the server refused the command"), "19 empty")
+            try expect(err(13) == .passiveFailed && err(30) == .activeFailed, "passive/active")
+            try expect(err(99, "") == .server("curl exit code 99") && err(99, "boom") == .server("boom"), "default curl error")
+
+            let allErrors: [FTPError] = [
+                .authentication, .hostNotFound, .refused, .timeout, .tlsUnavailable,
+                .tlsFailed("handshake"), .certificateUntrusted, .pinnedKeyChanged,
+                .hostKeyUnknown, .hostKeyChanged, .keyFile("bad key"),
+                .permissionDenied(""), .permissionDenied("chmod"),
+                .notFound(""), .notFound("/x"),
+                .quotaExceeded, .localDiskFull, .connectionLost,
+                .passiveFailed, .activeFailed, .cancelled,
+                .verificationFailed("hash"), .invalid("bad url"), .server("500")
+            ]
+            for e in allErrors {
+                try expect(!e.message.isEmpty, "Empty message for \(e)")
+            }
+
+            // FTPListingParser.parseDOS edge cases
+            try expect(FTPListingParser.parseDOS("11-21-2026  14:30  8192 file.txt")?.size == 8192, "24-hour DOS time")
+            try expect(FTPListingParser.parseDOS("11-21-98  12:00PM  <DIR> old")?.isDirectory == true, "1998 2-digit year")
+            try expect(FTPListingParser.parseDOS("short") == nil, "short DOS line")
+            try expect(FTPListingParser.parseDOS("bad-date 12:00PM <DIR> x") == nil, "bad DOS date")
+            try expect(FTPListingParser.parseDOS("11-21-26 badtime <DIR> x") == nil, "bad DOS time")
         }
 
         testRunner("FTP against a local server: connect, list (MLSD and LIST fallback), wrong password, TLS refused") {

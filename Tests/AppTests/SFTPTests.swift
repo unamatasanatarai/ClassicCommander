@@ -207,6 +207,11 @@ public enum SFTPTests {
             try expect(err(1, "remote open(\"/x\"): Permission denied") == .permissionDenied("/x") || err(1, "remote open(\"/x\"): Permission denied") == .permissionDenied(""), "permission")
             try expect(err(1, "File \"/x\" not found.") == .notFound(""), "missing file")
             if case .keyFile = err(255, "Load key \"/k\": invalid format") {} else { throw Fail(description: "bad key file") }
+            try expect(err(255, "ssh: connect to host h: Operation timed out") == .timeout, "timeout")
+            try expect(err(1, "Couldn't open local file \"/x\": Permission denied") == .localDiskFull, "local disk full")
+            try expect(err(1, "No space left on device") == .quotaExceeded, "quota exceeded")
+            try expect(err(255, "Write failed: Broken pipe") == .connectionLost && err(255, "") == .connectionLost, "connection lost")
+            try expect(err(2, "") == .server("sftp exit code 2") && err(2, "weird error") == .server("weird error"), "fallback server error")
         }
 
         let server: TestSSHServer

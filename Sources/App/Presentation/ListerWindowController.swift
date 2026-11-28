@@ -261,8 +261,15 @@ public final class ListerWindowController: NSWindowController, NSWindowDelegate,
         guard mods.isEmpty else { return false }
         if event.characters == "G" { scrollToBottom(); return true }
         guard let ch = event.charactersIgnoringModifiers?.lowercased() else { return false }
+        if let raw = Int(ch), (1...4).contains(raw), let targetMode = ListerMode(rawValue: raw) {
+            show(mode: targetMode)
+            return true
+        }
+        return handleLetterKey(ch)
+    }
+
+    private func handleLetterKey(_ ch: String) -> Bool {
         switch ch {
-        case "1", "2", "3", "4": show(mode: ListerMode(rawValue: Int(ch)!)!)
         case "n": step(1)
         case "p": step(-1)
         case "w": if mode == .text { setWrap(!wrap) }
@@ -284,24 +291,23 @@ public final class ListerWindowController: NSWindowController, NSWindowDelegate,
     }
 
     private func scrollHalfPage(down: Bool) {
-        guard let scroll = activeScrollView else { return }
-        let clip = scroll.contentView
-        let half = clip.bounds.height / 2
-        let docHeight = scroll.documentView?.bounds.height ?? 0
-        let maxY = max(0, docHeight - clip.bounds.height)
-        var origin = clip.bounds.origin
-        origin.y = down ? min(maxY, origin.y + half) : max(0, origin.y - half)
-        clip.scroll(to: origin)
-        scroll.reflectScrolledClipView(clip)
+        scrollActiveView { currentY, maxY, height in
+            let half = height / 2
+            return down ? min(maxY, currentY + half) : max(0, currentY - half)
+        }
     }
 
     private func scrollToBottom() {
+        scrollActiveView { _, maxY, _ in maxY }
+    }
+
+    private func scrollActiveView(_ targetY: (CGFloat, CGFloat, CGFloat) -> CGFloat) {
         guard let scroll = activeScrollView else { return }
         let clip = scroll.contentView
         let docHeight = scroll.documentView?.bounds.height ?? 0
         let maxY = max(0, docHeight - clip.bounds.height)
         var origin = clip.bounds.origin
-        origin.y = maxY
+        origin.y = targetY(origin.y, maxY, clip.bounds.height)
         clip.scroll(to: origin)
         scroll.reflectScrolledClipView(clip)
     }

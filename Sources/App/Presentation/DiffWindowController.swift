@@ -246,28 +246,29 @@ final class DiffWindowController: NSWindowController, NSWindowDelegate {
     private func render(_ d: TextDiff) {
         let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         let numberWidth = String(max(d.rows.compactMap(\.leftNumber).max() ?? 0, d.rows.compactMap(\.rightNumber).max() ?? 0)).count
-        func side(_ left: Bool) -> NSAttributedString {
-            let out = NSMutableAttributedString()
-            for row in d.rows {
-                let text = (left ? row.left : row.right) ?? ""
-                let number = (left ? row.leftNumber : row.rightNumber).map { String($0) } ?? ""
-                let pad = String(repeating: " ", count: max(0, numberWidth - number.count))
-                var background: NSColor?
-                switch row.kind {
-                case .same: background = nil
-                case .changed: background = NSColor.systemYellow.withAlphaComponent(0.20)
-                case .removed: background = left ? NSColor.systemRed.withAlphaComponent(0.20) : NSColor.quaternaryLabelColor.withAlphaComponent(0.06)
-                case .added: background = left ? NSColor.quaternaryLabelColor.withAlphaComponent(0.06) : NSColor.systemGreen.withAlphaComponent(0.22)
-                }
-                var attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.textColor]
-                if let bg = background { attrs[.backgroundColor] = bg }
-                out.append(NSAttributedString(string: pad + number + " ", attributes: [.font: font, .foregroundColor: NSColor.tertiaryLabelColor]))
-                out.append(NSAttributedString(string: text.replacingOccurrences(of: "\t", with: "    ") + "\n", attributes: attrs))
+        leftText.textStorage?.setAttributedString(renderSide(d, left: true, numberWidth: numberWidth, font: font))
+        rightText.textStorage?.setAttributedString(renderSide(d, left: false, numberWidth: numberWidth, font: font))
+    }
+
+    private func renderSide(_ d: TextDiff, left: Bool, numberWidth: Int, font: NSFont) -> NSAttributedString {
+        let out = NSMutableAttributedString()
+        for row in d.rows {
+            let text = (left ? row.left : row.right) ?? ""
+            let number = (left ? row.leftNumber : row.rightNumber).map { String($0) } ?? ""
+            let pad = String(repeating: " ", count: max(0, numberWidth - number.count))
+            var background: NSColor?
+            switch row.kind {
+            case .same: background = nil
+            case .changed: background = NSColor.systemYellow.withAlphaComponent(0.20)
+            case .removed: background = left ? NSColor.systemRed.withAlphaComponent(0.20) : NSColor.quaternaryLabelColor.withAlphaComponent(0.06)
+            case .added: background = left ? NSColor.quaternaryLabelColor.withAlphaComponent(0.06) : NSColor.systemGreen.withAlphaComponent(0.22)
             }
-            return out
+            var attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.textColor]
+            if let bg = background { attrs[.backgroundColor] = bg }
+            out.append(NSAttributedString(string: pad + number + " ", attributes: [.font: font, .foregroundColor: NSColor.tertiaryLabelColor]))
+            out.append(NSAttributedString(string: text.replacingOccurrences(of: "\t", with: "    ") + "\n", attributes: attrs))
         }
-        leftText.textStorage?.setAttributedString(side(true))
-        rightText.textStorage?.setAttributedString(side(false))
+        return out
     }
 
     // MARK: Navigation

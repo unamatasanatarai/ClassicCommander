@@ -125,35 +125,57 @@ public final class FTPController {
             panel.busyText = nil
             switch result {
             case .success(let listing):
-                let session = RemoteSession(client: client)
-                session.store(listing, for: client.startPath)
-                if !panel.model.isRemote { self.localBefore[side] = panel.model.directory }
-                else if let old = self.session(for: panel) { self.sessions[old.id] = nil; old.client.close() }
-                self.sessions[session.id] = session
-                panel.model.switchSource(RemoteLister(session: session), to: session.url(for: client.startPath), visibleRows: panel.visibleRows)
-                panel.remote = (session.statusLabel, session.addressLabel, !profile.isEncrypted)
-                if !profile.localDirectory.isEmpty {
-                    let other = commander.view(for: side.other)
-                    let url = URL(fileURLWithPath: (profile.localDirectory as NSString).expandingTildeInPath)
-                    if !other.model.isRemote { other.model.go(to: url, visibleRows: other.visibleRows); other.needsDisplay = true }
-                }
-                commander.activate(side)
-                commander.updateFunctionBar()
-                panel.needsDisplay = true
-                completion?(.success(()))
+                self.handleConnectSuccess(listing: listing, client: client, profile: profile, side: side, panel: panel, commander: commander, completion: completion)
             case .failure(let error):
-                let ftpError = error as? FTPError ?? .server(error.localizedDescription)
-                if ftpError == .certificateUntrusted, profile.pinnedPublicKey == nil {
-                    self.offerTrust(profile, password: password, side: side, completion: completion)
-                    return
-                }
-                if ftpError == .hostKeyUnknown {
-                    self.offerHostKeyTrust(profile, password: password, side: side, completion: completion)
-                    return
-                }
-                completion?(.failure(ftpError))
+                self.handleConnectFailure(error: error, profile: profile, password: password, side: side, completion: completion)
             }
         }
+    }
+
+    private func handleConnectSuccess(
+        listing: [RemoteEntry],
+        client: RemoteClient,
+        profile: FTPProfile,
+        side: CommanderModel.Side,
+        panel: PanelView,
+        commander: CommanderView,
+        completion: ((Result<Void, FTPError>) -> Void)?
+    ) {
+        let session = RemoteSession(client: client)
+        session.store(listing, for: client.startPath)
+        if !panel.model.isRemote { localBefore[side] = panel.model.directory }
+        else if let old = self.session(for: panel) { sessions[old.id] = nil; old.client.close() }
+        sessions[session.id] = session
+        panel.model.switchSource(RemoteLister(session: session), to: session.url(for: client.startPath), visibleRows: panel.visibleRows)
+        panel.remote = (session.statusLabel, session.addressLabel, !profile.isEncrypted)
+        if !profile.localDirectory.isEmpty {
+            let other = commander.view(for: side.other)
+            let url = URL(fileURLWithPath: (profile.localDirectory as NSString).expandingTildeInPath)
+            if !other.model.isRemote { other.model.go(to: url, visibleRows: other.visibleRows); other.needsDisplay = true }
+        }
+        commander.activate(side)
+        commander.updateFunctionBar()
+        panel.needsDisplay = true
+        completion?(.success(()))
+    }
+
+    private func handleConnectFailure(
+        error: Error,
+        profile: FTPProfile,
+        password: String?,
+        side: CommanderModel.Side,
+        completion: ((Result<Void, FTPError>) -> Void)?
+    ) {
+        let ftpError = error as? FTPError ?? .server(error.localizedDescription)
+        if ftpError == .certificateUntrusted, profile.pinnedPublicKey == nil {
+            offerTrust(profile, password: password, side: side, completion: completion)
+            return
+        }
+        if ftpError == .hostKeyUnknown {
+            offerHostKeyTrust(profile, password: password, side: side, completion: completion)
+            return
+        }
+        completion?(.failure(ftpError))
     }
 
     /// Shows the certificate and, if the user trusts it, pins its key in the profile and retries.
@@ -240,28 +262,7 @@ public final class FTPController {
         switch action {
         case .open, .enterFolder:
             guard let entry = model.currentEntry else { return true }
-            switch entry.kind {
-            case .parent:
-                return navigate(panel, .parentFolder)
-            case .directory:
-                load(session, RemoteSession.path(of: entry.url), in: panel) { model.openCurrent(visibleRows: rows) }
-            case .file where entry.isSymlink:
-                // A link: a link to a folder is entered, a link to a file is opened like a file.
-                let path = RemoteSession.path(of: entry.url)
-                panel.busyText = "Reading \(path)…"
-                background({ try session.fetch(path) }) { [weak self] result in
-                    panel.busyText = nil
-                    switch result {
-                    case .success:
-                        model.go(to: session.url(for: path), visibleRows: rows)
-                        panel.needsDisplay = true
-                    case .failure:
-                        if action == .open { self?.openRemoteFile(entry, session: session) } else { NSSound.beep() }
-                    }
-                }
-            case .file:
-                if action == .open { openRemoteFile(entry, session: session) }
-            }
+            return navigateEntry(entry, in: panel, session: session, action: action)
         case .parentFolder:
             guard current != "/" else { return true }
             load(session, (current as NSString).deletingLastPathComponent, in: panel) { model.goUp(visibleRows: rows) }
@@ -277,6 +278,34 @@ public final class FTPController {
             model.goDownloads(visibleRows: rows)
         default:
             return false
+        }
+        return true
+    }
+
+    private func navigateEntry(_ entry: FileEntry, in panel: PanelView, session: RemoteSession, action: CommandAction) -> Bool {
+        let model = panel.model
+        let rows = panel.visibleRows
+        switch entry.kind {
+        case .parent:
+            return navigate(panel, .parentFolder)
+        case .directory:
+            load(session, RemoteSession.path(of: entry.url), in: panel) { model.openCurrent(visibleRows: rows) }
+        case .file where entry.isSymlink:
+            // A link: a link to a folder is entered, a link to a file is opened like a file.
+            let path = RemoteSession.path(of: entry.url)
+            panel.busyText = "Reading \(path)…"
+            background({ try session.fetch(path) }) { [weak self] result in
+                panel.busyText = nil
+                switch result {
+                case .success:
+                    model.go(to: session.url(for: path), visibleRows: rows)
+                    panel.needsDisplay = true
+                case .failure:
+                    if action == .open { self?.openRemoteFile(entry, session: session) } else { NSSound.beep() }
+                }
+            }
+        case .file:
+            if action == .open { openRemoteFile(entry, session: session) }
         }
         return true
     }
@@ -432,14 +461,7 @@ public final class FTPController {
     /// 5 / 6 (or a drop) when a server is involved. Returns false when everything is local.
     func transfer(move: Bool, prompts: FileCommandPrompts, drop: PanelDrop? = nil) -> Bool {
         guard let commander = commander else { return false }
-        var source: PanelView? = commander.activeView
-        var items = commander.activeView.model.operationTargets
-        var destination = folderLocation(commander.view(for: commander.model.activeSide.other))
-        if let drop = drop {
-            source = drop.source
-            items = drop.entries
-            destination = folderLocation(of: drop.folder)
-        }
+        let (source, items, destination) = resolveRemoteTransferTarget(drop: drop, commander: commander)
         guard source?.model.isRemote == true || destination.isRemote else { return false }
         guard !items.isEmpty else { NSSound.beep(); return true }
 
@@ -450,13 +472,7 @@ public final class FTPController {
         let typed = answer.target
 
         // Typing just a new name for one item of a remote folder renames it on the server.
-        if move, let source = source, let session = session(for: source), items.count == 1, !typed.contains("/"), !typed.isEmpty {
-            let from = RemoteSession.path(of: items[0].url)
-            let to = RemoteSession.normalize((from as NSString).deletingLastPathComponent + "/" + typed)
-            background({ try session.client.rename(from, to: to) }) { [weak self] result in
-                if case .failure(let e) = result { self?.report(e, title: "Rename failed") }
-                self?.refresh(source)
-            }
+        if move, tryRemoteRename(items: items, typed: typed, source: source) {
             return true
         }
         guard typed == defaultText || typed == destination.displayPath else {
@@ -468,44 +484,131 @@ public final class FTPController {
             TransferPlanner.Source(location: location(for: $0, in: source), isFolder: $0.kind == .directory,
                                    size: $0.size ?? 0, modified: $0.modified)
         }
-        let cancelFlag = CancelFlag()
-        var progressWindow: TransferProgressWindowController?
-        if !runSynchronously && !answer.queue {
-            let fromDesc = sources.first?.location.displayPath ?? ""
-            let pw = TransferProgressWindowController(title: verb, from: fromDesc, to: destination.displayPath,
-                                                      cancelFlag: cancelFlag, onCancel: nil) { [weak self] in
-                self?.transfersWindow.present()
-            }
-            progressWindow = pw
-            pw.present()
-        } else {
-            commander.showHint("Preparing \(verb.lowercased())…", duration: 30)
-        }
+        runRemoteTransferPlan(sources: sources, what: what, destination: destination,
+                              verb: verb, move: move, answer: answer, source: source, commander: commander)
+        return true
+    }
 
+    private func runRemoteTransferPlan(
+        sources: [TransferPlanner.Source],
+        what: String,
+        destination: TransferLocation,
+        verb: String,
+        move: Bool,
+        answer: TransferAnswer,
+        source: PanelView?,
+        commander: CommanderView
+    ) {
+        let cancelFlag = CancelFlag()
+        let progressWindow = makeTransferProgressWindow(
+            verb: verb,
+            from: sources.first?.location.displayPath ?? "",
+            to: destination.displayPath,
+            answer: answer,
+            cancelFlag: cancelFlag,
+            commander: commander
+        )
         background({ try TransferPlanner.plan(sources, into: destination, move: move, mask: answer.fileMask, cancel: cancelFlag) }) { [weak self] result in
-            guard let self = self else { return }
-            commander.showHint("", duration: 0.01)
-            switch result {
-            case .failure(let e):
-                progressWindow?.close()
-                if !(e is FTPError && (e as? FTPError) == .cancelled) {
-                    self.report(e, title: "\(verb) failed")
-                }
-            case .success(let plan):
-                if cancelFlag.isCancelled {
-                    progressWindow?.close()
-                    return
-                }
-                // Existing targets are asked about while copying ("target file exists").
-                let job = TransferJob(title: "\(verb) \(what): \(sources.first?.location.displayPath ?? "") → \(destination.displayPath)",
-                                      items: plan.items, isMove: move, sourceFoldersToRemove: move ? plan.foldersToRemove : [])
-                job.verify = answer.verify
-                job.waitsInQueue = answer.queue
-                source?.model.clearMarks()
-                self.startJob(job, existingProgressWindow: progressWindow)
-            }
+            self?.finishPlannedTransfer(
+                result: result,
+                verb: verb,
+                what: what,
+                fromDisplay: sources.first?.location.displayPath ?? "",
+                toDisplay: destination.displayPath,
+                move: move,
+                answer: answer,
+                source: source,
+                commander: commander,
+                cancelFlag: cancelFlag,
+                progressWindow: progressWindow
+            )
+        }
+    }
+
+    private func resolveRemoteTransferTarget(drop: PanelDrop?, commander: CommanderView) -> (PanelView?, [FileEntry], TransferLocation) {
+        if let drop = drop {
+            return (drop.source, drop.entries, folderLocation(of: drop.folder))
+        }
+        return (commander.activeView,
+                commander.activeView.model.operationTargets,
+                folderLocation(commander.view(for: commander.model.activeSide.other)))
+    }
+
+    private func tryRemoteRename(items: [FileEntry], typed: String, source: PanelView?) -> Bool {
+        guard let source = source, let session = session(for: source),
+              items.count == 1, !typed.contains("/"), !typed.isEmpty else {
+            return false
+        }
+        let from = RemoteSession.path(of: items[0].url)
+        let to = RemoteSession.normalize((from as NSString).deletingLastPathComponent + "/" + typed)
+        background({ try session.client.rename(from, to: to) }) { [weak self] result in
+            if case .failure(let e) = result { self?.report(e, title: "Rename failed") }
+            self?.refresh(source)
         }
         return true
+    }
+
+    private func makeTransferProgressWindow(
+        verb: String,
+        from: String,
+        to: String,
+        answer: TransferAnswer,
+        cancelFlag: CancelFlag,
+        commander: CommanderView
+    ) -> TransferProgressWindowController? {
+        guard !runSynchronously && !answer.queue else {
+            commander.showHint("Preparing \(verb.lowercased())…", duration: 30)
+            return nil
+        }
+        let pw = TransferProgressWindowController(
+            title: verb,
+            from: from,
+            to: to,
+            cancelFlag: cancelFlag,
+            onCancel: nil
+        ) { [weak self] in
+            self?.transfersWindow.present()
+        }
+        pw.present()
+        return pw
+    }
+
+    private func finishPlannedTransfer(
+        result: Result<TransferPlanner.Plan, Error>,
+        verb: String,
+        what: String,
+        fromDisplay: String,
+        toDisplay: String,
+        move: Bool,
+        answer: TransferAnswer,
+        source: PanelView?,
+        commander: CommanderView,
+        cancelFlag: CancelFlag,
+        progressWindow: TransferProgressWindowController?
+    ) {
+        commander.showHint("", duration: 0.01)
+        switch result {
+        case .failure(let e):
+            progressWindow?.close()
+            if !(e is FTPError && (e as? FTPError) == .cancelled) {
+                report(e, title: "\(verb) failed")
+            }
+        case .success(let plan):
+            if cancelFlag.isCancelled {
+                progressWindow?.close()
+                return
+            }
+            let job = TransferJob(
+                title: "\(verb) \(what): \(fromDisplay) → \(toDisplay)",
+                items: plan.items,
+                isMove: move,
+                sourceFoldersToRemove: move ? plan.foldersToRemove : []
+            )
+            job.verify = answer.verify
+            job.waitsInQueue = answer.queue
+            source?.model.clearMarks()
+            startJob(job, existingProgressWindow: progressWindow)
+        }
     }
 
     /// 8 in a remote panel: permanent deletion on the server, after confirmation naming the path.

@@ -40,10 +40,8 @@ enum Modal {
             ? NSColor(srgbRed: 48/255, green: 48/255, blue: 52/255, alpha: 1)
             : NSColor(srgbRed: 233/255, green: 233/255, blue: 233/255, alpha: 1)
 
-        let infoLines = alert.informativeText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        let hasKV = infoLines.contains { $0.contains(": ") && !$0.hasPrefix("•") }
-        let hasBullets = infoLines.contains { $0.hasPrefix("• ") }
-        let isWide = hasKV || hasBullets || (alert.accessoryView?.frame.width ?? 0) > 400
+        let parsed = parseAlertBody(alert.informativeText)
+        let isWide = !parsed.kvPairs.isEmpty || !parsed.bullets.isEmpty || (alert.accessoryView?.frame.width ?? 0) > 400
         let winWidth: CGFloat = isWide ? 460 : 440
 
         let win = NSWindow(
@@ -56,138 +54,29 @@ enum Modal {
         win.backgroundColor = surfaceColor
         win.isReleasedWhenClosed = false
 
-        let iconImage: NSImage
-        if alert.alertStyle == .warning || alert.alertStyle == .critical {
-            iconImage = warningTriangleIcon()
-        } else {
-            iconImage = NSApp.applicationIconImage ?? NSImage()
-        }
-        iconImage.size = NSSize(width: 48, height: 48)
-        let iconView = NSImageView(image: iconImage)
-        iconView.translatesAutoresizingMaskIntoConstraints = false
-        iconView.widthAnchor.constraint(equalToConstant: 48).isActive = true
-        iconView.heightAnchor.constraint(equalToConstant: 48).isActive = true
-
-        let titleLabel = NSTextField(wrappingLabelWithString: alert.messageText)
-        titleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
-        titleLabel.isSelectable = false
-
-        var headerTextViews: [NSView] = [titleLabel]
-        var remainingBodyLines: [String] = []
-        var kvPairs: [(String, String)] = []
-        var bulletItems: [String] = []
-
-        if hasBullets {
-            for line in infoLines {
-                if line.hasPrefix("• ") {
-                    bulletItems.append(String(line.dropFirst(2)))
-                } else if !line.isEmpty {
-                    remainingBodyLines.append(line)
-                }
-            }
-            if let subText = remainingBodyLines.first {
-                let sub = NSTextField(wrappingLabelWithString: subText)
-                sub.font = .systemFont(ofSize: 13)
-                sub.textColor = .secondaryLabelColor
-                sub.isSelectable = false
-                headerTextViews.append(sub)
-                remainingBodyLines.removeFirst()
-            }
-        } else if hasKV {
-            // Optional leading subtitle (e.g. host) before blank line or KV pairs
-            var idx = 0
-            if let first = infoLines.first, !first.contains(": ") && !first.isEmpty {
-                let sub = NSTextField(wrappingLabelWithString: first)
-                sub.font = .systemFont(ofSize: 13)
-                sub.textColor = .secondaryLabelColor
-                sub.isSelectable = false
-                headerTextViews.append(sub)
-                idx = 1
-            }
-            for line in infoLines.dropFirst(idx) {
-                if line.isEmpty { continue }
-                if let colon = line.range(of: ": "), kvPairs.isEmpty || !line.hasSuffix("?") && !line.hasPrefix("Only ") {
-                    let k = String(line[..<colon.lowerBound])
-                    let v = String(line[colon.upperBound...])
-                    if k.count <= 16 && !k.contains(".") {
-                        kvPairs.append((k, v))
-                        continue
-                    }
-                }
-                remainingBodyLines.append(line)
-            }
-        } else if !alert.informativeText.isEmpty {
-            let sub = NSTextField(wrappingLabelWithString: alert.informativeText)
-            sub.font = .systemFont(ofSize: 13)
-            sub.textColor = .secondaryLabelColor
-            sub.isSelectable = false
-            headerTextViews.append(sub)
-        }
-
-        let headerText = NSStackView(views: headerTextViews)
-        headerText.orientation = .vertical
-        headerText.alignment = .leading
-        headerText.spacing = 2
-
-        let headerRow = NSStackView(views: [iconView, headerText])
-        headerRow.alignment = .centerY
-        headerRow.spacing = 14
+        let headerRow = makeDialogHeader(alert: alert, subtitle: parsed.subtitle)
 
         let margin: CGFloat = 20
         let contentWidth = winWidth - margin * 2
-        var bodyViews: [NSView] = [headerRow]
-
-        if !kvPairs.isEmpty {
-            let panel = makeDetailPanel(pairs: kvPairs, background: panelColor, width: contentWidth)
-            bodyViews.append(panel)
-        }
-        if !bulletItems.isEmpty {
-            let errPanel = makeErrorListPanel(items: bulletItems, background: panelColor, width: contentWidth)
-            bodyViews.append(errPanel)
-        }
-        if !remainingBodyLines.isEmpty {
-            let bodyLabel = NSTextField(wrappingLabelWithString: remainingBodyLines.joined(separator: "\n"))
-            bodyLabel.font = .systemFont(ofSize: 14)
-            bodyLabel.isSelectable = false
-            bodyLabel.preferredMaxLayoutWidth = contentWidth
-            bodyViews.append(bodyLabel)
-        }
-
-        var firstInput: NSView?
-        if let acc = alert.accessoryView {
-            let h = acc.frame.height
-            acc.translatesAutoresizingMaskIntoConstraints = false
-            if h > 0 { acc.heightAnchor.constraint(equalToConstant: h).isActive = true }
-            bodyViews.append(acc)
-            if acc is NSTextField {
-                firstInput = acc
-            } else {
-                firstInput = acc.subviews.first { $0 is NSTextField }
-            }
-        }
+        let (bodyViews, firstInput) = makeDialogBodyViews(
+            headerRow: headerRow,
+            kvPairs: parsed.kvPairs,
+            bullets: parsed.bullets,
+            remaining: parsed.remaining,
+            accessoryView: alert.accessoryView,
+            panelColor: panelColor,
+            contentWidth: contentWidth
+        )
+        var allViews = bodyViews
 
         let handler = AlertButtonHandler(onButton: onButton)
-        let titles = alert.buttons.isEmpty ? ["OK"] : alert.buttons.map(\.title)
-        var createdButtons: [NSButton] = []
-        for (i, title) in titles.enumerated() {
-            let b = NSButton(title: title, target: handler, action: #selector(AlertButtonHandler.pressed(_:)))
-            b.tag = Int(NSApplication.ModalResponse.alertFirstButtonReturn.rawValue) + i
-            b.bezelStyle = .rounded
-            b.widthAnchor.constraint(greaterThanOrEqualToConstant: AppWindows.Layout.buttonMinWidth).isActive = true
-            if i == 0 {
-                b.keyEquivalent = "\r"
-                b.bezelColor = alert.alertStyle == .critical ? AppWindows.danger : AppWindows.accent
-            }
-            if i > 0 && title == "Cancel" { b.keyEquivalent = "\u{1b}" }
-            createdButtons.append(b)
-        }
-
+        let createdButtons = makeDialogButtons(for: alert, handler: handler)
         let visualButtons = Array(createdButtons.reversed())
         let buttonRow = NSStackView(views: [NSView()] + visualButtons)
         buttonRow.spacing = 12
-        bodyViews.append(buttonRow)
+        allViews.append(buttonRow)
 
-        let stack = NSStackView(views: bodyViews)
+        let stack = NSStackView(views: allViews)
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 16
@@ -215,6 +104,145 @@ enum Modal {
         if let input = firstInput { win.initialFirstResponder = input }
         AppWindows.styleButtons(in: win)
         return win
+    }
+
+    private static func makeDialogBodyViews(
+        headerRow: NSView,
+        kvPairs: [(String, String)],
+        bullets: [String],
+        remaining: [String],
+        accessoryView: NSView?,
+        panelColor: NSColor,
+        contentWidth: CGFloat
+    ) -> ([NSView], NSView?) {
+        var bodyViews: [NSView] = [headerRow]
+        if !kvPairs.isEmpty {
+            bodyViews.append(makeDetailPanel(pairs: kvPairs, background: panelColor, width: contentWidth))
+        }
+        if !bullets.isEmpty {
+            bodyViews.append(makeErrorListPanel(items: bullets, background: panelColor, width: contentWidth))
+        }
+        if !remaining.isEmpty {
+            let bodyLabel = NSTextField(wrappingLabelWithString: remaining.joined(separator: "\n"))
+            bodyLabel.font = .systemFont(ofSize: 14)
+            bodyLabel.isSelectable = false
+            bodyLabel.preferredMaxLayoutWidth = contentWidth
+            bodyViews.append(bodyLabel)
+        }
+        var firstInput: NSView?
+        if let acc = accessoryView {
+            let h = acc.frame.height
+            acc.translatesAutoresizingMaskIntoConstraints = false
+            if h > 0 { acc.heightAnchor.constraint(equalToConstant: h).isActive = true }
+            bodyViews.append(acc)
+            firstInput = (acc as? NSTextField) ?? acc.subviews.first { $0 is NSTextField }
+        }
+        return (bodyViews, firstInput)
+    }
+
+    private static func makeDialogHeader(alert: NSAlert, subtitle: String?) -> NSStackView {
+        let iconImage: NSImage = (alert.alertStyle == .warning || alert.alertStyle == .critical)
+            ? warningTriangleIcon()
+            : (NSApp.applicationIconImage ?? NSImage())
+        iconImage.size = NSSize(width: 48, height: 48)
+        let iconView = NSImageView(image: iconImage)
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.widthAnchor.constraint(equalToConstant: 48).isActive = true
+        iconView.heightAnchor.constraint(equalToConstant: 48).isActive = true
+
+        let titleLabel = NSTextField(wrappingLabelWithString: alert.messageText)
+        titleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
+        titleLabel.isSelectable = false
+
+        var headerTextViews: [NSView] = [titleLabel]
+        if let subText = subtitle {
+            let sub = NSTextField(wrappingLabelWithString: subText)
+            sub.font = .systemFont(ofSize: 13)
+            sub.textColor = .secondaryLabelColor
+            sub.isSelectable = false
+            headerTextViews.append(sub)
+        }
+
+        let headerText = NSStackView(views: headerTextViews)
+        headerText.orientation = .vertical
+        headerText.alignment = .leading
+        headerText.spacing = 2
+
+        let headerRow = NSStackView(views: [iconView, headerText])
+        headerRow.alignment = .centerY
+        headerRow.spacing = 14
+        return headerRow
+    }
+
+    private static func parseAlertBody(_ text: String) -> (
+        subtitle: String?,
+        kvPairs: [(String, String)],
+        bullets: [String],
+        remaining: [String]
+    ) {
+        let infoLines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let hasKV = infoLines.contains { $0.contains(": ") && !$0.hasPrefix("•") }
+        let hasBullets = infoLines.contains { $0.hasPrefix("• ") }
+
+        var subtitle: String?
+        var kvPairs: [(String, String)] = []
+        var bulletItems: [String] = []
+        var remaining: [String] = []
+
+        if hasBullets {
+            for line in infoLines {
+                if line.hasPrefix("• ") {
+                    bulletItems.append(String(line.dropFirst(2)))
+                } else if !line.isEmpty {
+                    remaining.append(line)
+                }
+            }
+            if !remaining.isEmpty { subtitle = remaining.removeFirst() }
+        } else if hasKV {
+            (subtitle, kvPairs, remaining) = parseKVBody(infoLines)
+        } else if !text.isEmpty {
+            subtitle = text
+        }
+        return (subtitle, kvPairs, bulletItems, remaining)
+    }
+
+    private static func parseKVBody(_ infoLines: [String]) -> (String?, [(String, String)], [String]) {
+        var subtitle: String?
+        var kvPairs: [(String, String)] = []
+        var remaining: [String] = []
+        var idx = 0
+        if let first = infoLines.first, !first.contains(": ") && !first.isEmpty {
+            subtitle = first
+            idx = 1
+        }
+        for line in infoLines.dropFirst(idx) where !line.isEmpty {
+            if let colon = line.range(of: ": "), kvPairs.isEmpty || !line.hasSuffix("?") && !line.hasPrefix("Only ") {
+                let k = String(line[..<colon.lowerBound])
+                let v = String(line[colon.upperBound...])
+                if k.count <= 16 && !k.contains(".") {
+                    kvPairs.append((k, v))
+                    continue
+                }
+            }
+            remaining.append(line)
+        }
+        return (subtitle, kvPairs, remaining)
+    }
+
+    private static func makeDialogButtons(for alert: NSAlert, handler: AlertButtonHandler) -> [NSButton] {
+        let titles = alert.buttons.isEmpty ? ["OK"] : alert.buttons.map(\.title)
+        return titles.enumerated().map { i, title in
+            let b = NSButton(title: title, target: handler, action: #selector(AlertButtonHandler.pressed(_:)))
+            b.tag = Int(NSApplication.ModalResponse.alertFirstButtonReturn.rawValue) + i
+            b.bezelStyle = .rounded
+            b.widthAnchor.constraint(greaterThanOrEqualToConstant: AppWindows.Layout.buttonMinWidth).isActive = true
+            if i == 0 {
+                b.keyEquivalent = "\r"
+                b.bezelColor = alert.alertStyle == .critical ? AppWindows.danger : AppWindows.accent
+            }
+            if i > 0 && title == "Cancel" { b.keyEquivalent = "\u{1b}" }
+            return b
+        }
     }
 
     private static func makeDetailPanel(pairs: [(String, String)], background: NSColor, width: CGFloat) -> NSView {

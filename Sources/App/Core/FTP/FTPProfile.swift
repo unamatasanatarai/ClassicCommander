@@ -255,6 +255,13 @@ public struct FTPProfile: Codable, Equatable {
         if name.trimmingCharacters(in: .whitespaces).isEmpty { list.append("Enter a session name.") }
         if !Self.isValidHost(host) { list.append("Enter a valid host name or IP address.") }
         if !(1...65535).contains(port) { list.append("The port must be between 1 and 65535.") }
+        list += authProblems
+        list += pathAndProxyProblems
+        return list
+    }
+
+    private var authProblems: [String] {
+        var list: [String] = []
         if isSFTP {
             if username.isEmpty { list.append("Enter a user name.") }
             if !Self.isValidSSHUser(username) { list.append("The user name must not contain spaces or control characters, or start with -.") }
@@ -262,7 +269,14 @@ public struct FTPProfile: Codable, Equatable {
                 if keyFile.trimmingCharacters(in: .whitespaces).isEmpty { list.append("Choose a private key file.") }
                 else if !FileManager.default.isReadableFile(atPath: keyFilePath) { list.append("The key file \(keyFile) cannot be read.") }
             }
-        } else if !anonymous && username.isEmpty { list.append("Enter a user name, or tick Anonymous login.") }
+        } else if !anonymous && username.isEmpty {
+            list.append("Enter a user name, or tick Anonymous login.")
+        }
+        return list
+    }
+
+    private var pathAndProxyProblems: [String] {
+        var list: [String] = []
         if !remoteDirectory.isEmpty && !remoteDirectory.hasPrefix("/") { list.append("The remote directory must start with /.") }
         if remoteDirectory.contains("\0") || remoteDirectory.contains("\n") { list.append("The remote directory contains invalid characters.") }
         if FTPClient.hasControlCharacters(username) || FTPClient.hasControlCharacters(proxyUsername) {

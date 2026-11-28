@@ -149,6 +149,14 @@ public final class FileSearch {
     // MARK: Servers
 
     /// A server folder (or a selected server file): walked listing by listing, with the same filters.
+    private var remoteMaxLevel: Int? {
+        switch config.general.depth {
+        case .all: return nil
+        case .currentOnly: return 1
+        case .limited(let n): return max(1, n + 1)
+        }
+    }
+
     private func searchRemote(_ root: URL, into report: inout Report) {
         guard let session = sessions(root) else {
             report.errors.append("\(root.absoluteString): the server connection is closed.")
@@ -163,12 +171,7 @@ public final class FileSearch {
             considerRemote(item(entry, path: rootPath, session: session), session: session, into: &report)
             return
         }
-        let maxLevel: Int?
-        switch config.general.depth {
-        case .all: maxLevel = nil
-        case .currentOnly: maxLevel = 1
-        case .limited(let n): maxLevel = max(1, n + 1)
-        }
+        let maxLevel: Int? = remoteMaxLevel
         var queue: [(path: String, level: Int)] = [(rootPath, 0)]
         var next = 0
         var lastProgress = Date.distantPast

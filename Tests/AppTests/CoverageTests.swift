@@ -495,6 +495,45 @@ public enum CoverageTests {
             ftp.viewRemote(session.url(for: "/www/index.html"), size: 18)
             wait { NSApp.windows.contains { $0.title.contains("index.html") && $0.isVisible } }
             ftp.viewRemote(URL(string: "ccftp://00000000-0000-0000-0000-000000000000/x")!, size: nil)
+
+            // Exercise FTPController.transfer edge cases: empty items, bad target, drop, and remote rename
+            final class FTPTransferPrompts: FileCommandPrompts {
+                var targetOverride: String?
+                func askText(title: String, message: String, defaultValue: String, okTitle: String) -> String? { nil }
+                func askTransfer(_ q: TransferQuestion) -> TransferAnswer? {
+                    TransferAnswer(target: targetOverride ?? q.defaultTarget, mask: "*")
+                }
+                func confirm(title: String, message: String, okTitle: String) -> Bool { true }
+                func resolveConflict(_ c: TransferConflict) -> ConflictDecision { .replace }
+                func showProblems(title: String, report: OperationReport) {}
+            }
+            let ftpPrompts = FTPTransferPrompts()
+            let localDir = try tempDir("FTPTransferLocal")
+            defer { try? FileManager.default.removeItem(at: localDir) }
+            view.leftView.model.go(to: localDir, visibleRows: 20)
+
+            // 1. Empty items (on ..) -> returns true without prompting
+            right.model.focus(name: "..", visibleRows: 20)
+            try expect(ftp.transfer(move: false, prompts: ftpPrompts), "empty items handled")
+
+            // 2. Invalid target path -> shows message and returns true
+            right.model.focus(name: "index.html", visibleRows: 20)
+            ftpPrompts.targetOverride = "/bogus/target"
+            try expect(ftp.transfer(move: false, prompts: ftpPrompts), "invalid target handled")
+
+            // 3. Drop from remote to local (with async progressWindow path)
+            ftpPrompts.targetOverride = nil
+            if let entry = right.model.currentEntry {
+                let drop = PanelDrop(entries: [entry], source: right, target: view.leftView, folder: localDir, folderRow: nil, move: false)
+                try expect(ftp.transfer(move: false, prompts: ftpPrompts, drop: drop), "remote drop started")
+                wait(10) { FileManager.default.fileExists(atPath: localDir.appendingPathComponent("index.html").path) }
+            }
+
+            // 4. Remote single-item rename via move + bare filename
+            ftpPrompts.targetOverride = "index-renamed.html"
+            try expect(ftp.transfer(move: true, prompts: ftpPrompts), "remote rename started")
+            wait(10) { right.model.entries.contains { $0.name == "index-renamed.html" } }
+
             view.perform(.goHome)
             try expect(!right.model.isRemote, "home leaves the server")
             for w in NSApp.windows where w.title.contains("index.html") { w.close() }
@@ -528,6 +567,44 @@ public enum CoverageTests {
             try expect(cellText(0, 0) == "Copied" && cellText(0, 1).hasPrefix("Failed") && cellText(1, 0).hasSuffix("ok.html"),
                        "statuses: \(cellText(0, 0)) / \(cellText(0, 1))")
             try expect(cellText(2, 0) == "18 B", "size: \(cellText(2, 0))")
+
+            // Exercise TransferProgressWindowController.update(), formatting, and pausePressed()
+            try expect(TransferProgressWindowController.formatSpeed(2_097_152).contains("MB/s"), "MB/s format")
+            try expect(TransferProgressWindowController.formatSpeed(30_000).contains("kbytes/s"), "kbytes/s format")
+            try expect(TransferProgressWindowController.formatSpeed(0) == "0 kbytes/s", "0 speed format")
+            try expect(TransferProgressWindowController.formatETA(remainingBytes: 100_000, speed: 10_000) == "10 s", "seconds ETA")
+            try expect(TransferProgressWindowController.formatETA(remainingBytes: 1_200_000, speed: 10_000) == "2 m", "minutes ETA")
+            try expect(TransferProgressWindowController.formatETA(remainingBytes: 40_000_000, speed: 10_000).contains("h "), "hours ETA")
+            try expect(TransferProgressWindowController.formatETA(remainingBytes: 0, speed: 10_000) == "", "empty ETA")
+
+            let progJob = TransferJob(title: "prog", items: [
+                TransferItem(source: .local(local.appendingPathComponent("a")), destination: .local(local.appendingPathComponent("b")), size: 10_000_000, isFolder: false),
+            ], isMove: true)
+            let progWin = TransferProgressWindowController(job: progJob, onBackground: {})
+            progWin.present()
+            defer { progWin.close() }
+
+            progJob.active = [0]
+            progJob.partial[0] = 5_000_000
+            progJob.results[0] = .skipped("user")
+            progWin.update()
+
+            progJob.active = []
+            progWin.update()
+
+            // Zero-byte job
+            let zeroJob = TransferJob(title: "zero", items: [], isMove: false)
+            let zeroWin = TransferProgressWindowController(job: zeroJob, onBackground: {})
+            zeroWin.present()
+            zeroWin.update()
+            zeroWin.close()
+
+            // Pause & Resume
+            let progBtns = allButtons(in: progWin.window?.contentView ?? NSView())
+            progBtns.first { $0.title == "Pause" }?.performClick(nil)
+            try expect(progJob.isPaused, "pause button paused job")
+            progBtns.first { $0.title == "Resume" }?.performClick(nil)
+            try expect(!progJob.isPaused, "resume button resumed job")
             window.sizeFormat = .bytes
             try expect(cellText(2, 0) == "18 bytes", "size in bytes")
             window.removeCompletedBox.state = .on
@@ -615,6 +692,25 @@ public enum CoverageTests {
             Modal.open(URL(fileURLWithPath: "/tmp"))
             Modal.opened = { _ in }
             try expect(opened != nil, "open hook")
+
+            // Modal.dialogWindow variants: empty title, bullets + subtitle, KV + trailing body, critical + accessory
+            let bulletAlert = NSAlert()
+            bulletAlert.messageText = ""
+            bulletAlert.informativeText = "Summary\n• Error one\n• Error two"
+            let w1 = Modal.dialogWindow(for: bulletAlert) { _ in }
+            try expect(w1.title.contains("Alert"), "empty messageText falls back to Alert")
+
+            let kvAlert = NSAlert()
+            kvAlert.alertStyle = .critical
+            kvAlert.messageText = "Untrusted"
+            kvAlert.informativeText = "sftp.example.com\n\nServer: example\nSHA-256: abc\nOnly trust if sure."
+            let container = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 24))
+            container.addSubview(NSTextField(string: "val"))
+            kvAlert.accessoryView = container
+            kvAlert.addButton(withTitle: "Delete")
+            kvAlert.addButton(withTitle: "Cancel")
+            let w2 = Modal.dialogWindow(for: kvAlert) { _ in }
+            try expect(w2.initialFirstResponder is NSTextField, "accessory NSTextField becomes initialFirstResponder")
         }
     }
 
@@ -732,6 +828,10 @@ public enum CoverageTests {
             try expect(view.activeView.model.showFilter == .mask("*.txt"), "custom filter")
             answer(.cancel)
             view.perform(.showCustomFilter)
+            answer(.alertFirstButtonReturn)
+            _ = AlertPrompts().askUnpack(archiveName: "a.zip", defaultTarget: dir.path)
+            answer(.cancel)
+            _ = AlertPrompts().askUnpack(archiveName: "a.zip", defaultTarget: dir.path)
             var launched: TerminalLauncher.Launch?
             Modal.launched = { launched = $0 }
             defer { Modal.launched = { _ in } }
@@ -1013,6 +1113,9 @@ public enum CoverageTests {
             send(dialog, "tableDoubleClicked")
             dialog.menuNeedsUpdate(NSMenu())
             let both = dialog.visibleRows.firstIndex { $0.left != nil && $0.right != nil && $0.path == "text.txt" }!
+            for col in 0..<dialog.table.tableColumns.count {
+                dialog.handleDoubleClick(row: both, column: col)
+            }
             dialog.table.selectRowIndexes(IndexSet(integer: both), byExtendingSelection: false)
             dialog.table.keyDown(with: key(124, ""))
             dialog.table.keyDown(with: key(0, "a"))
@@ -1029,7 +1132,25 @@ public enum CoverageTests {
             dialog.runSynchronously = true
             dialog.compare()
             dialog.table.selectRowIndexes(IndexSet(0..<dialog.visibleRows.count), byExtendingSelection: false)
+            if let actionCol = dialog.table.tableColumns.first(where: { $0.identifier.rawValue == "action" }) {
+                send(dialog, "markDeleteLeft")
+                if !dialog.visibleRows.isEmpty { _ = dialog.tableView(dialog.table, viewFor: actionCol, row: 0) }
+                send(dialog, "markDeleteRight")
+                if !dialog.visibleRows.isEmpty { _ = dialog.tableView(dialog.table, viewFor: actionCol, row: 0) }
+            }
             send(dialog, "markDefault")
+            send(dialog, "tableDoubleClicked")
+            for ch in ["l", "r", "d", "m", "w", "z"] {
+                _ = dialog.handleTableKey(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .control,
+                                                           timestamp: 0, windowNumber: 0, context: nil,
+                                                           characters: ch, charactersIgnoringModifiers: ch,
+                                                           isARepeat: false, keyCode: 0)!)
+            }
+            send(dialog, "markDefault")
+            for w in NSApp.windows where w.windowController is DiffWindowController { w.close() }
+            _ = ListerEncoding.allCases.map(\.stringEncoding)
+            _ = ContentCharset.allCases.map(\.stringEncoding)
+            _ = ContentCharset.ansiCodePage
             try click("Synchronize…", in: dialog.window?.contentView)
             guard let sheet = dialog.confirmation else { throw Fail(description: "no confirmation") }
             _ = sheet.options
@@ -1039,7 +1160,30 @@ public enum CoverageTests {
             try expect(dialog.statusLabel.stringValue.contains("Synchronized") || dialog.statusLabel.stringValue.contains("identical")
                        || dialog.statusLabel.stringValue.contains("Files found"), "synchronized: \(dialog.statusLabel.stringValue)")
             try Data("again".utf8).write(to: l.appendingPathComponent("new.txt"))
+            try Data("rightOnly".utf8).write(to: r.appendingPathComponent("rightOnly.txt"))
             dialog.compare()
+            dialog.table.selectRowIndexes(IndexSet(0..<dialog.visibleRows.count), byExtendingSelection: false)
+            send(dialog, "markDeleteLeft")
+            for col in dialog.table.tableColumns {
+                for rIdx in 0..<dialog.visibleRows.count { _ = dialog.tableView(dialog.table, viewFor: col, row: rIdx) }
+            }
+            send(dialog, "markDeleteRight")
+            for col in dialog.table.tableColumns {
+                for rIdx in 0..<dialog.visibleRows.count { _ = dialog.tableView(dialog.table, viewFor: col, row: rIdx) }
+            }
+            send(dialog, "markDefault")
+            send(dialog, "tableDoubleClicked")
+            for ch in ["l", "r", "d", "m", "w", "z"] {
+                _ = dialog.handleTableKey(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .control,
+                                                           timestamp: 0, windowNumber: 0, context: nil,
+                                                           characters: ch, charactersIgnoringModifiers: ch,
+                                                           isARepeat: false, keyCode: 0)!)
+            }
+            send(dialog, "markDefault")
+            for w in NSApp.windows where w.windowController is DiffWindowController { w.close() }
+            _ = ListerEncoding.allCases.map(\.stringEncoding)
+            _ = ContentCharset.allCases.map(\.stringEncoding)
+            _ = ContentCharset.ansiCodePage
             try click("Synchronize…", in: dialog.window?.contentView)
             if let second = dialog.confirmation { send(second, "cancel") }
             try click("Close", in: dialog.window?.contentView)
@@ -1086,6 +1230,49 @@ public enum CoverageTests {
             if let menu = drives, !menu.items.isEmpty { menu.performActionForItem(at: 0) }
             dialog.tabs.selectTabViewItem(at: 1)
             send(dialog, "showCalendar:", dialog.dateFromButton)
+
+            // Exercise writeUI() with all flags enabled, fractional size, explicit dates, and attribute states
+            var fullCfg = dialog.config
+            fullCfg.general.useRegex = true
+            fullCfg.general.selectedItemsOnly = true
+            fullCfg.general.content.enabled = true
+            fullCfg.general.content.wholeWordsOnly = true
+            fullCfg.general.content.caseSensitive = true
+            fullCfg.general.content.useRegex = true
+            fullCfg.general.content.hexadecimal = true
+            fullCfg.general.content.invertMatch = true
+            fullCfg.advanced.dateBetweenEnabled = true
+            fullCfg.advanced.dateFrom = Date(timeIntervalSince1970: 1_700_000_000)
+            fullCfg.advanced.dateTo = Date(timeIntervalSince1970: 1_700_100_000)
+            fullCfg.advanced.notOlderThan.enabled = true
+            fullCfg.advanced.olderThan.enabled = true
+            fullCfg.advanced.fileSize.enabled = true
+            fullCfg.advanced.fileSize.value = 1.5
+            fullCfg.advanced.attributesEnabled = true
+            fullCfg.advanced.attributes = [.directory: .required, .hidden: .excluded]
+            fullCfg.advanced.duplicates.enabled = true
+            fullCfg.advanced.duplicates.sameName = true
+            fullCfg.advanced.duplicates.sameSize = true
+            fullCfg.advanced.duplicates.sameContents = true
+            dialog.config = fullCfg
+            dialog.writeUI()
+            try expect(dialog.readUI() == nil, "readUI after writeUI succeeds")
+
+            // SearchItem.has(_:) coverage across all FileAttribute cases
+            let searchItem = SearchItem(
+                url: dir.appendingPathComponent(".hidden"),
+                name: ".hidden",
+                isDirectory: true,
+                size: 0,
+                modified: Date(),
+                mode: 0o444,
+                flags: UInt32(SF_ARCHIVED | UF_HIDDEN | SF_RESTRICTED | UF_COMPRESSED),
+                ownerID: 0
+            )
+            for attr in FileAttribute.allCases {
+                _ = searchItem.has(attr)
+            }
+            try expect(ChmodDialogController.PermissionState(mode: 0o7755, recursive: false).symbolicString == "rwsr-sr-t", "special bits symbolicString")
             send(dialog, "calendarPicked")
             dialog.tabs.selectTabViewItem(at: 0)
             try click("New search", in: content)
@@ -1143,6 +1330,9 @@ public enum CoverageTests {
             send(app, "netCommand:", sort)
             try expect(commander.activeView.model.sortOrder.column == .size, "menu command ran")
             send(app, "showOptions")
+            commander.perform(.newTab)
+            app.closeWindowOrTab(nil)
+            app.closeWindowOrTab(nil)
             commander.perform(.toggleFolderBrackets)          // saved, notified, applied
             try expect(store.display.showFolderBrackets == false, "setting saved through the delegate")
             app.statusBarController?.onOpenWindow?()
@@ -1199,9 +1389,23 @@ public enum CoverageTests {
             try expect(panel.model.folderSize(for: panel.model.entries.first { $0.name == "big2" }!) == 600, "size of 600 files")
             view.reportTerminalFailure(FTPError.timeout)
             wait(1) { false }
-            let lister = ListerWindowController(files: [dir.appendingPathComponent("big/f1")], index: 0)
+            let lister = ListerWindowController(files: [dir.appendingPathComponent("big/f1"), dir.appendingPathComponent("big2/f1")], index: 0)
             lister.present()
+            _ = lister.handleKey(key(2, "d"))
+            _ = lister.handleKey(key(32, "u"))
+            _ = lister.handleKey(key(5, "G"))
+            _ = lister.handleKey(key(13, "w"))
+            _ = lister.handleKey(key(45, "n"))
+            _ = lister.handleKey(key(35, "p"))
+            _ = lister.handleKey(key(20, "3"))   // hex mode
+            _ = lister.handleKey(key(2, "d"))    // activeScrollView == hexScroll
+            _ = lister.handleKey(key(21, "4"))   // preview mode
+            _ = lister.handleKey(key(2, "d"))    // activeScrollView == nil
             _ = lister.handleKey(key(26, "7"))
+            _ = lister.handleKey(key(KeyCode.f7, ""))
+            _ = lister.handleKey(key(6, "z"))
+            _ = lister.handleKey(key(12, "q"))
+            _ = lister.handleKey(key(KeyCode.escape, ""))
             lister.window?.close()
         }
 
@@ -1228,6 +1432,175 @@ public enum CoverageTests {
             gallery.openAllDialogs()
             gallery.openAllWindows()
             gallery.closeAllGalleryWindows()
+        }
+
+        testRunner("UI: commander chmod local (single & recursive) and remote FTP") {
+            let dir = try tempDir("ChmodCov")
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let sub = dir.appendingPathComponent("sub")
+            try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+            let fileA = dir.appendingPathComponent("a.txt")
+            let nested = sub.appendingPathComponent("inner.txt")
+            try "a".write(to: fileA, atomically: true, encoding: .utf8)
+            try "inner".write(to: nested, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileA.path)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: nested.path)
+
+            let view = commander(dir)
+            let panel = view.activeView
+
+            // Empty / parent-only selection should just beep (no dialog)
+            panel.model.focus(name: "..", visibleRows: 20)
+            view.changeAttributes(for: panel)
+            try expect(view.chmodDialog == nil, "No chmod dialog on ..")
+
+            // Local single file chmod -> preset 777 -> Apply
+            panel.model.focus(name: "a.txt", visibleRows: 20)
+            view.changeAttributes(for: panel)
+            guard let dlg1 = view.chmodDialog, let root1 = dlg1.window?.contentView else {
+                throw Fail(description: "chmodDialog1 missing")
+            }
+            let btns1 = allButtons(in: root1)
+            btns1.first { $0.title.contains("777") }?.performClick(nil)
+            btns1.first { $0.title == "Apply" }?.performClick(nil)
+            wait(5) {
+                let attrs = try? FileManager.default.attributesOfItem(atPath: fileA.path)
+                return (attrs?[.posixPermissions] as? NSNumber)?.intValue == 0o777
+            }
+            let permsA = (try FileManager.default.attributesOfItem(atPath: fileA.path)[.posixPermissions] as? NSNumber)?.intValue
+            try expect(permsA == 0o777, "a.txt should be 0777, got \(String(permsA ?? 0, radix: 8))")
+
+            // Local recursive folder chmod -> preset 755 -> check recursive -> Apply
+            panel.model.focus(name: "sub", visibleRows: 20)
+            view.changeAttributes(for: panel)
+            guard let dlg2 = view.chmodDialog, let root2 = dlg2.window?.contentView else {
+                throw Fail(description: "chmodDialog2 missing")
+            }
+            let btns2 = allButtons(in: root2)
+            if let rec = btns2.first(where: { $0.title.lowercased().contains("recursive") }) {
+                rec.state = .on
+            }
+            btns2.first { $0.title.contains("755") }?.performClick(nil)
+            btns2.first { $0.title == "Apply" }?.performClick(nil)
+            wait(5) {
+                let attrs = try? FileManager.default.attributesOfItem(atPath: nested.path)
+                return (attrs?[.posixPermissions] as? NSNumber)?.intValue == 0o755
+            }
+            let permsNested = (try FileManager.default.attributesOfItem(atPath: nested.path)[.posixPermissions] as? NSNumber)?.intValue
+            try expect(permsNested == 0o755, "nested.txt should be 0755, got \(String(permsNested ?? 0, radix: 8))")
+
+            // Remote FTP chmod (recursive on folder)
+            let server = try FTPTests.TestServer()
+            defer { server.stop() }
+            var outcome: Result<Void, FTPError>?
+            view.ftp.connect(server.profile(), password: "s3cret pass", side: .right) { outcome = $0 }
+            wait { outcome != nil }
+            guard case .success = outcome else { throw Fail(description: "connect failed") }
+            let right = view.rightView
+            view.activate(.right)
+            view.perform(.goRoot)
+            wait { RemoteSession.path(of: right.model.directory) == "/" }
+            right.model.focus(name: "www", visibleRows: 20)
+            view.changeAttributes(for: right)
+            guard let dlg3 = view.chmodDialog, let root3 = dlg3.window?.contentView else {
+                throw Fail(description: "chmodDialog3 missing")
+            }
+            let btns3 = allButtons(in: root3)
+            if let rec = btns3.first(where: { $0.title.lowercased().contains("recursive") }) {
+                rec.state = .on
+            }
+            btns3.first { $0.title.contains("755") }?.performClick(nil)
+            btns3.first { $0.title == "Apply" }?.performClick(nil)
+            wait(2) { false }
+
+            // Exercise remote & local onNavigateToPath closure (#6 in CommanderView.init)
+            try expect(view.leftView.onNavigateToPath?("/tmp") == false, "local panel onNavigateToPath returns false")
+            let addr = view.ftp.displayAddress(of: right.model.directory) ?? ""
+            try expect(right.onNavigateToPath?(addr + "/www/*.html") == true, "remote onNavigateToPath with displayAddress + mask")
+            wait { RemoteSession.path(of: right.model.directory) == "/www" }
+            try expect(right.onNavigateToPath?("/*.*") == true, "remote onNavigateToPath with *.*")
+            wait { RemoteSession.path(of: right.model.directory) == "/" }
+        }
+
+        testRunner("UI: commander perform actions (sort, toggles, quickFilter, multiRename empty, pack/unpack)") {
+            let dir = try tempDir("PerformCov")
+            defer { try? FileManager.default.removeItem(at: dir) }
+            try "hello".write(to: dir.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+            let sub = dir.appendingPathComponent("sub")
+            try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+
+            let view = commander(dir)
+            let panel = view.activeView
+
+            view.perform(.sortByName)
+            view.perform(.sortByExtension)
+            view.perform(.sortByDate)
+            view.perform(.sortBySize)
+            view.perform(.sortUnsorted)
+            view.perform(.reverseOrder)
+            view.perform(.showAllFiles)
+            view.perform(.showPrograms)
+            view.perform(.toggleHiddenFiles)
+            view.perform(.toggleFunctionKeyBar)
+            view.perform(.toggleFolderBrackets)
+            view.perform(.refresh)
+            view.perform(.quickFilter)
+            view.perform(.reopenQuickSearch)
+            view.perform(.deselectAll)
+            view.perform(.selectAll)
+            view.perform(.showMarkedOnly)
+            view.perform(.deselectAll)
+            view.perform(.restoreSelection)
+
+            // multiRename on empty directory -> beeps without presenting
+            let emptyDir = dir.appendingPathComponent("empty")
+            try FileManager.default.createDirectory(at: emptyDir, withIntermediateDirectories: true)
+            panel.model.go(to: emptyDir, visibleRows: 20)
+            view.perform(.multiRename)
+
+            // packFiles / unpackFiles / changeAttributes via perform (with cancelling prompts)
+            final class CancelPrompts: FileCommandPrompts {
+                func askText(title: String, message: String, defaultValue: String, okTitle: String) -> String? { nil }
+                func askUnpack(archiveName: String, defaultTarget: String) -> (target: String, overwrite: Bool)? { nil }
+                func askTransfer(_ q: TransferQuestion) -> TransferAnswer? { nil }
+                func confirm(title: String, message: String, okTitle: String) -> Bool { true }
+                func resolveConflict(_ c: TransferConflict) -> ConflictDecision { .skip }
+                func showProblems(title: String, report: OperationReport) {}
+            }
+            view.fileCommands.prompts = CancelPrompts()
+            panel.model.go(to: dir, visibleRows: 20)
+            panel.model.focus(name: "a.txt", visibleRows: 20)
+            view.perform(.packFiles)
+            view.perform(.unpackFiles)
+            view.perform(.changeAttributes)
+            view.chmodDialog?.window?.close()
+
+            // Navigation edge cases: cursor movement, tabs (single tab beep + multi-tab switch), goRoot/goHome/goDownloads, unreadable folder beep
+            view.perform(.firstItem)
+            view.perform(.lastItem)
+            view.perform(.pageUp)
+            view.perform(.pageDown)
+            view.perform(.nextTab)       // only 1 tab -> beep
+            view.perform(.previousTab)   // only 1 tab -> beep
+            view.perform(.newTab)
+            view.perform(.nextTab)
+            view.perform(.previousTab)
+            view.perform(.closeTab)
+            view.perform(.goDownloads)
+            view.perform(.goHome)
+            view.perform(.goRoot)
+            view.perform(.parentFolder)  // already at root -> beep / no-op
+            panel.model.go(to: dir, visibleRows: 20)
+            panel.model.focus(name: "a.txt", visibleRows: 20)
+            view.perform(.enterFolder)   // on a file -> no-op
+
+            // TabBarView.scrollWheel coverage
+            let tabBar = TabBarView(frame: NSRect(x: 0, y: 0, width: 100, height: 26))
+            tabBar.tabs = PanelTabs(saved: Array(repeating: dir.path, count: 6), active: 0, fallback: dir)
+            if let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: -40, wheel2: -40, wheel3: 0),
+               let scrollEvt = NSEvent(cgEvent: cg) {
+                tabBar.scrollWheel(with: scrollEvt)
+            }
         }
     }
 }

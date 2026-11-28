@@ -26,33 +26,44 @@ public enum PanelComparison {
         var result = Result(left: Set(l.keys).subtracting(r.keys), right: Set(r.keys).subtracting(l.keys))
         for (name, a) in l {
             guard let b = r[name] else { continue }
-            if a.kind != b.kind {
-                // A file on one side, a folder on the other.
-                result.left.insert(name)
-                result.right.insert(name)
-                continue
-            }
-            guard a.kind == .file else { continue }
-            let sizeDiffers = (a.size ?? 0) != (b.size ?? 0)
-            switch criterion {
-            case .size:
-                if sizeDiffers {
-                    result.left.insert(name)
-                    result.right.insert(name)
-                }
-            case .date:
-                let gap = (a.modified ?? .distantPast).timeIntervalSince(b.modified ?? .distantPast)
-                if gap > tolerance {
-                    result.left.insert(name)
-                } else if gap < -tolerance {
-                    result.right.insert(name)
-                } else if sizeDiffers {
-                    result.left.insert(name)
-                    result.right.insert(name)
-                }
-            }
+            comparePair(name: name, a: a, b: b, criterion: criterion, tolerance: tolerance, into: &result)
         }
         return result
+    }
+
+    private static func comparePair(
+        name: String,
+        a: FileEntry,
+        b: FileEntry,
+        criterion: Criterion,
+        tolerance: TimeInterval,
+        into result: inout Result
+    ) {
+        if a.kind != b.kind {
+            // A file on one side, a folder on the other.
+            result.left.insert(name)
+            result.right.insert(name)
+            return
+        }
+        guard a.kind == .file else { return }
+        let sizeDiffers = (a.size ?? 0) != (b.size ?? 0)
+        switch criterion {
+        case .size:
+            if sizeDiffers {
+                result.left.insert(name)
+                result.right.insert(name)
+            }
+        case .date:
+            let gap = (a.modified ?? .distantPast).timeIntervalSince(b.modified ?? .distantPast)
+            if gap > tolerance {
+                result.left.insert(name)
+            } else if gap < -tolerance {
+                result.right.insert(name)
+            } else if sizeDiffers {
+                result.left.insert(name)
+                result.right.insert(name)
+            }
+        }
     }
 }
 
@@ -74,17 +85,21 @@ public enum SelectionClipboard {
         for e in entries {
             let name = usePaths ? path(e) : e.name
             guard detailed else { lines.append(name); continue }
-            let size: String
-            if e.kind == .directory {
-                size = folderSize(e).map(String.init) ?? "<DIR>"
-            } else {
-                size = e.size.map(String.init) ?? ""
-            }
-            let date = e.modified.map(dateFormatter.string(from:)) ?? ""
-            let attributes = e.permissions.map { (e.kind == .directory ? "d" : "-") + String($0, radix: 8) } ?? ""
-            lines.append([name, size, date, attributes].joined(separator: "\t"))
+            lines.append(formatDetailedRow(e, name: name, folderSize: folderSize))
         }
         return lines.joined(separator: "\n") + (lines.isEmpty ? "" : "\n")
+    }
+
+    private static func formatDetailedRow(_ e: FileEntry, name: String, folderSize: (FileEntry) -> Int64?) -> String {
+        let size: String
+        if e.kind == .directory {
+            size = folderSize(e).map(String.init) ?? "<DIR>"
+        } else {
+            size = e.size.map(String.init) ?? ""
+        }
+        let date = e.modified.map(dateFormatter.string(from:)) ?? ""
+        let attributes = e.permissions.map { (e.kind == .directory ? "d" : "-") + String($0, radix: 8) } ?? ""
+        return [name, size, date, attributes].joined(separator: "\t")
     }
 
     /// Year first, so spreadsheets read it as a date and it sorts as text.

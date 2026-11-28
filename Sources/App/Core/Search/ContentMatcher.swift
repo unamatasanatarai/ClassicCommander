@@ -92,29 +92,35 @@ public struct ContentMatcher {
             if chunk.isEmpty { return .lacks }
             if first {
                 first = false
-                if case let .text(_, decoders, _) = mode {
-                    activeDecoders = decoders
-                    if chunk.prefix(8192).contains(0) {
-                        // Binary-looking: only UTF-16 text legitimately contains NUL bytes.
-                        activeDecoders = decoders.filter { $0.charset == .utf16 }
-                        if activeDecoders.isEmpty { return .skipped }
-                    }
-                }
+                guard let decoders = initialDecoders(for: chunk) else { return .skipped }
+                activeDecoders = decoders
             }
             let window = carry + chunk
-            switch mode {
-            case .bytes(let needle):
-                if window.range(of: needle) != nil { return .contains }
-            case let .text(regex, _, _):
-                for d in activeDecoders {
-                    let text = d.decode(window)
-                    if regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil { return .contains }
-                }
-            }
+            if matchesWindow(window, decoders: activeDecoders) { return .contains }
             let keep = min(overlap, window.count)
             var start = window.count - keep
             if start % 2 != 0 { start -= 1 }   // keep UTF-16 code units aligned
             carry = window.subdata(in: window.startIndex.advanced(by: max(0, start))..<window.endIndex)
+        }
+    }
+
+    private func initialDecoders(for firstChunk: Data) -> [Decoder]? {
+        guard case let .text(_, decoders, _) = mode else { return [] }
+        guard firstChunk.prefix(8192).contains(0) else { return decoders }
+        // Binary-looking: only UTF-16 text legitimately contains NUL bytes.
+        let utf16Only = decoders.filter { $0.charset == .utf16 }
+        return utf16Only.isEmpty ? nil : utf16Only
+    }
+
+    private func matchesWindow(_ window: Data, decoders: [Decoder]) -> Bool {
+        switch mode {
+        case .bytes(let needle):
+            return window.range(of: needle) != nil
+        case let .text(regex, _, _):
+            return decoders.contains {
+                let text = $0.decode(window)
+                return regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+            }
         }
     }
 

@@ -121,10 +121,18 @@ public enum FTPListingParser {
     // "11-21-2026  09:15AM             8192 index.html"
     static func parseDOS(_ line: String) -> RemoteEntry? {
         let fields = line.split(separator: " ", omittingEmptySubsequences: true)
-        guard fields.count >= 4 else { return nil }
-        let dateParts = fields[0].split(separator: "-").compactMap { Int($0) }
+        guard fields.count >= 4, let modified = parseDOSDate(fields[0], fields[1]) else { return nil }
+        let isDir = fields[2].uppercased() == "<DIR>"
+        let fileSize = isDir ? 0 : size(fields[2])
+        guard (isDir || fileSize != nil), let nameStart = rangeAfterField(line, fieldIndex: 2) else { return nil }
+        return RemoteEntry(name: String(line[nameStart...]), isDirectory: isDir, isLink: false,
+                           size: fileSize ?? 0, modified: modified, permissions: nil, datePrecision: 60)
+    }
+
+    private static func parseDOSDate(_ dateField: Substring, _ timeField: Substring) -> Date? {
+        let dateParts = dateField.split(separator: "-").compactMap { Int($0) }
         guard dateParts.count == 3 else { return nil }
-        let time = fields[1].uppercased()
+        let time = timeField.uppercased()
         guard time.hasSuffix("AM") || time.hasSuffix("PM") || time.contains(":") else { return nil }
         let hm = time.dropLast(time.hasSuffix("M") ? 2 : 0).split(separator: ":").compactMap { Int($0) }
         guard hm.count == 2 else { return nil }
@@ -134,12 +142,7 @@ public enum FTPListingParser {
         var year = dateParts[2]
         if year < 100 { year += year < 70 ? 2000 : 1900 }
         let comps = DateComponents(year: year, month: dateParts[0], day: dateParts[1], hour: hour, minute: hm[1])
-        let isDir = fields[2].uppercased() == "<DIR>"
-        guard isDir || size(fields[2]) != nil, let nameStart = rangeAfterField(line, fieldIndex: 2) else { return nil }
-        return RemoteEntry(name: String(line[nameStart...]), isDirectory: isDir, isLink: false,
-                           size: isDir ? 0 : size(fields[2]) ?? 0,
-                           modified: Calendar(identifier: .gregorian).date(from: comps), permissions: nil,
-                           datePrecision: 60)
+        return Calendar(identifier: .gregorian).date(from: comps)
     }
 
     /// Where the text after field number `fieldIndex` (0-based, space separated) begins.

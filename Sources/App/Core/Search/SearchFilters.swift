@@ -109,27 +109,28 @@ public struct NameMatcher {
             return
         }
         let halves = pattern.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
-        func masks(_ text: String) -> [NSRegularExpression] {
-            text.split(whereSeparator: { $0 == ";" || $0 == " " }).map(String.init).filter { !$0.isEmpty }.map { raw in
-                var mask = Self.normalize(raw)
-                if mask == "*.*" { mask = "*" }
-                if !mask.contains("*") && !mask.contains("?") { mask = "*\(mask)*" }
-                var expr = "^"
-                for ch in mask {
-                    switch ch {
-                    case "*": expr += ".*"
-                    case "?": expr += "."
-                    default: expr += NSRegularExpression.escapedPattern(for: String(ch))
-                    }
-                }
-                return try! NSRegularExpression(pattern: expr + "$", options: [.caseInsensitive, .dotMatchesLineSeparators])
-            }
-        }
-        let inc = masks(halves[0])
-        include = inc.isEmpty ? masks("*") : inc
-        exclude = halves.count > 1 ? masks(halves[1]) : []
+        let inc = Self.compileMasks(halves[0])
+        include = inc.isEmpty ? Self.compileMasks("*") : inc
+        exclude = halves.count > 1 ? Self.compileMasks(halves[1]) : []
         let includeTexts = halves[0].split(whereSeparator: { $0 == ";" || $0 == " " }).map(String.init)
         matchesEverything = exclude.isEmpty && (includeTexts.isEmpty || includeTexts.contains { $0 == "*" || $0 == "*.*" })
+    }
+
+    private static func compileMasks(_ text: String) -> [NSRegularExpression] {
+        text.split(whereSeparator: { $0 == ";" || $0 == " " }).map(String.init).filter { !$0.isEmpty }.map { raw in
+            var mask = normalize(raw)
+            if mask == "*.*" { mask = "*" }
+            if !mask.contains("*") && !mask.contains("?") { mask = "*\(mask)*" }
+            var expr = "^"
+            for ch in mask {
+                switch ch {
+                case "*": expr += ".*"
+                case "?": expr += "."
+                default: expr += NSRegularExpression.escapedPattern(for: String(ch))
+                }
+            }
+            return try! NSRegularExpression(pattern: expr + "$", options: [.caseInsensitive, .dotMatchesLineSeparators])
+        }
     }
 
     /// File names come from disk in either Unicode form (e.g. "ó" as one or two code points).
@@ -154,7 +155,36 @@ public enum SearchQueryBuilder {
 
         let names = try NameMatcher(pattern: general.filenamePattern, regex: general.useRegex)
         result.append(SearchPredicate("name") { names.matches($0.name) })
+        result += try datePredicates(for: advanced, now: now, calendar: calendar)
+        if advanced.fileSize.enabled {
+            let filter = advanced.fileSize
+            guard filter.value >= 0, filter.value.isFinite else {
+                throw SearchValidationError(message: "“File size” must be a number of 0 or more.")
+            }
+            let bytes = filter.bytes
+            // Folders have no size of their own, so a size filter finds files only.
+            result.append(SearchPredicate("size \(filter.comparison.rawValue) \(bytes)") {
+                !$0.isDirectory && filter.comparison.compare($0.size, bytes)
+            })
+        }
+        result += attributePredicates(for: advanced)
+        if advanced.duplicates.enabled {
+            let d = advanced.duplicates
+            guard d.sameName || d.sameSize || d.sameContents else {
+                throw SearchValidationError(message: "For duplicates, tick at least one of same name, size or contents.")
+            }
+            // Duplicates are files, never folders.
+            result.append(SearchPredicate("files only (duplicates)") { !$0.isDirectory })
+        }
+        if general.content.enabled {
+            // Text is searched in files only.
+            result.append(SearchPredicate("files only (content)") { !$0.isDirectory })
+        }
+        return result
+    }
 
+    private static func datePredicates(for advanced: AdvancedSearchConfiguration, now: Date, calendar: Calendar) throws -> [SearchPredicate] {
+        var result: [SearchPredicate] = []
         if advanced.dateBetweenEnabled {
             guard let from = advanced.dateFrom, let to = advanced.dateTo else {
                 throw SearchValidationError(message: "Enter both dates for “Date between”.")
@@ -175,37 +205,18 @@ public enum SearchQueryBuilder {
             let limit = try ageLimit(advanced.olderThan, "Older than", now: now, calendar: calendar)
             result.append(SearchPredicate("older than") { $0.modified < limit })
         }
-        if advanced.fileSize.enabled {
-            let filter = advanced.fileSize
-            guard filter.value >= 0, filter.value.isFinite else {
-                throw SearchValidationError(message: "“File size” must be a number of 0 or more.")
+        return result
+    }
+
+    private static func attributePredicates(for advanced: AdvancedSearchConfiguration) -> [SearchPredicate] {
+        guard advanced.attributesEnabled else { return [] }
+        var result: [SearchPredicate] = []
+        for attribute in FileAttribute.allCases where attribute.isAvailable {
+            switch advanced.state(of: attribute) {
+            case .ignored: continue
+            case .required: result.append(SearchPredicate("+\(attribute.rawValue)") { $0.has(attribute) })
+            case .excluded: result.append(SearchPredicate("-\(attribute.rawValue)") { !$0.has(attribute) })
             }
-            let bytes = filter.bytes
-            // Folders have no size of their own, so a size filter finds files only.
-            result.append(SearchPredicate("size \(filter.comparison.rawValue) \(bytes)") {
-                !$0.isDirectory && filter.comparison.compare($0.size, bytes)
-            })
-        }
-        if advanced.attributesEnabled {
-            for attribute in FileAttribute.allCases where attribute.isAvailable {
-                switch advanced.state(of: attribute) {
-                case .ignored: continue
-                case .required: result.append(SearchPredicate("+\(attribute.rawValue)") { $0.has(attribute) })
-                case .excluded: result.append(SearchPredicate("-\(attribute.rawValue)") { !$0.has(attribute) })
-                }
-            }
-        }
-        if advanced.duplicates.enabled {
-            let d = advanced.duplicates
-            guard d.sameName || d.sameSize || d.sameContents else {
-                throw SearchValidationError(message: "For duplicates, tick at least one of same name, size or contents.")
-            }
-            // Duplicates are files, never folders.
-            result.append(SearchPredicate("files only (duplicates)") { !$0.isDirectory })
-        }
-        if general.content.enabled {
-            // Text is searched in files only.
-            result.append(SearchPredicate("files only (content)") { !$0.isDirectory })
         }
         return result
     }

@@ -490,6 +490,9 @@ public enum CommanderTests {
             try expect(brackets.state == .on && sizes.state == .on, "reopened on the restored settings")
             sizes.performClick(nil)
             down.performClick(nil)
+            let labels = CommandAction.allCases.map(\.label)
+            try expect(labels.allSatisfy { !$0.isEmpty } && Set(labels).count == labels.count, "every action has a unique non-empty label")
+
             try press("OK", in: root)
             try expect(store.operation == OperationOptions(spaceCalculatesFolderSize: false, spaceMovesCursorDown: false),
                        "OK keeps the live changes")
@@ -530,6 +533,42 @@ public enum CommanderTests {
             page.addPressed()
             page.record(KeyCombo(KeyCode.escape))
             try expect(options.working.keys.keys(for: .goHome) == [KeyCombo(KeyCode.space)], "Esc cancels")
+
+            // Right-click context menu on ShortcutsTableView (row with multiple shortcuts + out-of-bounds)
+            table.layoutSubtreeIfNeeded()
+            if let multiRow = page.actions.firstIndex(of: .parentFolder) {
+                let rowRect = table.rect(ofRow: multiRow)
+                let winPt = table.convert(NSPoint(x: rowRect.midX, y: rowRect.midY), to: nil)
+                let menuEvt = NSEvent.mouseEvent(
+                    with: .rightMouseDown,
+                    location: winPt,
+                    modifierFlags: [],
+                    timestamp: 0,
+                    windowNumber: options.window?.windowNumber ?? 0,
+                    context: nil,
+                    eventNumber: 0,
+                    clickCount: 1,
+                    pressure: 1
+                )!
+                let ctxMenu = table.menu(for: menuEvt)
+                try expect(ctxMenu?.items.contains(where: { $0.title == "Add Shortcut…" }) == true, "context menu has Add Shortcut")
+                try expect(ctxMenu?.items.contains(where: { $0.title.hasPrefix("Remove All") }) == true, "context menu has Remove All")
+            }
+            let outsideEvt = NSEvent.mouseEvent(
+                with: .rightMouseDown,
+                location: NSPoint(x: -50, y: -50),
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: options.window?.windowNumber ?? 0,
+                context: nil,
+                eventNumber: 0,
+                clickCount: 1,
+                pressure: 1
+            )!
+            _ = table.menu(for: outsideEvt)
+
+            let labels = CommandAction.allCases.map(\.label)
+            try expect(labels.allSatisfy { !$0.isEmpty } && Set(labels).count == labels.count, "every action has a unique non-empty label")
 
             try press("OK", in: root)
             try expect(store.keys.action(for: KeyCombo(KeyCode.space)) == .goHome, "kept after OK")

@@ -165,8 +165,7 @@ public enum SyncEngine {
             let relative = String(path.dropFirst(prefix.count))
             var st = stat()
             guard lstat(path, &st) == 0 else { continue }
-            let item = sameRoot ? SearchItem.read(url, stat: st)
-                : SearchItem.read(root.appendingPathComponent(relative, isDirectory: (st.st_mode & S_IFMT) == S_IFDIR), stat: st)
+            let item = readScannedItem(url: url, root: root, relative: relative, sameRoot: sameRoot, stat: st)
             let top = String(relative.split(separator: "/").first ?? "")
             if let only = config.onlyNames, !only.contains(top) {
                 // Only call skipDescendants on folders: on a file it would skip the last folder seen instead.
@@ -175,20 +174,38 @@ public enum SyncEngine {
             }
             let info = SyncFileInfo(url: item.url, size: item.size,
                                     modified: item.modified, isDirectory: item.isDirectory)
-            if item.isDirectory {
-                if !config.subdirectories { walker.skipDescendants() }
-                result.directories[relative] = info
-            } else if names.matches(item.name) {
-                result.files[relative] = info
-                var parent = (relative as NSString).deletingLastPathComponent
-                while !parent.isEmpty {
-                    result.nonEmpty.insert(parent)
-                    parent = (parent as NSString).deletingLastPathComponent
-                }
-            }
+            recordScannedEntry(info: info, name: item.name, relative: relative,
+                               config: config, names: names, walker: walker, into: &result)
         }
         errors += walkErrors
         return result
+    }
+
+    private static func readScannedItem(url: URL, root: URL, relative: String, sameRoot: Bool, stat st: stat) -> SearchItem {
+        if sameRoot { return SearchItem.read(url, stat: st) }
+        return SearchItem.read(root.appendingPathComponent(relative, isDirectory: (st.st_mode & S_IFMT) == S_IFDIR), stat: st)
+    }
+
+    private static func recordScannedEntry(
+        info: SyncFileInfo,
+        name: String,
+        relative: String,
+        config: SyncConfiguration,
+        names: NameMatcher,
+        walker: FileManager.DirectoryEnumerator,
+        into result: inout Scanned
+    ) {
+        if info.isDirectory {
+            if !config.subdirectories { walker.skipDescendants() }
+            result.directories[relative] = info
+        } else if names.matches(name) {
+            result.files[relative] = info
+            var parent = (relative as NSString).deletingLastPathComponent
+            while !parent.isEmpty {
+                result.nonEmpty.insert(parent)
+                parent = (parent as NSString).deletingLastPathComponent
+            }
+        }
     }
 
     /// A folder on a server, read listing by listing (links are reported, not followed).
@@ -215,31 +232,46 @@ public enum SyncEngine {
             }
             count += listing.count
             for entry in listing {
-                let relative = relativeDir.isEmpty ? entry.name : relativeDir + "/" + entry.name
-                let top = String(relative.split(separator: "/").first ?? "")
-                if let only = config.onlyNames, !only.contains(top) { continue }
-                if entry.isLink {
-                    errors.append("\(session.addressLabel)\(dir)/\(entry.name): a link on the server, not compared")
-                    continue
-                }
-                let path = (dir == "/" ? "" : dir) + "/" + entry.name
-                let info = SyncFileInfo(url: session.url(for: path), size: entry.size,
-                                        modified: entry.modified ?? .distantPast, isDirectory: entry.isDirectory,
-                                        datePrecision: entry.datePrecision)
-                if entry.isDirectory {
-                    result.directories[relative] = info
-                    if config.subdirectories { queue.append(relative) }
-                } else if names.matches(entry.name) {
-                    result.files[relative] = info
-                    var parent = (relative as NSString).deletingLastPathComponent
-                    while !parent.isEmpty {
-                        result.nonEmpty.insert(parent)
-                        parent = (parent as NSString).deletingLastPathComponent
-                    }
-                }
+                processRemoteEntry(entry, relativeDir: relativeDir, dir: dir, session: session,
+                                   config: config, names: names, result: &result, queue: &queue, errors: &errors)
             }
         }
         return result
+    }
+
+    private static func processRemoteEntry(
+        _ entry: RemoteEntry,
+        relativeDir: String,
+        dir: String,
+        session: RemoteSession,
+        config: SyncConfiguration,
+        names: NameMatcher,
+        result: inout Scanned,
+        queue: inout [String],
+        errors: inout [String]
+    ) {
+        let relative = relativeDir.isEmpty ? entry.name : relativeDir + "/" + entry.name
+        let top = String(relative.split(separator: "/").first ?? "")
+        if let only = config.onlyNames, !only.contains(top) { return }
+        if entry.isLink {
+            errors.append("\(session.addressLabel)\(dir)/\(entry.name): a link on the server, not compared")
+            return
+        }
+        let path = (dir == "/" ? "" : dir) + "/" + entry.name
+        let info = SyncFileInfo(url: session.url(for: path), size: entry.size,
+                                modified: entry.modified ?? .distantPast, isDirectory: entry.isDirectory,
+                                datePrecision: entry.datePrecision)
+        if entry.isDirectory {
+            result.directories[relative] = info
+            if config.subdirectories { queue.append(relative) }
+        } else if names.matches(entry.name) {
+            result.files[relative] = info
+            var parent = (relative as NSString).deletingLastPathComponent
+            while !parent.isEmpty {
+                result.nonEmpty.insert(parent)
+                parent = (parent as NSString).deletingLastPathComponent
+            }
+        }
     }
 
     // MARK: Comparing (read-only)
@@ -248,29 +280,7 @@ public enum SyncEngine {
                                isCancelled: () -> Bool = { false },
                                progress: (String) -> Void = { _ in }) throws -> SyncComparison {
         let names = try NameMatcher(pattern: config.mask.isEmpty ? "*.*" : config.mask, regex: false)
-        var fm: ObjCBool = false
-        for (side, url) in [("Left", config.left), ("Right", config.right)] {
-            if url.isRemoteLocation {
-                guard let session = sessions(url) else {
-                    throw SearchValidationError(message: "\(side): the server connection is closed. Connect again.")
-                }
-                let path = RemoteSession.path(of: url)
-                do { _ = try session.fetch(path, useCache: false) } catch {
-                    throw SearchValidationError(message: "\(side) folder “\(session.addressLabel)\(path)” cannot be read: \((error as? FTPError)?.message ?? error.localizedDescription)")
-                }
-            } else {
-                guard FileManager.default.fileExists(atPath: url.path, isDirectory: &fm), fm.boolValue else {
-                    throw SearchValidationError(message: "\(side) folder “\(url.path)” does not exist.")
-                }
-            }
-        }
-        // Same folder, or one inside the other (only possible on the same Mac or the same connection).
-        let l = config.left.isRemoteLocation ? config.left.normalizedLocation.absoluteString : FileSystemLister.realPath(of: config.left).path
-        let r = config.right.isRemoteLocation ? config.right.normalizedLocation.absoluteString : FileSystemLister.realPath(of: config.right).path
-        if l == r { throw SearchValidationError(message: "Left and right are the same folder.") }
-        if l.hasPrefix(r.hasSuffix("/") ? r : r + "/") || r.hasPrefix(l.hasSuffix("/") ? l : l + "/") {
-            throw SearchValidationError(message: "One folder is inside the other; choose two separate folders.")
-        }
+        try validateFolders(config, sessions: sessions)
 
         var result = SyncComparison()
         func read(_ url: URL) -> Scanned {
@@ -298,19 +308,52 @@ public enum SyncEngine {
             rows.append(SyncRow(path: path, left: a, right: b, state: state, action: action, recommended: action))
         }
         if config.emptyDirectories {
-            // Folders that would otherwise not appear: empty ones, or ones present on one side only.
-            for path in Set(left.directories.keys).union(right.directories.keys) {
-                let a = left.directories[path], b = right.directories[path]
-                let emptyL = a != nil && !left.nonEmpty.contains(path), emptyR = b != nil && !right.nonEmpty.contains(path)
-                if a != nil && b != nil { continue }
-                guard emptyL || emptyR else { continue }
-                let (state, action) = decide(a, b, config: config, errors: &result.errors)
-                rows.append(SyncRow(path: path, left: a, right: b, state: state, action: action, recommended: action))
-            }
+            rows += emptyDirectoryRows(left: left, right: right, config: config, errors: &result.errors)
         }
         result.rows = rows.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
         result.cancelled = isCancelled()
         return result
+    }
+
+    private static func validateFolders(_ config: SyncConfiguration, sessions: SyncSessionLookup) throws {
+        var fm: ObjCBool = false
+        for (side, url) in [("Left", config.left), ("Right", config.right)] {
+            if url.isRemoteLocation {
+                guard let session = sessions(url) else {
+                    throw SearchValidationError(message: "\(side): the server connection is closed. Connect again.")
+                }
+                let path = RemoteSession.path(of: url)
+                do { _ = try session.fetch(path, useCache: false) } catch {
+                    throw SearchValidationError(message: "\(side) folder “\(session.addressLabel)\(path)” cannot be read: \((error as? FTPError)?.message ?? error.localizedDescription)")
+                }
+            } else {
+                guard FileManager.default.fileExists(atPath: url.path, isDirectory: &fm), fm.boolValue else {
+                    throw SearchValidationError(message: "\(side) folder “\(url.path)” does not exist.")
+                }
+            }
+        }
+        // Same folder, or one inside the other (only possible on the same Mac or the same connection).
+        let l = config.left.isRemoteLocation ? config.left.normalizedLocation.absoluteString : FileSystemLister.realPath(of: config.left).path
+        let r = config.right.isRemoteLocation ? config.right.normalizedLocation.absoluteString : FileSystemLister.realPath(of: config.right).path
+        if l == r { throw SearchValidationError(message: "Left and right are the same folder.") }
+        if l.hasPrefix(r.hasSuffix("/") ? r : r + "/") || r.hasPrefix(l.hasSuffix("/") ? l : l + "/") {
+            throw SearchValidationError(message: "One folder is inside the other; choose two separate folders.")
+        }
+    }
+
+    private static func emptyDirectoryRows(
+        left: Scanned, right: Scanned, config: SyncConfiguration, errors: inout [String]
+    ) -> [SyncRow] {
+        var rows: [SyncRow] = []
+        for path in Set(left.directories.keys).union(right.directories.keys) {
+            let a = left.directories[path], b = right.directories[path]
+            let emptyL = a != nil && !left.nonEmpty.contains(path), emptyR = b != nil && !right.nonEmpty.contains(path)
+            if a != nil && b != nil { continue }
+            guard emptyL || emptyR else { continue }
+            let (state, action) = decide(a, b, config: config, errors: &errors)
+            rows.append(SyncRow(path: path, left: a, right: b, state: state, action: action, recommended: action))
+        }
+        return rows
     }
 
     /// The state of a pair and the recommended action (the ActionPlanner).
@@ -324,26 +367,37 @@ public enum SyncEngine {
         case (nil, _?):
             return (.rightOnly, config.asymmetric ? .deleteRight : .copyToLeft)
         case let (a?, b?):
-            if a.isDirectory || b.isDirectory { return (.identical, .none) }
-            let sameSize = a.size == b.size
-            let dateDelta = a.modified.timeIntervalSince(b.modified)
-            // Server listings may only give minutes (or days): dates within that step count as equal.
-            let tolerance = max(dateTolerance, a.datePrecision, b.datePrecision)
-            let sameDate = abs(dateDelta) < max(tolerance, dateTolerance + 0.001)
-            var same: Bool
-            if config.byContent && sameSize {
-                same = DuplicateFinder.identical(a.url, b.url)
-                if !same && !FileManager.default.isReadableFile(atPath: a.url.path) {
-                    errors.append("\(a.url.path): could not be read")
-                }
-            } else {
-                same = sameSize && (config.ignoreDate || sameDate)
-            }
-            if same { return (.identical, .none) }
-            if config.asymmetric { return (dateDelta < -tolerance ? .rightNewer : .leftNewer, .copyToRight) }
-            if config.ignoreDate || sameDate { return (.different, .none) }
-            return dateDelta > 0 ? (.leftNewer, .copyToRight) : (.rightNewer, .copyToLeft)
+            return decidePair(a, b, config: config, errors: &errors)
         }
+    }
+
+    private static func decidePair(_ a: SyncFileInfo, _ b: SyncFileInfo, config: SyncConfiguration,
+                                   errors: inout [String]) -> (SyncState, SyncAction) {
+        if a.isDirectory || b.isDirectory { return (.identical, .none) }
+        let dateDelta = a.modified.timeIntervalSince(b.modified)
+        let tolerance = max(dateTolerance, a.datePrecision, b.datePrecision)
+        let sameDate = abs(dateDelta) < max(tolerance, dateTolerance + 0.001)
+        if filesMatch(a, b, sameSize: a.size == b.size, sameDate: sameDate, config: config, errors: &errors) {
+            return (.identical, .none)
+        }
+        if config.asymmetric { return (dateDelta < -tolerance ? .rightNewer : .leftNewer, .copyToRight) }
+        if config.ignoreDate || sameDate { return (.different, .none) }
+        return dateDelta > 0 ? (.leftNewer, .copyToRight) : (.rightNewer, .copyToLeft)
+    }
+
+    private static func filesMatch(
+        _ a: SyncFileInfo, _ b: SyncFileInfo,
+        sameSize: Bool, sameDate: Bool,
+        config: SyncConfiguration, errors: inout [String]
+    ) -> Bool {
+        if config.byContent && sameSize {
+            let same = DuplicateFinder.identical(a.url, b.url)
+            if !same && !FileManager.default.isReadableFile(atPath: a.url.path) {
+                errors.append("\(a.url.path): could not be read")
+            }
+            return same
+        }
+        return sameSize && (config.ignoreDate || sameDate)
     }
 
     // MARK: Planning
@@ -371,28 +425,29 @@ public enum SyncEngine {
     public enum SortKey: String { case leftName, leftSize, leftDate, action, rightDate, rightSize, rightName }
 
     public static func sorted(_ indexes: [Int], of rows: [SyncRow], by key: SortKey, ascending: Bool) -> [Int] {
-        func compare(_ a: SyncRow, _ b: SyncRow) -> ComparisonResult {
-            func num<T: Comparable>(_ x: T?, _ y: T?) -> ComparisonResult {
-                switch (x, y) {
-                case let (x?, y?): return x < y ? .orderedAscending : (x > y ? .orderedDescending : .orderedSame)
-                case (nil, nil): return .orderedSame
-                case (nil, _): return .orderedAscending      // missing on that side sorts first
-                case (_, nil): return .orderedDescending
-                }
-            }
-            switch key {
-            case .leftName, .rightName: return a.path.localizedStandardCompare(b.path)
-            case .leftSize: return num(a.left?.size, b.left?.size)
-            case .rightSize: return num(a.right?.size, b.right?.size)
-            case .leftDate: return num(a.left?.modified, b.left?.modified)
-            case .rightDate: return num(a.right?.modified, b.right?.modified)
-            case .action: return (a.action.symbol + a.symbol).compare(b.action.symbol + b.symbol)
-            }
-        }
         return indexes.sorted { i, j in
-            let r = compare(rows[i], rows[j])
+            let r = compareRows(rows[i], rows[j], by: key)
             if r == .orderedSame { return rows[i].path.localizedStandardCompare(rows[j].path) == .orderedAscending }
             return ascending ? r == .orderedAscending : r == .orderedDescending
+        }
+    }
+
+    private static func compareRows(_ a: SyncRow, _ b: SyncRow, by key: SortKey) -> ComparisonResult {
+        func num<T: Comparable>(_ x: T?, _ y: T?) -> ComparisonResult {
+            switch (x, y) {
+            case let (x?, y?): return x < y ? .orderedAscending : (x > y ? .orderedDescending : .orderedSame)
+            case (nil, nil): return .orderedSame
+            case (nil, _): return .orderedAscending      // missing on that side sorts first
+            case (_, nil): return .orderedDescending
+            }
+        }
+        switch key {
+        case .leftName, .rightName: return a.path.localizedStandardCompare(b.path)
+        case .leftSize: return num(a.left?.size, b.left?.size)
+        case .rightSize: return num(a.right?.size, b.right?.size)
+        case .leftDate: return num(a.left?.modified, b.left?.modified)
+        case .rightDate: return num(a.right?.modified, b.right?.modified)
+        case .action: return (a.action.symbol + a.symbol).compare(b.action.symbol + b.symbol)
         }
     }
 
@@ -499,31 +554,8 @@ public enum SyncExecutor {
                 if let s = sessions(url) { touched[ObjectIdentifier(s)] = s }
             }
             do {
-                switch op.kind {
-                case .makeDirectory:
-                    guard options.createEmptyDirectories else { report.skipped.append("\(op.row.path): empty folder"); continue }
-                    try files.makeDirectory(op.destination)
-                    report.created += 1
-                case .copy:
-                    guard let src = op.source else { continue }
-                    let exists = files.exists(op.destination)
-                    if !op.overwrites && exists {
-                        report.skipped.append("\(op.row.path): appeared at the destination since the comparison")
-                        continue
-                    }
-                    if exists && !options.overwrite { report.skipped.append("\(op.row.path): exists, not overwritten"); continue }
-                    let info = op.row.action == .copyToRight ? op.row.left : op.row.right
-                    try files.copy(src, to: op.destination, info: info, replacing: exists, isCancelled: isCancelled)
-                    report.copied += 1
-                case .delete:
-                    if let session = sessions(op.destination) {
-                        let path = RemoteSession.path(of: op.destination)
-                        if op.row.isDirectory { try session.client.removeDirectory(path) } else { try session.client.deleteFile(path) }
-                    } else {
-                        try trash(op.destination)
-                    }
-                    report.deleted += 1
-                }
+                try executeOperation(op, options: options, files: files, sessions: sessions,
+                                     isCancelled: isCancelled, trash: trash, report: &report)
             } catch FTPError.cancelled {
                 report.cancelled = true
                 break
@@ -534,6 +566,42 @@ public enum SyncExecutor {
             }
         }
         return report
+    }
+
+    private static func executeOperation(
+        _ op: SyncOperation,
+        options: SyncRunOptions,
+        files: SyncFiles,
+        sessions: SyncSessionLookup,
+        isCancelled: @escaping () -> Bool,
+        trash: (URL) throws -> Void,
+        report: inout SyncReport
+    ) throws {
+        switch op.kind {
+        case .makeDirectory:
+            guard options.createEmptyDirectories else { report.skipped.append("\(op.row.path): empty folder"); return }
+            try files.makeDirectory(op.destination)
+            report.created += 1
+        case .copy:
+            guard let src = op.source else { return }
+            let exists = files.exists(op.destination)
+            if !op.overwrites && exists {
+                report.skipped.append("\(op.row.path): appeared at the destination since the comparison")
+                return
+            }
+            if exists && !options.overwrite { report.skipped.append("\(op.row.path): exists, not overwritten"); return }
+            let info = op.row.action == .copyToRight ? op.row.left : op.row.right
+            try files.copy(src, to: op.destination, info: info, replacing: exists, isCancelled: isCancelled)
+            report.copied += 1
+        case .delete:
+            if let session = sessions(op.destination) {
+                let path = RemoteSession.path(of: op.destination)
+                if op.row.isDirectory { try session.client.removeDirectory(path) } else { try session.client.deleteFile(path) }
+            } else {
+                try trash(op.destination)
+            }
+            report.deleted += 1
+        }
     }
 
 }

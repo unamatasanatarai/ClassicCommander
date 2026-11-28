@@ -258,24 +258,28 @@ final class ShortcutsPage: NSView, NSTableViewDataSource, NSTableViewDelegate, N
 
         let isMouse = NSApp.currentEvent?.type == .leftMouseUp || NSApp.currentEvent?.type == .leftMouseDown
         if keys.count > 1 && isMouse {
-            let menu = NSMenu(title: "Remove Shortcut")
-            for combo in keys {
-                let item = NSMenuItem(title: "Remove \(combo.displayName)", action: #selector(removeSpecificComboItem(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = combo
-                menu.addItem(item)
-            }
-            menu.addItem(.separator())
-            let allItem = NSMenuItem(title: "Remove All (\(keys.count) shortcuts)", action: #selector(removeAllCombos), keyEquivalent: "")
-            allItem.target = self
-            menu.addItem(allItem)
-
+            let menu = makeRemoveMenu(for: keys)
             let pt = NSPoint(x: 0, y: removeButton.bounds.height + 2)
             menu.popUp(positioning: nil, at: pt, in: removeButton)
             return
         }
 
         removeAllCombos()
+    }
+
+    private func makeRemoveMenu(for keys: [KeyCombo]) -> NSMenu {
+        let menu = NSMenu(title: "Remove Shortcut")
+        for combo in keys {
+            let item = NSMenuItem(title: "Remove \(combo.displayName)", action: #selector(removeSpecificComboItem(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = combo
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let allItem = NSMenuItem(title: "Remove All (\(keys.count) shortcuts)", action: #selector(removeAllCombos), keyEquivalent: "")
+        allItem.target = self
+        menu.addItem(allItem)
+        return menu
     }
 
     @objc private func resetPressed() {

@@ -103,15 +103,7 @@ enum AppWindows {
             return true
         }
 
-        let dir: (dx: CGFloat, dy: CGFloat)?
-        switch event.keyCode {
-        case 123: dir = (-1, 0) // Left
-        case 124: dir = (1, 0)  // Right
-        case 125: dir = (0, -1) // Down
-        case 126: dir = (0, 1)  // Up
-        default: dir = nil
-        }
-        guard let d = dir else { return false }
+        guard let d = arrowDirection(for: event.keyCode) else { return false }
 
         if let current = currentButton {
             return moveButtonFocus(from: current, in: window, direction: d)
@@ -125,6 +117,17 @@ enum AppWindows {
             return true
         }
         return false
+    }
+
+    private static let arrowDirections: [UInt16: (dx: CGFloat, dy: CGFloat)] = [
+        123: (-1, 0), // Left
+        124: (1, 0),  // Right
+        125: (0, -1), // Down
+        126: (0, 1),  // Up
+    ]
+
+    private static func arrowDirection(for keyCode: UInt16) -> (dx: CGFloat, dy: CGFloat)? {
+        arrowDirections[keyCode]
     }
 
     private static func firstPushButton(in view: NSView) -> NSButton? {
@@ -151,24 +154,7 @@ enum AppWindows {
         var best: (button: NSButton, score: CGFloat)?
         for candidate in buttons where candidate !== current {
             let r = candidate.convert(candidate.bounds, to: nil)
-            let dx = r.midX - curCenter.x
-            let dy = r.midY - curCenter.y
-            let primary: CGFloat
-            let perp: CGFloat
-            if direction.dx > 0 {
-                guard dx > 4 else { continue }
-                primary = dx; perp = abs(dy)
-            } else if direction.dx < 0 {
-                guard dx < -4 else { continue }
-                primary = -dx; perp = abs(dy)
-            } else if direction.dy > 0 {
-                guard dy > 4 else { continue }
-                primary = dy; perp = abs(dx)
-            } else {
-                guard dy < -4 else { continue }
-                primary = -dy; perp = abs(dx)
-            }
-            let score = primary + perp * 3.0
+            guard let score = directionalScore(dx: r.midX - curCenter.x, dy: r.midY - curCenter.y, direction: direction) else { continue }
             if best == nil || score < best!.score {
                 best = (candidate, score)
             }
@@ -176,6 +162,25 @@ enum AppWindows {
         guard let target = best?.button else { return false }
         window.makeFirstResponder(target)
         return true
+    }
+
+    private static func directionalScore(dx: CGFloat, dy: CGFloat, direction: (dx: CGFloat, dy: CGFloat)) -> CGFloat? {
+        let primary: CGFloat
+        let perp: CGFloat
+        if direction.dx > 0 {
+            guard dx > 4 else { return nil }
+            primary = dx; perp = abs(dy)
+        } else if direction.dx < 0 {
+            guard dx < -4 else { return nil }
+            primary = -dx; perp = abs(dy)
+        } else if direction.dy > 0 {
+            guard dy > 4 else { return nil }
+            primary = dy; perp = abs(dx)
+        } else {
+            guard dy < -4 else { return nil }
+            primary = -dy; perp = abs(dx)
+        }
+        return primary + perp * 3.0
     }
 
     static func styleButtons(in window: NSWindow) {

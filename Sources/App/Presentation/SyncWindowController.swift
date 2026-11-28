@@ -264,11 +264,16 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
 
     private func loadOptions() {
         let o = defaults.dictionary(forKey: Key.options) as? [String: Bool] ?? [:]
-        asymmetricBox.state = (o["asymmetric"] ?? false) ? .on : .off
-        subdirsBox.state = (o["subdirs"] ?? true) ? .on : .off
-        byContentBox.state = (o["byContent"] ?? false) ? .on : .off
-        ignoreDateBox.state = (o["ignoreDate"] ?? false) ? .on : .off
-        emptyDirsBox.state = (o["emptyDirs"] ?? false) ? .on : .off
+        let items: [(NSButton, String, Bool)] = [
+            (asymmetricBox, "asymmetric", false),
+            (subdirsBox, "subdirs", true),
+            (byContentBox, "byContent", false),
+            (ignoreDateBox, "ignoreDate", false),
+            (emptyDirsBox, "emptyDirs", false),
+        ]
+        for (box, key, fallback) in items {
+            box.state = (o[key] ?? fallback) ? .on : .off
+        }
     }
 
     private func saveOptions() {
@@ -322,30 +327,7 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
             Result { try SyncEngine.compare(cfg, sessions: sessions, isCancelled: { flag.isCancelled }) }
         }
         let done: (Result<SyncComparison, Error>) -> Void = { [weak self] result in
-            guard let self = self else { return }
-            self.isComparing = false
-            self.cancelFlag = nil
-            self.compareButton.title = "Compare"
-            self.spinner.stopAnimation(nil)
-            switch result {
-            case .success(let c):
-                self.config = cfg
-                self.comparison = c
-                self.applyFilter()
-                var status = c.summary
-                if let synced = self.lastSyncSummary {
-                    status = synced + "   ·   " + status
-                    self.lastSyncSummary = nil
-                }
-                if c.cancelled { status += "  - comparison aborted" }
-                if !c.errors.isEmpty { status += "  ·  \(c.errors.count) could not be read" }
-                self.statusLabel.stringValue = status
-                self.statusLabel.toolTip = c.errors.isEmpty ? nil : c.errors.prefix(30).joined(separator: "\n")
-            case .failure(let error):
-                self.statusLabel.stringValue = (error as? SearchValidationError)?.message ?? error.localizedDescription
-                if !self.runSynchronously { NSSound.beep() }
-            }
-            self.updateButtons()
+            self?.finishCompare(result, config: cfg)
         }
         if runSynchronously {
             done(work())
@@ -355,6 +337,32 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
                 DispatchQueue.main.async { done(result) }
             }
         }
+    }
+
+    private func finishCompare(_ result: Result<SyncComparison, Error>, config cfg: SyncConfiguration) {
+        isComparing = false
+        cancelFlag = nil
+        compareButton.title = "Compare"
+        spinner.stopAnimation(nil)
+        switch result {
+        case .success(let c):
+            config = cfg
+            comparison = c
+            applyFilter()
+            var status = c.summary
+            if let synced = lastSyncSummary {
+                status = synced + "   ·   " + status
+                lastSyncSummary = nil
+            }
+            if c.cancelled { status += "  - comparison aborted" }
+            if !c.errors.isEmpty { status += "  ·  \(c.errors.count) could not be read" }
+            statusLabel.stringValue = status
+            statusLabel.toolTip = c.errors.isEmpty ? nil : c.errors.prefix(30).joined(separator: "\n")
+        case .failure(let error):
+            statusLabel.stringValue = (error as? SearchValidationError)?.message ?? error.localizedDescription
+            if !runSynchronously { NSSound.beep() }
+        }
+        updateButtons()
     }
 
     private func rememberMask() {
@@ -450,7 +458,10 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
     }
 
     @objc private func tableDoubleClicked() {
-        let row = table.clickedRow, column = table.clickedColumn
+        handleDoubleClick(row: table.clickedRow, column: table.clickedColumn)
+    }
+
+    func handleDoubleClick(row: Int, column: Int) {
         guard row >= 0, column >= 0, visibleIndexes.indices.contains(row) else { return }
         let id = table.tableColumns[column].identifier.rawValue
         let r = comparison.rows[visibleIndexes[row]]
@@ -463,13 +474,7 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         }
     }
 
-    /// View (3): the selected pair side by side with its differences. Files on a server are
-    /// downloaded to a temporary folder first; a file present on one side only is compared to nothing.
-    @objc func viewDifferences() {
-        guard let v = table.selectedRowIndexes.first, visibleIndexes.indices.contains(v) else { return NSSound.beep() }
-        let row = comparison.rows[visibleIndexes[v]]
-        guard !row.isDirectory else { return NSSound.beep() }
-        let lookup = commander?.ftp.sessionLookup ?? { _ in nil }
+    private func makeDiffViewer(for row: SyncRow) -> DiffWindowController {
         func name(_ info: SyncFileInfo?, _ side: String) -> String {
             guard let url = info?.url else { return "(not on the \(side) side)" }
             return url.isRemoteLocation ? commander?.ftp.displayAddress(of: url) ?? url.absoluteString : url.path
@@ -481,6 +486,17 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         }
         if let window = viewer.window { AppWindows.place(window) }
         viewer.showWindow(nil)
+        return viewer
+    }
+
+    /// View (3): the selected pair side by side with its differences. Files on a server are
+    /// downloaded to a temporary folder first; a file present on one side only is compared to nothing.
+    @objc func viewDifferences() {
+        guard let v = table.selectedRowIndexes.first, visibleIndexes.indices.contains(v) else { return NSSound.beep() }
+        let row = comparison.rows[visibleIndexes[v]]
+        guard !row.isDirectory else { return NSSound.beep() }
+        let lookup = commander?.ftp.sessionLookup ?? { _ in nil }
+        let viewer = makeDiffViewer(for: row)
         let work = { () -> (Result<FileComparison, Error>, [URL]) in
             var temps: [URL] = []
             func local(_ info: SyncFileInfo?) throws -> URL {
@@ -573,23 +589,7 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
     /// 3 / F3 views the differences; plus Total Commander's Ctrl shortcuts.
     func handleTableKey(_ event: NSEvent) -> Bool {
         let mods = event.modifierFlags.intersection([.command, .control, .option, .shift])
-        if mods.isEmpty {
-            let selected = Array(table.selectedRowIndexes)
-            switch event.keyCode {
-            case 123: setAction(.copyToLeft, forVisible: selected); return true
-            case 124: setAction(.copyToRight, forVisible: selected); return true
-            case 49:
-                for v in selected where visibleIndexes.indices.contains(v) {
-                    let i = visibleIndexes[v]
-                    comparison.rows[i].action = SyncEngine.spaceCycle(comparison.rows[i])
-                }
-                table.reloadData(forRowIndexes: IndexSet(selected), columnIndexes: IndexSet(0..<table.numberOfColumns))
-                updateButtons()
-                return true
-            case 20, 99: viewDifferences(); return true
-            default: break
-            }
-        }
+        if mods.isEmpty, handleUnmodifiedTableKey(event.keyCode) { return true }
         guard event.modifierFlags.contains(.control), let ch = event.charactersIgnoringModifiers?.lowercased() else { return false }
         switch ch {
         case "l": markLeftToRight()
@@ -597,6 +597,24 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         case "d": markDefault()
         case "m": unmark()
         case "w": reverse()
+        default: return false
+        }
+        return true
+    }
+
+    private func handleUnmodifiedTableKey(_ keyCode: UInt16) -> Bool {
+        let selected = Array(table.selectedRowIndexes)
+        switch keyCode {
+        case 123: setAction(.copyToLeft, forVisible: selected)
+        case 124: setAction(.copyToRight, forVisible: selected)
+        case 49:
+            for v in selected where visibleIndexes.indices.contains(v) {
+                let i = visibleIndexes[v]
+                comparison.rows[i].action = SyncEngine.spaceCycle(comparison.rows[i])
+            }
+            table.reloadData(forRowIndexes: IndexSet(selected), columnIndexes: IndexSet(0..<table.numberOfColumns))
+            updateButtons()
+        case 20, 99: viewDifferences()
         default: return false
         }
         return true
@@ -649,12 +667,7 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         sheet.onFinished = { [weak self] report in
             guard let self = self else { return }
             self.confirmation = nil
-            var parts = ["\(report.copied) copied"]
-            if report.created > 0 { parts.append("\(report.created) folders created") }
-            if report.deleted > 0 { parts.append("\(report.deleted) deleted") }
-            if !report.skipped.isEmpty { parts.append("\(report.skipped.count) skipped") }
-            if !report.errors.isEmpty { parts.append("\(report.errors.count) failed") }
-            let summary = "Synchronized: " + parts.joined(separator: ", ") + (report.cancelled ? " (stopped)" : "")
+            let summary = Self.formatSyncSummary(report)
             self.commander?.reloadPanels()
             self.lastSyncSummary = summary
             self.compare()   // show the new state
@@ -664,6 +677,15 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
         }
         confirmation = sheet
         window.beginSheet(sheet.window!)
+    }
+
+    private static func formatSyncSummary(_ report: SyncReport) -> String {
+        var parts = ["\(report.copied) copied"]
+        if report.created > 0 { parts.append("\(report.created) folders created") }
+        if report.deleted > 0 { parts.append("\(report.deleted) deleted") }
+        if !report.skipped.isEmpty { parts.append("\(report.skipped.count) skipped") }
+        if !report.errors.isEmpty { parts.append("\(report.errors.count) failed") }
+        return "Synchronized: " + parts.joined(separator: ", ") + (report.cancelled ? " (stopped)" : "")
     }
 
     private func browse(into field: NSComboBox) {
@@ -687,6 +709,19 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
     public func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
         guard let id = column.flatMap({ Column(rawValue: $0.identifier.rawValue) }) else { return nil }
         let r = comparison.rows[visibleIndexes[row]]
+        if id == .action, r.action == .deleteLeft || r.action == .deleteRight {
+            return makeDeleteActionView(for: r.action, row: r)
+        }
+        let (text, alignment) = cellContent(for: id, row: r)
+        let label = NSTextField(labelWithString: text)
+        label.alignment = alignment
+        label.lineBreakMode = id == .leftName || id == .rightName ? .byTruncatingMiddle : .byTruncatingTail
+        label.textColor = Self.color(for: r)
+        if id == .action { label.font = .boldSystemFont(ofSize: 15) }
+        return AppWindows.centeredCell(label)
+    }
+
+    private func cellContent(for id: Column, row r: SyncRow) -> (String, NSTextAlignment) {
         let f = EntryFormatter.shared
         func size(_ i: SyncFileInfo?) -> String {
             guard let i = i else { return "" }
@@ -696,28 +731,15 @@ public final class SyncWindowController: NSWindowController, NSWindowDelegate, N
             guard let i = i else { return "" }
             return f.date(FileEntry(name: "", url: i.url, kind: .file, modified: i.modified))
         }
-        let text: String
-        var alignment: NSTextAlignment = .left
         switch id {
-        case .leftName: text = r.left == nil ? "" : EntryFormatter.visible(r.path)
-        case .leftSize: text = size(r.left); alignment = .right
-        case .leftDate: text = date(r.left)
-        case .action:
-            if r.action == .deleteLeft || r.action == .deleteRight {
-                return makeDeleteActionView(for: r.action, row: r)
-            }
-            text = r.symbol
-            alignment = .center
-        case .rightDate: text = date(r.right)
-        case .rightSize: text = size(r.right); alignment = .right
-        case .rightName: text = r.right == nil ? "" : EntryFormatter.visible(r.path)
+        case .leftName: return (r.left == nil ? "" : EntryFormatter.visible(r.path), .left)
+        case .leftSize: return (size(r.left), .right)
+        case .leftDate: return (date(r.left), .left)
+        case .action: return (r.symbol, .center)
+        case .rightDate: return (date(r.right), .left)
+        case .rightSize: return (size(r.right), .right)
+        case .rightName: return (r.right == nil ? "" : EntryFormatter.visible(r.path), .left)
         }
-        let label = NSTextField(labelWithString: text)
-        label.alignment = alignment
-        label.lineBreakMode = id == .leftName || id == .rightName ? .byTruncatingMiddle : .byTruncatingTail
-        label.textColor = Self.color(for: r)
-        if id == .action { label.font = .boldSystemFont(ofSize: 15) }
-        return AppWindows.centeredCell(label)
     }
 
     private func makeDeleteActionView(for action: SyncAction, row: SyncRow) -> NSView {

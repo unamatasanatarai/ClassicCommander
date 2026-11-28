@@ -243,30 +243,43 @@ public final class SFTPClient: RemoteClient {
         let first = text.components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .first { !$0.isEmpty && !$0.hasPrefix("Connection closed") } ?? ""
-        if lower.contains("remote host identification has changed") || lower.contains("host key for") && lower.contains("has changed") {
-            return .hostKeyChanged
+        if let mapped = matchErrorRule(lower: lower, first: first, path: path) {
+            return mapped
         }
-        if lower.contains("host key verification failed") || lower.contains("no ") && lower.contains("host key is known") {
-            return .hostKeyUnknown
-        }
-        if lower.contains("could not resolve hostname") || lower.contains("nodename nor servname") { return .hostNotFound }
-        if lower.contains("connection refused") { return .refused }
-        if lower.contains("timed out") { return .timeout }
-        if lower.contains("load key") || lower.contains("invalid format") || lower.contains("bad permissions")
-            || lower.contains("identity file") && lower.contains("not accessible") {
-            return .keyFile(first)
-        }
-        if lower.contains("permission denied (") || lower.contains("too many authentication failures") { return .authentication }
-        if lower.contains("couldn't open local file") || lower.contains("no space left") && lower.contains("local") { return .localDiskFull }
-        if lower.contains("quota") || lower.contains("no space left") { return .quotaExceeded }
-        if lower.contains("permission denied") { return .permissionDenied(path) }
-        if lower.contains("not found") || lower.contains("no such file") { return .notFound(path) }
-        if result.exitCode == 255 {
-            if lower.contains("broken pipe") || lower.contains("reset by peer") || lower.contains("closed by remote host") || first.isEmpty {
-                return .connectionLost
-            }
+        if result.exitCode == 255, first.isEmpty || containsAny(lower, ["broken pipe", "reset by peer", "closed by remote host"]) {
+            return .connectionLost
         }
         return .server(first.isEmpty ? "sftp exit code \(result.exitCode)" : first)
+    }
+
+    private static func containsAny(_ text: String, _ needles: [String]) -> Bool {
+        needles.contains { text.contains($0) }
+    }
+
+    private static func matchErrorRule(lower: String, first: String, path: String) -> FTPError? {
+        if lower.contains("remote host identification has changed") || (lower.contains("host key for") && lower.contains("has changed")) {
+            return .hostKeyChanged
+        }
+        if lower.contains("host key verification failed") || (lower.contains("no ") && lower.contains("host key is known")) {
+            return .hostKeyUnknown
+        }
+        if containsAny(lower, ["load key", "invalid format", "bad permissions"])
+            || (lower.contains("identity file") && lower.contains("not accessible")) {
+            return .keyFile(first)
+        }
+        if lower.contains("couldn't open local file") || (lower.contains("no space left") && lower.contains("local")) {
+            return .localDiskFull
+        }
+        let simpleRules: [([String], FTPError)] = [
+            (["could not resolve hostname", "nodename nor servname"], .hostNotFound),
+            (["connection refused"], .refused),
+            (["timed out"], .timeout),
+            (["permission denied (", "too many authentication failures"], .authentication),
+            (["quota", "no space left"], .quotaExceeded),
+            (["permission denied"], .permissionDenied(path)),
+            (["not found", "no such file"], .notFound(path)),
+        ]
+        return simpleRules.first { containsAny(lower, $0.0) }?.1
     }
 
     private func check(_ result: Result, path: String = "") throws {

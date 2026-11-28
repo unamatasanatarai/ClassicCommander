@@ -228,6 +228,14 @@ final class FTPProfileEditorController: NSWindowController, NSTabViewDelegate {
         anonymousBox.state = profile.anonymous ? .on : .off
         passiveBox.state = profile.passive ? .on : .off
         savePasswordBox.state = profile.savePassword ? .on : .off
+        loadAdvancedSettings()
+        updateSecurityWarning()
+        updatePin()
+        anonymousChanged()
+        updateProtocolControls()
+    }
+
+    private func loadAdvancedSettings() {
         serverTypePopup.selectItem(at: FTPServerType.allCases.firstIndex(of: profile.serverType) ?? 0)
         transferPopup.selectItem(at: FTPTransferMode.allCases.firstIndex(of: profile.transferMode) ?? 0)
         commandsView.string = profile.commandsAfterLogin.joined(separator: "\n")
@@ -235,10 +243,6 @@ final class FTPProfileEditorController: NSWindowController, NSTabViewDelegate {
         proxyPopup.selectItem(at: FTPProxyKind.allCases.firstIndex(of: profile.proxyKind) ?? 0)
         proxyHostField.stringValue = profile.proxyHost
         proxyUserField.stringValue = profile.proxyUsername
-        updateSecurityWarning()
-        updatePin()
-        anonymousChanged()
-        updateProtocolControls()
     }
 
     /// Rows of the General grid that depend on the protocol.

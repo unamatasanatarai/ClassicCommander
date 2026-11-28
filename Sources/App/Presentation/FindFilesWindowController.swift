@@ -26,7 +26,7 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
     /// Tests run searches to completion inside `startSearch()`.
     var runSynchronously = false
 
-    private(set) var config = FileSearchConfiguration()
+    var config = FileSearchConfiguration()
     private(set) var rows: [Row] = []
     private(set) var displayRows: [DisplayRow] = [.summary]
     private(set) var isSearching = false
@@ -400,38 +400,50 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
 
     /// Fills the controls from `config`.
     func writeUI() {
-        let g = config.general, a = config.advanced, c = g.content
+        writeGeneralUI()
+        writeAdvancedUI()
+    }
+
+    private func setCheck(_ button: NSButton, _ on: Bool) {
+        button.state = on ? .on : .off
+    }
+
+    private func writeGeneralUI() {
+        let g = config.general, c = g.content
         searchFor.stringValue = g.filenamePattern
         searchIn.stringValue = g.searchPaths.joined(separator: "; ")
-        regexBox.state = g.useRegex ? .on : .off
-        selectedOnlyBox.state = g.selectedItemsOnly ? .on : .off
+        setCheck(regexBox, g.useRegex)
+        setCheck(selectedOnlyBox, g.selectedItemsOnly)
         depthPopup.selectItem(at: Self.depthChoices.firstIndex { $0.1 == g.depth } ?? 0)
-        findTextBox.state = c.enabled ? .on : .off
+        setCheck(findTextBox, c.enabled)
         findTextField.stringValue = c.expression
-        wholeWordsBox.state = c.wholeWordsOnly ? .on : .off
-        caseBox.state = c.caseSensitive ? .on : .off
-        textRegexBox.state = c.useRegex ? .on : .off
-        hexBox.state = c.hexadecimal ? .on : .off
-        notBox.state = c.invertMatch ? .on : .off
-        for (cs, box) in charsetBoxes { box.state = c.charsets.contains(cs) ? .on : .off }
+        setCheck(wholeWordsBox, c.wholeWordsOnly)
+        setCheck(caseBox, c.caseSensitive)
+        setCheck(textRegexBox, c.useRegex)
+        setCheck(hexBox, c.hexadecimal)
+        setCheck(notBox, c.invertMatch)
+        for (cs, box) in charsetBoxes { setCheck(box, c.charsets.contains(cs)) }
+    }
 
-        dateBetweenBox.state = a.dateBetweenEnabled ? .on : .off
+    private func writeAdvancedUI() {
+        let a = config.advanced
+        setCheck(dateBetweenBox, a.dateBetweenEnabled)
         dateFromPicker.dateValue = a.dateFrom ?? Date()
         dateToPicker.dateValue = a.dateTo ?? Date()
         for (box, field, stepper, unit, age) in [(notOlderBox, notOlderField, notOlderStepper, notOlderUnit, a.notOlderThan),
                                                  (olderBox, olderField, olderStepper, olderUnit, a.olderThan)] {
-            box.state = age.enabled ? .on : .off
+            setCheck(box, age.enabled)
             field.stringValue = String(age.value)
             stepper.integerValue = age.value
             unit.selectItem(at: AgeUnit.allCases.firstIndex(of: age.unit) ?? 0)
         }
-        sizeBox.state = a.fileSize.enabled ? .on : .off
+        setCheck(sizeBox, a.fileSize.enabled)
         sizeOperator.selectItem(at: ComparisonOperator.allCases.firstIndex(of: a.fileSize.comparison) ?? 0)
         sizeField.stringValue = a.fileSize.value.truncatingRemainder(dividingBy: 1) == 0
             ? String(Int64(a.fileSize.value)) : String(a.fileSize.value)
         sizeStepper.doubleValue = a.fileSize.value
         sizeUnit.selectItem(at: SizeUnit.allCases.firstIndex(of: a.fileSize.unit) ?? 0)
-        attributesBox.state = a.attributesEnabled ? .on : .off
+        setCheck(attributesBox, a.attributesEnabled)
         for (attribute, box) in attributeBoxes {
             switch a.state(of: attribute) {
             case .ignored: box.state = .mixed
@@ -439,10 +451,10 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
             case .excluded: box.state = .off
             }
         }
-        duplicatesBox.state = a.duplicates.enabled ? .on : .off
-        sameNameBox.state = a.duplicates.sameName ? .on : .off
-        sameSizeBox.state = a.duplicates.sameSize ? .on : .off
-        sameContentsBox.state = a.duplicates.sameContents ? .on : .off
+        setCheck(duplicatesBox, a.duplicates.enabled)
+        setCheck(sameNameBox, a.duplicates.sameName)
+        setCheck(sameSizeBox, a.duplicates.sameSize)
+        setCheck(sameContentsBox, a.duplicates.sameContents)
     }
 
     /// Reads the controls into `config`. Number fields that do not parse are reported, not guessed.
@@ -551,17 +563,17 @@ public final class FindFilesWindowController: NSWindowController, NSWindowDelega
     }
 
     @objc private func buttonPressed(_ sender: NSButton) {
-        switch sender {
-        case startButton: startSearch()
-        case cancelButton: cancelPressed()
-        case viewButton: viewFile()
-        case newSearchButton: newSearch()
-        case goToButton: goToFile()
-        case feedButton: feedToListbox()
-        case browseButton: browse()
-        case drivesButton: showDrives()
-        default: break
-        }
+        let actions: [(NSButton, () -> Void)] = [
+            (startButton, startSearch),
+            (cancelButton, cancelPressed),
+            (viewButton, { _ = self.viewFile() }),
+            (newSearchButton, newSearch),
+            (goToButton, goToFile),
+            (feedButton, feedToListbox),
+            (browseButton, browse),
+            (drivesButton, showDrives),
+        ]
+        actions.first { $0.0 === sender }?.1()
     }
 
     // MARK: Searching

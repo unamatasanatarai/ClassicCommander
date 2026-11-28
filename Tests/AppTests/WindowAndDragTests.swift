@@ -268,5 +268,83 @@ enum WindowAndDragTests {
             panel.draggingSession(session, endedAt: .zero, operation: .move)
             try expect(changed, "a move re-reads the panel")
         }
+
+        testRunner("AppWindows: spatial button navigation with arrow keys and Return") {
+            func keyEvent(_ code: UInt16, mods: NSEvent.ModifierFlags = []) -> NSEvent {
+                NSEvent.keyEvent(
+                    with: .keyDown,
+                    location: .zero,
+                    modifierFlags: mods,
+                    timestamp: 0,
+                    windowNumber: 0,
+                    context: nil,
+                    characters: "",
+                    charactersIgnoringModifiers: "",
+                    isARepeat: false,
+                    keyCode: code
+                )!
+            }
+
+            let emptyWin = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100), styleMask: [.titled], backing: .buffered, defer: false)
+            try expect(!AppWindows.handleButtonNav(keyEvent(124), in: emptyWin), "Empty window returns false")
+
+            let table = NSTableView()
+            emptyWin.contentView?.addSubview(table)
+            emptyWin.makeFirstResponder(table)
+            try expect(!AppWindows.handleButtonNav(keyEvent(124), in: emptyWin), "NSTableView firstResponder skips button nav")
+
+            let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 200), styleMask: [.titled], backing: .buffered, defer: false)
+            let bTopLeft = NSButton(title: "TL", target: nil, action: nil)
+            bTopLeft.frame = NSRect(x: 20, y: 120, width: 80, height: 30)
+            let bTopRight = NSButton(title: "TR", target: nil, action: nil)
+            bTopRight.frame = NSRect(x: 160, y: 120, width: 80, height: 30)
+            let bBottomLeft = NSButton(title: "BL", target: nil, action: nil)
+            bBottomLeft.frame = NSRect(x: 20, y: 40, width: 80, height: 30)
+            let bBottomRight = NSButton(title: "BR", target: nil, action: nil)
+            bBottomRight.frame = NSRect(x: 160, y: 40, width: 80, height: 30)
+
+            var clicked = false
+            class Target: NSObject {
+                var onHit: (() -> Void)?
+                @objc func hit() { onHit?() }
+            }
+            let target = Target()
+            target.onHit = { clicked = true }
+            bTopRight.target = target
+            bTopRight.action = #selector(Target.hit)
+
+            win.contentView?.addSubview(bTopLeft)
+            win.contentView?.addSubview(bTopRight)
+            win.contentView?.addSubview(bBottomLeft)
+            win.contentView?.addSubview(bBottomRight)
+            win.orderBack(nil)
+            defer { win.orderOut(nil) }
+
+            // Modifier key or non-arrow key returns false
+            try expect(!AppWindows.handleButtonNav(keyEvent(124, mods: .command), in: win), "Command+Right ignored")
+            try expect(!AppWindows.handleButtonNav(keyEvent(49), in: win), "Non-arrow key ignored")
+
+            // No button focused -> falls back to firstPushButton
+            win.makeFirstResponder(nil)
+            try expect(AppWindows.handleButtonNav(keyEvent(124), in: win), "Arrow focuses first push button")
+            try expect(win.firstResponder === bTopLeft, "First button focused")
+
+            // initialFirstResponder branch
+            win.initialFirstResponder = bBottomRight
+            win.makeFirstResponder(nil)
+            try expect(AppWindows.handleButtonNav(keyEvent(123), in: win), "Arrow focuses initialFirstResponder")
+            try expect(win.firstResponder === bBottomRight, "initialFirstResponder focused")
+
+            // 2D spatial movement: BR -> Up -> TR -> Left -> TL -> Down -> BL -> Right -> BR
+            try expect(AppWindows.handleButtonNav(keyEvent(126), in: win) && win.firstResponder === bTopRight, "Up to TR")
+            try expect(AppWindows.handleButtonNav(keyEvent(123), in: win) && win.firstResponder === bTopLeft, "Left to TL")
+            try expect(AppWindows.handleButtonNav(keyEvent(125), in: win) && win.firstResponder === bBottomLeft, "Down to BL")
+            try expect(AppWindows.handleButtonNav(keyEvent(124), in: win) && win.firstResponder === bBottomRight, "Right to BR")
+
+            // Return on focused non-default button clicks it
+            win.makeFirstResponder(bTopRight)
+            try expect(AppWindows.handleButtonNav(keyEvent(36), in: win), "Return clicks focused button")
+            try expect(clicked, "Button action fired")
+        }
     }
 }

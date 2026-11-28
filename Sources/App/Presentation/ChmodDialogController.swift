@@ -73,31 +73,14 @@ public final class ChmodDialogController: NSWindowController {
         }
 
         public var symbolicString: String {
-            var s = ""
-            s += ownerRead ? "r" : "-"
-            s += ownerWrite ? "w" : "-"
-            if setUID {
-                s += ownerExecute ? "s" : "S"
-            } else {
-                s += ownerExecute ? "x" : "-"
-            }
+            triad(ownerRead, ownerWrite, ownerExecute, special: setUID, lower: "s", upper: "S")
+                + triad(groupRead, groupWrite, groupExecute, special: setGID, lower: "s", upper: "S")
+                + triad(otherRead, otherWrite, otherExecute, special: sticky, lower: "t", upper: "T")
+        }
 
-            s += groupRead ? "r" : "-"
-            s += groupWrite ? "w" : "-"
-            if setGID {
-                s += groupExecute ? "s" : "S"
-            } else {
-                s += groupExecute ? "x" : "-"
-            }
-
-            s += otherRead ? "r" : "-"
-            s += otherWrite ? "w" : "-"
-            if sticky {
-                s += otherExecute ? "t" : "T"
-            } else {
-                s += otherExecute ? "x" : "-"
-            }
-            return s
+        private func triad(_ r: Bool, _ w: Bool, _ x: Bool, special: Bool, lower: String, upper: String) -> String {
+            let exec = special ? (x ? lower : upper) : (x ? "x" : "-")
+            return (r ? "r" : "-") + (w ? "w" : "-") + exec
         }
     }
 
@@ -350,24 +333,14 @@ public final class ChmodDialogController: NSWindowController {
     }
 
     private func syncStateToUI() {
-        cbOwnerRead.state = state.ownerRead ? .on : .off
-        cbOwnerWrite.state = state.ownerWrite ? .on : .off
-        cbOwnerExec.state = state.ownerExecute ? .on : .off
-
-        cbGroupRead.state = state.groupRead ? .on : .off
-        cbGroupWrite.state = state.groupWrite ? .on : .off
-        cbGroupExec.state = state.groupExecute ? .on : .off
-
-        cbOtherRead.state = state.otherRead ? .on : .off
-        cbOtherWrite.state = state.otherWrite ? .on : .off
-        cbOtherExec.state = state.otherExecute ? .on : .off
-
-        cbSetUID.state = state.setUID ? .on : .off
-        cbSetGID.state = state.setGID ? .on : .off
-        cbSticky.state = state.sticky ? .on : .off
-
-        cbRecursive.state = state.recursive ? .on : .off
-
+        let pairs: [(NSButton, Bool)] = [
+            (cbOwnerRead, state.ownerRead), (cbOwnerWrite, state.ownerWrite), (cbOwnerExec, state.ownerExecute),
+            (cbGroupRead, state.groupRead), (cbGroupWrite, state.groupWrite), (cbGroupExec, state.groupExecute),
+            (cbOtherRead, state.otherRead), (cbOtherWrite, state.otherWrite), (cbOtherExec, state.otherExecute),
+            (cbSetUID, state.setUID), (cbSetGID, state.setGID), (cbSticky, state.sticky),
+            (cbRecursive, state.recursive),
+        ]
+        for (button, on) in pairs { button.state = on ? .on : .off }
         octalLabel.stringValue = state.octalString
         symbolicLabel.stringValue = state.symbolicString
         updatePresetChips()

@@ -109,21 +109,24 @@ public struct OperationOptions: Equatable, Codable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        spaceCalculatesFolderSize = try c.decodeIfPresent(Bool.self, forKey: .spaceCalculatesFolderSize) ?? true
-        spaceMovesCursorDown = try c.decodeIfPresent(Bool.self, forKey: .spaceMovesCursorDown) ?? true
-        maxTransfers = min(32, max(1, (try? c.decodeIfPresent(Int.self, forKey: .maxTransfers)) ?? 3))
-        maxUploads = min(32, max(0, (try? c.decodeIfPresent(Int.self, forKey: .maxUploads)) ?? 0))
-        maxDownloads = min(32, max(0, (try? c.decodeIfPresent(Int.self, forKey: .maxDownloads)) ?? 0))
-        maxLocals = min(32, max(1, (try? c.decodeIfPresent(Int.self, forKey: .maxLocals)) ?? 1))
-        terminalApp = (try? c.decodeIfPresent(String.self, forKey: .terminalApp)) ?? TerminalLauncher.defaultApp
-        terminalArguments = (try? c.decodeIfPresent(String.self, forKey: .terminalArguments)) ?? ""
-        selectionHidesOthers = (try? c.decodeIfPresent(Bool.self, forKey: .selectionHidesOthers)) ?? false
-        let hold = (try? c.decodeIfPresent(Double.self, forKey: .contextMenuHold)) ?? 1
+        func opt<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T {
+            (try? c.decodeIfPresent(T.self, forKey: key)) ?? fallback
+        }
+        spaceCalculatesFolderSize = opt(.spaceCalculatesFolderSize, true)
+        spaceMovesCursorDown = opt(.spaceMovesCursorDown, true)
+        maxTransfers = min(32, max(1, opt(.maxTransfers, 3)))
+        maxUploads = min(32, max(0, opt(.maxUploads, 0)))
+        maxDownloads = min(32, max(0, opt(.maxDownloads, 0)))
+        maxLocals = min(32, max(1, opt(.maxLocals, 1)))
+        terminalApp = opt(.terminalApp, TerminalLauncher.defaultApp)
+        terminalArguments = opt(.terminalArguments, "")
+        selectionHidesOthers = opt(.selectionHidesOthers, false)
+        let hold = opt(.contextMenuHold, 1.0)
         contextMenuHold = min(Self.contextMenuHoldRange.upperBound, max(Self.contextMenuHoldRange.lowerBound, hold))
-        finderOpensIn = (try? c.decodeIfPresent(FinderPanel.self, forKey: .finderOpensIn)) ?? .left
-        maskSelectsFolders = (try? c.decodeIfPresent(Bool.self, forKey: .maskSelectsFolders)) ?? true
-        renameSelectsExtension = (try? c.decodeIfPresent(Bool.self, forKey: .renameSelectsExtension)) ?? false
-        autoRefresh = (try? c.decodeIfPresent(AutoRefresh.self, forKey: .autoRefresh)) ?? .structure
+        finderOpensIn = opt(.finderOpensIn, .left)
+        maskSelectsFolders = opt(.maskSelectsFolders, true)
+        renameSelectsExtension = opt(.renameSelectsExtension, false)
+        autoRefresh = opt(.autoRefresh, .structure)
     }
 
     public static let standard = OperationOptions()

@@ -108,81 +108,81 @@ public enum CommandAction: String, CaseIterable, Codable {
     case showAllFiles, showPrograms, showCustomFilter
     case toggleHiddenFiles, toggleFunctionKeyBar, toggleFolderBrackets
 
-    public var label: String {
-        switch self {
-        case .cursorUp: return "Cursor up"
-        case .cursorDown: return "Cursor down"
-        case .pageUp: return "Page up"
-        case .pageDown: return "Page down"
-        case .firstItem: return "First item"
-        case .lastItem: return "Last item"
-        case .open: return "Open file / enter folder"
-        case .enterFolder: return "Enter folder (ignores files)"
-        case .parentFolder: return "Parent folder"
-        case .switchPanel: return "Switch panel"
-        case .toggleSelection: return "Select / deselect (and folder size)"
-        case .invertSelection: return "Invert selection (*)"
-        case .selectByMask: return "Select by mask (+)"
-        case .deselectByMask: return "Deselect by mask (-)"
-        case .leftLocationMenu: return "Location menu, left panel"
-        case .rightLocationMenu: return "Location menu, right panel"
-        case .goHome: return "Go to home folder (~)"
-        case .goDownloads: return "Go to Downloads folder"
-        case .goRoot: return "Go to root folder (\\)"
-        case .view: return "View (F3, Lister)"
-        case .copy: return "Copy (F5)"
-        case .move: return "Move / rename (F6)"
-        case .newFolder: return "New folder (F7)"
-        case .delete: return "Delete to Trash (F8)"
-        case .findFiles: return "Find files (Alt+F7)"
-        case .quickFilter: return "Quick filter (Ctrl+S)"
-        case .reopenQuickSearch: return "Reopen last quick search"
-        case .synchronizeDirs: return "Synchronize directories"
-        case .ftpConnect: return "FTP connect (connection manager)"
-        case .ftpNewConnection: return "FTP new connection"
-        case .ftpDisconnect: return "FTP disconnect"
-        case .ftpTransfers: return "Copy / move queue window"
-        case .sortByName: return "Sort by name"
-        case .sortByExtension: return "Sort by extension"
-        case .sortByDate: return "Sort by date/time"
-        case .sortBySize: return "Sort by size"
-        case .sortUnsorted: return "Unsorted (file system order)"
-        case .reverseOrder: return "Reverse sort order"
-        case .showAllFiles: return "Show all files (remove the Show filter)"
-        case .showPrograms: return "Show programs only"
-        case .showCustomFilter: return "Show files matching a mask…"
-        case .toggleHiddenFiles: return "Show hidden (dot) files"
-        case .toggleFunctionKeyBar: return "Show the function key button bar"
-        case .toggleFolderBrackets: return "Show [brackets] around folder names"
-        case .openTerminal: return "Open terminal here (in the active panel's folder)"
-        case .openInFinder: return "Open this folder in Finder (like “open .” in Terminal)"
-        case .selectAll: return "Select all (Ctrl+Num+)"
-        case .deselectAll: return "Unselect all (Ctrl+Num-)"
-        case .selectSameExtension: return "Select all files with the same extension"
-        case .deselectSameExtension: return "Unselect all files with the same extension"
-        case .restoreSelection: return "Restore the previous selection"
-        case .showMarkedOnly: return "Show only the selected files (toggle)"
-        case .copyNames: return "Copy selected names to the clipboard"
-        case .copyPaths: return "Copy selected names with full paths to the clipboard"
-        case .copyNamesWithDetails: return "Copy selected names with all details to the clipboard (table)"
-        case .copyPathsWithDetails: return "Copy selected full paths with all details to the clipboard (table)"
-        case .compareByDate: return "Compare directories: select newer and missing files"
-        case .compareBySize: return "Compare directories: select files that differ in size, and missing ones"
-        case .directoryHotlist: return "Directory hotlist: quick locations (Ctrl+D)"
-        case .multiRename: return "Multi-Rename Tool (Ctrl+M)"
-        case .packFiles: return "Pack files…"
-        case .unpackFiles: return "Unpack files…"
-        case .changeAttributes: return "Change attributes / permissions (chmod)…"
-        case .renameInPlace: return "Rename in place (Shift+F6)"
-        case .deletePermanently: return "Delete permanently, without the Trash (Shift+F8)"
-        case .newTab: return "New tab (same folder)"
-        case .closeTab: return "Close tab"
-        case .nextTab: return "Next tab"
-        case .previousTab: return "Previous tab"
-        case .swapPanels: return "Swap panels (left ↔ right, as Ctrl+U in Total Commander)"
-        case .refresh: return "Refresh (re-read folder)"
-        }
-    }
+    private static let labels: [CommandAction: String] = [
+        .cursorUp: "Cursor up",
+        .cursorDown: "Cursor down",
+        .pageUp: "Page up",
+        .pageDown: "Page down",
+        .firstItem: "First item",
+        .lastItem: "Last item",
+        .open: "Open file / enter folder",
+        .enterFolder: "Enter folder (ignores files)",
+        .parentFolder: "Parent folder",
+        .switchPanel: "Switch panel",
+        .toggleSelection: "Select / deselect (and folder size)",
+        .invertSelection: "Invert selection (*)",
+        .selectByMask: "Select by mask (+)",
+        .deselectByMask: "Deselect by mask (-)",
+        .leftLocationMenu: "Location menu, left panel",
+        .rightLocationMenu: "Location menu, right panel",
+        .goHome: "Go to home folder (~)",
+        .goDownloads: "Go to Downloads folder",
+        .goRoot: "Go to root folder (\\)",
+        .view: "View (F3, Lister)",
+        .copy: "Copy (F5)",
+        .move: "Move / rename (F6)",
+        .newFolder: "New folder (F7)",
+        .delete: "Delete to Trash (F8)",
+        .findFiles: "Find files (Alt+F7)",
+        .quickFilter: "Quick filter (Ctrl+S)",
+        .reopenQuickSearch: "Reopen last quick search",
+        .synchronizeDirs: "Synchronize directories",
+        .ftpConnect: "FTP connect (connection manager)",
+        .ftpNewConnection: "FTP new connection",
+        .ftpDisconnect: "FTP disconnect",
+        .ftpTransfers: "Copy / move queue window",
+        .sortByName: "Sort by name",
+        .sortByExtension: "Sort by extension",
+        .sortByDate: "Sort by date/time",
+        .sortBySize: "Sort by size",
+        .sortUnsorted: "Unsorted (file system order)",
+        .reverseOrder: "Reverse sort order",
+        .showAllFiles: "Show all files (remove the Show filter)",
+        .showPrograms: "Show programs only",
+        .showCustomFilter: "Show files matching a mask…",
+        .toggleHiddenFiles: "Show hidden (dot) files",
+        .toggleFunctionKeyBar: "Show the function key button bar",
+        .toggleFolderBrackets: "Show [brackets] around folder names",
+        .openTerminal: "Open terminal here (in the active panel's folder)",
+        .openInFinder: "Open this folder in Finder (like “open .” in Terminal)",
+        .selectAll: "Select all (Ctrl+Num+)",
+        .deselectAll: "Unselect all (Ctrl+Num-)",
+        .selectSameExtension: "Select all files with the same extension",
+        .deselectSameExtension: "Unselect all files with the same extension",
+        .restoreSelection: "Restore the previous selection",
+        .showMarkedOnly: "Show only the selected files (toggle)",
+        .copyNames: "Copy selected names to the clipboard",
+        .copyPaths: "Copy selected names with full paths to the clipboard",
+        .copyNamesWithDetails: "Copy selected names with all details to the clipboard (table)",
+        .copyPathsWithDetails: "Copy selected full paths with all details to the clipboard (table)",
+        .compareByDate: "Compare directories: select newer and missing files",
+        .compareBySize: "Compare directories: select files that differ in size, and missing ones",
+        .directoryHotlist: "Directory hotlist: quick locations (Ctrl+D)",
+        .multiRename: "Multi-Rename Tool (Ctrl+M)",
+        .packFiles: "Pack files…",
+        .unpackFiles: "Unpack files…",
+        .changeAttributes: "Change attributes / permissions (chmod)…",
+        .renameInPlace: "Rename in place (Shift+F6)",
+        .deletePermanently: "Delete permanently, without the Trash (Shift+F8)",
+        .newTab: "New tab (same folder)",
+        .closeTab: "Close tab",
+        .nextTab: "Next tab",
+        .previousTab: "Previous tab",
+        .swapPanels: "Swap panels (left ↔ right, as Ctrl+U in Total Commander)",
+        .refresh: "Refresh (re-read folder)",
+    ]
+
+    public var label: String { Self.labels[self] ?? rawValue }
 
     /// Short name for the function key bar at the bottom of the window.
     public var buttonTitle: String {

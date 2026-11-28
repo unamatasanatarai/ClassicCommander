@@ -209,38 +209,10 @@ public final class FileCommands {
     /// files of a drop into its folder. Planned in the background, then handed to the queue.
     private func transfer(move: Bool, drop: PanelDrop?) {
         guard let commander = commander else { return NSSound.beep() }
-        var source: PanelView? = commander.activeView
-        var items = commander.activeView.model.operationTargets
-        var folder = commander.view(for: commander.model.activeSide.other).model.directory
-        if let drop = drop {
-            source = drop.source
-            items = drop.entries
-            folder = drop.folder
-        }
+        let (source, items, folder) = resolveLocalTransferTarget(drop: drop, commander: commander)
         guard !items.isEmpty else { return NSSound.beep() }
         if source?.model.isInsideZip == true {
-            if move { NSSound.beep(); return }
-            let targetDir: URL
-            if drop != nil {
-                targetDir = folder
-            } else {
-                let q = Self.question(verb: "Copy", items: items, target: folder.path)
-                guard let answer = prompts.askTransfer(q) else { return }
-                targetDir = URL(fileURLWithPath: answer.target, isDirectory: true)
-            }
-            guard ZipArchive.split(targetDir) == nil else { NSSound.beep(); return }
-            do {
-                try ZipArchive.extractItems(items, to: targetDir, resolveConflict: { [prompts] conflict in
-                    prompts.resolveConflict(conflict)
-                })
-                source?.model.clearMarks()
-                commander.leftView.model.reload(visibleRows: commander.leftView.visibleRows)
-                commander.rightView.model.reload(visibleRows: commander.rightView.visibleRows)
-                commander.leftView.needsDisplay = true
-                commander.rightView.needsDisplay = true
-            } catch {
-                NSSound.beep()
-            }
+            transferFromZip(items: items, source: source, folder: folder, move: move, isDrop: drop != nil, commander: commander)
             return
         }
         if ZipArchive.split(folder) != nil { NSSound.beep(); return }
@@ -249,8 +221,72 @@ public final class FileCommands {
         let defaultTarget = folder.path == "/" ? "/" : folder.path + "/"
         guard let answer = prompts.askTransfer(Self.question(verb: verb, items: items, target: defaultTarget)) else { return }
 
-        let base = source?.model.directory ?? folder
-        let (pairs, create) = TransferTarget.plan(sources: items.map(\.url), target: answer.target, base: base)
+        let (planned, create, title) = planLocalTransfer(items: items, target: answer.target, base: source?.model.directory ?? folder, move: move, verb: verb)
+        guard !planned.isEmpty else { return }
+        source?.model.clearMarks()   // Select → Restore Selection brings them back
+        let cancelFlag = CancelFlag()
+        let progressWindow = makeBackgroundProgress(
+            enabled: runInBackground && !answer.queue,
+            verb: verb,
+            fromDesc: items.first?.name ?? "",
+            toDesc: create?.path ?? answer.target,
+            cancelFlag: cancelFlag
+        )
+        runPlannedTransfer(planned, title: title, create: create, move: move, answer: answer,
+                           progressWindow: progressWindow, cancelFlag: cancelFlag)
+    }
+
+    private func runPlannedTransfer(
+        _ planned: [(TransferPlanner.Source, TransferLocation)],
+        title: String,
+        create: URL?,
+        move: Bool,
+        answer: TransferAnswer,
+        progressWindow: TransferProgressWindowController?,
+        cancelFlag: CancelFlag
+    ) {
+        let work = { [weak self] in
+            let result = Result { try TransferPlanner.plan(planned, move: move, mask: answer.fileMask, cancel: cancelFlag) }
+            let finish: () -> Void = { self?.enqueue(result, title: title, create: create, move: move, answer: answer,
+                                                     existingProgressWindow: progressWindow, cancelFlag: cancelFlag) }
+            if self?.runInBackground == true { DispatchQueue.main.async(execute: finish) } else { finish() }
+        }
+        if runInBackground { planning.async(execute: work) } else { work() }
+    }
+
+    private func resolveLocalTransferTarget(drop: PanelDrop?, commander: CommanderView) -> (PanelView?, [FileEntry], URL) {
+        if let drop = drop {
+            return (drop.source, drop.entries, drop.folder)
+        }
+        return (commander.activeView,
+                commander.activeView.model.operationTargets,
+                commander.view(for: commander.model.activeSide.other).model.directory)
+    }
+
+    private func makeBackgroundProgress(
+        enabled: Bool,
+        verb: String,
+        fromDesc: String,
+        toDesc: String,
+        cancelFlag: CancelFlag
+    ) -> TransferProgressWindowController? {
+        guard enabled else { return nil }
+        let pw = TransferProgressWindowController(title: verb, from: fromDesc, to: toDesc,
+                                                  cancelFlag: cancelFlag, onCancel: nil) { [weak self] in
+            self?.commander?.ftp.transfersWindow.present()
+        }
+        pw.present()
+        return pw
+    }
+
+    private func planLocalTransfer(
+        items: [FileEntry],
+        target: String,
+        base: URL,
+        move: Bool,
+        verb: String
+    ) -> ([(TransferPlanner.Source, TransferLocation)], URL?, String) {
+        let (pairs, create) = TransferTarget.plan(sources: items.map(\.url), target: target, base: base)
         var problems: [String] = []
         var planned: [(TransferPlanner.Source, TransferLocation)] = []
         for (entry, pair) in zip(items, pairs) {
@@ -263,29 +299,40 @@ public final class FileCommands {
             report.errors = problems
             prompts.showProblems(title: "\(verb) problems", report: report)
         }
-        guard !planned.isEmpty else { return }
-        source?.model.clearMarks()   // Select → Restore Selection brings them back
         let title = "\(verb) \(Self.describe(items)) → \(create?.path ?? pairs.first?.1.deletingLastPathComponent().path ?? "")"
-        let cancelFlag = CancelFlag()
-        var progressWindow: TransferProgressWindowController?
-        if runInBackground && !answer.queue {
-            let fromDesc = items.first?.name ?? ""
-            let toDesc = create?.path ?? pairs.first?.1.deletingLastPathComponent().path ?? ""
-            let pw = TransferProgressWindowController(title: verb, from: fromDesc, to: toDesc,
-                                                      cancelFlag: cancelFlag, onCancel: nil) { [weak self] in
-                self?.commander?.ftp.transfersWindow.present()
-            }
-            progressWindow = pw
-            pw.present()
-        }
+        return (planned, create, title)
+    }
 
-        let work = { [weak self] in
-            let result = Result { try TransferPlanner.plan(planned, move: move, mask: answer.fileMask, cancel: cancelFlag) }
-            let finish: () -> Void = { self?.enqueue(result, title: title, create: create, move: move, answer: answer,
-                                                     existingProgressWindow: progressWindow, cancelFlag: cancelFlag) }
-            if self?.runInBackground == true { DispatchQueue.main.async(execute: finish) } else { finish() }
+    private func transferFromZip(
+        items: [FileEntry],
+        source: PanelView?,
+        folder: URL,
+        move: Bool,
+        isDrop: Bool,
+        commander: CommanderView
+    ) {
+        if move { NSSound.beep(); return }
+        let targetDir: URL
+        if isDrop {
+            targetDir = folder
+        } else {
+            let q = Self.question(verb: "Copy", items: items, target: folder.path)
+            guard let answer = prompts.askTransfer(q) else { return }
+            targetDir = URL(fileURLWithPath: answer.target, isDirectory: true)
         }
-        if runInBackground { planning.async(execute: work) } else { work() }
+        guard ZipArchive.split(targetDir) == nil else { NSSound.beep(); return }
+        do {
+            try ZipArchive.extractItems(items, to: targetDir, resolveConflict: { [prompts] conflict in
+                prompts.resolveConflict(conflict)
+            })
+            source?.model.clearMarks()
+            commander.leftView.model.reload(visibleRows: commander.leftView.visibleRows)
+            commander.rightView.model.reload(visibleRows: commander.rightView.visibleRows)
+            commander.leftView.needsDisplay = true
+            commander.rightView.needsDisplay = true
+        } catch {
+            NSSound.beep()
+        }
     }
 
     /// Hands a planned copy or move to the queue (the queue window shows it if it takes a while).
@@ -302,11 +349,7 @@ public final class FileCommands {
         switch result {
         case .failure(let error):
             existingProgressWindow?.close()
-            if !(error is FTPError && (error as? FTPError) == .cancelled) {
-                var report = OperationReport()
-                report.errors = [error.localizedDescription]
-                prompts.showProblems(title: "\(move ? "Move" : "Copy") problems", report: report)
-            }
+            handlePlanFailure(error, move: move)
         case .success(let plan):
             guard !plan.items.isEmpty else {
                 existingProgressWindow?.close()
@@ -322,6 +365,13 @@ public final class FileCommands {
             job.waitsInQueue = answer.queue
             commander.ftp.startJob(job, synchronously: !runInBackground, existingProgressWindow: existingProgressWindow)
         }
+    }
+
+    private func handlePlanFailure(_ error: Error, move: Bool) {
+        guard !(error is FTPError && (error as? FTPError) == .cancelled) else { return }
+        var report = OperationReport()
+        report.errors = [error.localizedDescription]
+        prompts.showProblems(title: "\(move ? "Move" : "Copy") problems", report: report)
     }
 
     // MARK: F7

@@ -585,20 +585,29 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
 
     /// Pushes `working` into the wells, the preset menu and the preview.
     private func sync() {
-        bracketsCheckbox.state = working.display.showFolderBrackets ? .on : .off
-        functionBarCheckbox.state = working.display.showFunctionKeyBar ? .on : .off
-        statusIconCheckbox.state = working.display.showStatusBarIcon ? .on : .off
-        hiddenFilesCheckbox.state = working.display.showHiddenFiles ? .on : .off
-        sizeBytesCheckbox.state = working.display.sizeFormat == .bytes ? .on : .off
-        tabBarAlwaysCheckbox.state = working.display.tabBar == .always ? .on : .off
+        syncDisplayAndOperation()
+        syncThemeAndPreview()
+    }
+
+    private func syncDisplayAndOperation() {
+        let checkboxes: [(NSButton, Bool)] = [
+            (bracketsCheckbox, working.display.showFolderBrackets),
+            (functionBarCheckbox, working.display.showFunctionKeyBar),
+            (statusIconCheckbox, working.display.showStatusBarIcon),
+            (hiddenFilesCheckbox, working.display.showHiddenFiles),
+            (sizeBytesCheckbox, working.display.sizeFormat == .bytes),
+            (tabBarAlwaysCheckbox, working.display.tabBar == .always),
+            (filterByDefaultCheckbox, working.quickSearch.filterByDefault),
+            (sizeCheckbox, working.operation.spaceCalculatesFolderSize),
+            (moveDownCheckbox, working.operation.spaceMovesCursorDown),
+            (hideOthersCheckbox, working.operation.selectionHidesOthers),
+            (maskFoldersCheckbox, working.operation.maskSelectsFolders),
+            (renameExtensionCheckbox, working.operation.renameSelectsExtension),
+        ]
+        for (box, on) in checkboxes { box.state = on ? .on : .off }
+
         let qsIdx = QuickSearchOptions.Activation.allCases.firstIndex(of: working.quickSearch.activation) ?? 0
         for (i, r) in quickSearchRadios.enumerated() { r.state = i == qsIdx ? .on : .off }
-        filterByDefaultCheckbox.state = working.quickSearch.filterByDefault ? .on : .off
-        sizeCheckbox.state = working.operation.spaceCalculatesFolderSize ? .on : .off
-        moveDownCheckbox.state = working.operation.spaceMovesCursorDown ? .on : .off
-        hideOthersCheckbox.state = working.operation.selectionHidesOthers ? .on : .off
-        maskFoldersCheckbox.state = working.operation.maskSelectsFolders ? .on : .off
-        renameExtensionCheckbox.state = working.operation.renameSelectsExtension ? .on : .off
         holdField.doubleValue = working.operation.contextMenuHold
         holdStepper.doubleValue = working.operation.contextMenuHold
         finderPanelControl.selectedSegment = FinderPanel.allCases.firstIndex(of: working.operation.finderOpensIn) ?? 0
@@ -612,6 +621,9 @@ public final class OptionsWindowController: NSWindowController, NSWindowDelegate
             transferSteppers[i].integerValue = values[i]
         }
         shortcutsPage.bindings = working.keys
+    }
+
+    private func syncThemeAndPreview() {
         previewActive.display = working.display
         previewInactive.display = working.display
         for (slot, well) in wells {

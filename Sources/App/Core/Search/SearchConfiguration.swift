@@ -75,26 +75,26 @@ public enum ContentCharset: String, Codable, CaseIterable {
         }
     }
 
+    private static let ansiEncodings: [UInt32: String.Encoding] = [
+        1250: .windowsCP1250,
+        1251: .windowsCP1251,
+        1253: .windowsCP1253,
+        1254: .windowsCP1254,
+    ]
+
+    private static let dosEncodings: [String: CFStringEncodings] = [
+        "CP852": .dosLatin2,
+        "CP866": .dosRussian,
+    ]
+
     /// The String.Encoding used to decode bytes; nil for Office xml, which is unpacked instead.
     public var stringEncoding: String.Encoding? {
-        func cf(_ e: CFStringEncodings) -> String.Encoding {
-            String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(e.rawValue)))
-        }
         switch self {
         case .ansi:
-            switch Self.ansiCodePage {
-            case 1250: return .windowsCP1250
-            case 1251: return .windowsCP1251
-            case 1253: return .windowsCP1253
-            case 1254: return .windowsCP1254
-            default: return .windowsCP1252
-            }
+            return Self.ansiEncodings[Self.ansiCodePage] ?? .windowsCP1252
         case .ascii:
-            switch Self.dosName {
-            case "CP852": return cf(.dosLatin2)
-            case "CP866": return cf(.dosRussian)
-            default: return cf(.dosLatinUS)
-            }
+            let cfEncoding = Self.dosEncodings[Self.dosName] ?? .dosLatinUS
+            return String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(cfEncoding.rawValue)))
         case .utf16: return .utf16LittleEndian
         case .utf8: return .utf8
         case .officeXML: return nil

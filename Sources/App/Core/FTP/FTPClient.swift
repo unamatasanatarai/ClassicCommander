@@ -1,7 +1,7 @@
 import Foundation
 
 /// What went wrong talking to a server, in words a user can act on. Never contains the password.
-public enum FTPError: Error, Equatable {
+public enum FTPError: Error, Hashable {
     case authentication
     case hostNotFound
     case refused
@@ -25,30 +25,39 @@ public enum FTPError: Error, Equatable {
     case invalid(String)
     case server(String)
 
+    private static let simpleMessages: [FTPError: String] = [
+        .authentication: "Login failed: the server rejected the user name or password.",
+        .hostNotFound: "Server not found: check the host name (DNS lookup failed).",
+        .refused: "Connection refused: the server is not accepting connections on that port.",
+        .timeout: "The server did not answer in time (timeout).",
+        .tlsUnavailable: "The server does not offer TLS. The connection was not made, because an encrypted connection was requested (it is never downgraded to plain FTP).",
+        .certificateUntrusted: "The server's certificate is not trusted.",
+        .pinnedKeyChanged: "The server's key no longer matches the one you trusted. This can mean the certificate was replaced — or an attack. The connection was not made.",
+        .hostKeyUnknown: "The server's SSH host key is not known yet, so the connection was not made.",
+        .hostKeyChanged: "The server's SSH host key does not match the one known for it. This can mean the server was reinstalled — or an attack. The connection was not made.",
+        .quotaExceeded: "The server refused the file: storage quota exceeded or no space left on the server.",
+        .localDiskFull: "Could not write the local file (disk full or not writable).",
+        .connectionLost: "The connection was lost during the transfer.",
+        .passiveFailed: "Passive mode data connection failed. Try turning Passive mode off (or check the firewall).",
+        .activeFailed: "Active mode data connection failed. Try Passive mode.",
+        .cancelled: "Cancelled.",
+    ]
+
     public var message: String {
+        if let fixed = Self.simpleMessages[self] { return fixed }
+        return payloadMessage
+    }
+
+    private var payloadMessage: String {
         switch self {
-        case .authentication: return "Login failed: the server rejected the user name or password."
-        case .hostNotFound: return "Server not found: check the host name (DNS lookup failed)."
-        case .refused: return "Connection refused: the server is not accepting connections on that port."
-        case .timeout: return "The server did not answer in time (timeout)."
-        case .tlsUnavailable: return "The server does not offer TLS. The connection was not made, because an encrypted connection was requested (it is never downgraded to plain FTP)."
         case .tlsFailed(let d): return "The encrypted (TLS) connection failed: \(d)"
-        case .certificateUntrusted: return "The server's certificate is not trusted."
-        case .pinnedKeyChanged: return "The server's key no longer matches the one you trusted. This can mean the certificate was replaced — or an attack. The connection was not made."
-        case .hostKeyUnknown: return "The server's SSH host key is not known yet, so the connection was not made."
-        case .hostKeyChanged: return "The server's SSH host key does not match the one known for it. This can mean the server was reinstalled — or an attack. The connection was not made."
         case .keyFile(let d): return "The key file could not be used: \(d)"
         case .permissionDenied(let d): return "Permission denied\(d.isEmpty ? "" : ": \(d)")."
         case .notFound(let d): return "Not found on the server\(d.isEmpty ? "" : ": \(d)")."
-        case .quotaExceeded: return "The server refused the file: storage quota exceeded or no space left on the server."
-        case .localDiskFull: return "Could not write the local file (disk full or not writable)."
-        case .connectionLost: return "The connection was lost during the transfer."
-        case .passiveFailed: return "Passive mode data connection failed. Try turning Passive mode off (or check the firewall)."
-        case .activeFailed: return "Active mode data connection failed. Try Passive mode."
-        case .cancelled: return "Cancelled."
         case .verificationFailed(let d): return "The transfer could not be verified: \(d)"
         case .invalid(let d): return d
         case .server(let d): return "Server error: \(d)"
+        default: return ""
         }
     }
 }
@@ -105,15 +114,18 @@ public final class FTPClient: RemoteClient {
             args += ["-Q", command]
         }
         var config = "user = \"\(Self.escape(profile.loginName)):\(Self.escape(profile.anonymous ? "classiccommander@" : password ?? ""))\"\n"
-        if profile.proxyKind != .none {
-            let scheme = profile.proxyKind == .http ? "http" : "socks5h"
-            args += ["--proxy", "\(scheme)://\(profile.proxyHost)"]
-            if profile.proxyKind == .http { args.append("--proxytunnel") }
-            if !profile.proxyUsername.isEmpty {
-                config += "proxy-user = \"\(Self.escape(profile.proxyUsername)):\"\n"
-            }
-        }
+        appendProxyArguments(to: &args, config: &config)
         return (args, config)
+    }
+
+    private func appendProxyArguments(to args: inout [String], config: inout String) {
+        guard profile.proxyKind != .none else { return }
+        let scheme = profile.proxyKind == .http ? "http" : "socks5h"
+        args += ["--proxy", "\(scheme)://\(profile.proxyHost)"]
+        if profile.proxyKind == .http { args.append("--proxytunnel") }
+        if !profile.proxyUsername.isEmpty {
+            config += "proxy-user = \"\(Self.escape(profile.proxyUsername)):\"\n"
+        }
     }
 
     /// A value inside a quoted curl config string. Line breaks would end the line and start a new
@@ -217,33 +229,41 @@ public final class FTPClient: RemoteClient {
         return text.replacingOccurrences(of: p, with: "••••")
     }
 
+    private static let fixedExitErrors: [Int32: FTPError] = [
+        6: .hostNotFound, 7: .refused, 28: .timeout, 67: .authentication, 64: .tlsUnavailable,
+        60: .certificateUntrusted, 51: .certificateUntrusted, 58: .certificateUntrusted, 59: .certificateUntrusted, 83: .certificateUntrusted,
+        90: .pinnedKeyChanged, 23: .localDiskFull,
+        18: .connectionLost, 55: .connectionLost, 56: .connectionLost, 52: .connectionLost,
+        13: .passiveFailed, 14: .passiveFailed, 15: .passiveFailed, 30: .activeFailed,
+    ]
+
     /// Maps curl's exit status (and the server reply in its message) to an FTPError.
     static func error(for result: Result, path: String = "") -> FTPError {
         let msg = result.errorText.components(separatedBy: "\n").first { $0.hasPrefix("curl:") }?
             .replacingOccurrences(of: "curl: ", with: "") ?? result.errorText.trimmingCharacters(in: .whitespacesAndNewlines)
-        func reply(_ code: String) -> Bool { msg.contains(" \(code)") || msg.hasSuffix(code) }
+        if let fixed = fixedExitErrors[result.exitCode] { return fixed }
         switch result.exitCode {
-        case 6: return .hostNotFound
-        case 7: return .refused
-        case 28: return .timeout
-        case 67: return .authentication
-        case 64: return .tlsUnavailable
-        case 60, 51, 58, 59, 83: return .certificateUntrusted
-        case 90: return .pinnedKeyChanged
         case 35, 80: return .tlsFailed(msg)
         case 9, 78:
-            return reply("550") && msg.lowercased().contains("perm") ? .permissionDenied(path) : .notFound(path)
+            return hasReply(msg, "550") && msg.lowercased().contains("perm") ? .permissionDenied(path) : .notFound(path)
         case 25, 21, 19:
-            if reply("552") || msg.contains("quota") { return .quotaExceeded }
-            if reply("550") || reply("553") || reply("530") || msg.lowercased().contains("denied") { return .permissionDenied(path) }
-            if reply("450") || reply("451") { return .server(msg) }
-            return .server(msg.isEmpty ? "the server refused the command" : msg)
-        case 23: return .localDiskFull
-        case 18, 55, 56, 52: return .connectionLost
-        case 13, 14, 15: return .passiveFailed
-        case 30: return .activeFailed
-        default: return .server(msg.isEmpty ? "curl exit code \(result.exitCode)" : msg)
+            return commandRefusedError(msg: msg, path: path)
+        default:
+            return .server(msg.isEmpty ? "curl exit code \(result.exitCode)" : msg)
         }
+    }
+
+    private static func hasReply(_ msg: String, _ code: String) -> Bool {
+        msg.contains(" \(code)") || msg.hasSuffix(code)
+    }
+
+    private static func commandRefusedError(msg: String, path: String) -> FTPError {
+        if hasReply(msg, "552") || msg.contains("quota") { return .quotaExceeded }
+        if hasReply(msg, "550") || hasReply(msg, "553") || hasReply(msg, "530") || msg.lowercased().contains("denied") {
+            return .permissionDenied(path)
+        }
+        if hasReply(msg, "450") || hasReply(msg, "451") { return .server(msg) }
+        return .server(msg.isEmpty ? "the server refused the command" : msg)
     }
 
     // MARK: Operations

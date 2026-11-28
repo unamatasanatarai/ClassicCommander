@@ -148,7 +148,10 @@ public final class UIGallery: NSObject {
         showCertTrustAlert()
         showHostKeyAlert()
 
-        // Ambitiously organize real estate across display in 4 functional categories
+        arrangeGalleryColumns()
+    }
+
+    private func arrangeGalleryColumns() {
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 20, y: 20, width: 1440, height: 900)
         let numCols: CGFloat = 4
         let colWidth = (screen.width - 40) / numCols
@@ -161,14 +164,11 @@ public final class UIGallery: NSObject {
         for ctrl in activeControllers {
             guard let win = ctrl.window else { continue }
             let t = win.title.lowercased()
-            if t.contains("find files") || t.contains("synchronize") || t.contains("multi-rename") ||
-               t.contains("lister") || t.contains("compare") {
+            if ["find files", "synchronize", "multi-rename", "lister", "compare"].contains(where: { t.contains($0) }) {
                 colTools.append(win)
-            } else if t.contains("copy") || t.contains("move") || t.contains("conflict") ||
-                      t.contains("transfer") || t.contains("pack") || t.contains("queue") || t.contains("target file") {
+            } else if ["copy", "move", "conflict", "transfer", "pack", "queue", "target file"].contains(where: { t.contains($0) }) {
                 colOps.append(win)
-            } else if t.contains("chmod") || t.contains("permission") || t.contains("options") ||
-                      t.contains("connection") || t.contains("profile") || t.contains("problem") {
+            } else if ["chmod", "permission", "options", "connection", "profile", "problem"].contains(where: { t.contains($0) }) {
                 colSettings.append(win)
             } else {
                 colPrompts.append(win)

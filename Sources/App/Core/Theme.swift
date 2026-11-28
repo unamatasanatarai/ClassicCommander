@@ -76,30 +76,30 @@ public enum ThemeSlot: String, CaseIterable {
     case markText, markOnCursorText
     case accent
 
-    public var label: String {
-        switch self {
-        case .text: return "Text"
-        case .directoryText: return "Folder text"
-        case .background: return "Background"
-        case .background2: return "Background 2 (alternate rows)"
-        case .cursorBackground: return "Cursor"
-        case .cursorText: return "Cursor text"
-        case .activePathBackground: return "Active path bar"
-        case .activePathText: return "Active path text"
-        case .inactivePathBackground: return "Inactive path bar"
-        case .inactivePathText: return "Inactive path text"
-        case .activeTabBackground: return "Active tab"
-        case .activeTabText: return "Active tab text"
-        case .headerBackground: return "Column headers"
-        case .headerText: return "Column header text"
-        case .chrome: return "Window / status bars"
-        case .chromeText: return "Status bar text"
-        case .lines: return "Lines and borders"
-        case .markText: return "Marked (selected) text"
-        case .markOnCursorText: return "Marked text on cursor"
-        case .accent: return "Accent (buttons, inputs)"
-        }
-    }
+    private static let labels: [ThemeSlot: String] = [
+        .text: "Text",
+        .directoryText: "Folder text",
+        .background: "Background",
+        .background2: "Background 2 (alternate rows)",
+        .cursorBackground: "Cursor",
+        .cursorText: "Cursor text",
+        .activePathBackground: "Active path bar",
+        .activePathText: "Active path text",
+        .inactivePathBackground: "Inactive path bar",
+        .inactivePathText: "Inactive path text",
+        .activeTabBackground: "Active tab",
+        .activeTabText: "Active tab text",
+        .headerBackground: "Column headers",
+        .headerText: "Column header text",
+        .chrome: "Window / status bars",
+        .chromeText: "Status bar text",
+        .lines: "Lines and borders",
+        .markText: "Marked (selected) text",
+        .markOnCursorText: "Marked text on cursor",
+        .accent: "Accent (buttons, inputs)",
+    ]
+
+    public var label: String { Self.labels[self] ?? rawValue }
 }
 
 public struct Theme: Equatable {
@@ -124,55 +124,32 @@ public struct Theme: Equatable {
     public var markOnCursorText: RGBColor
     public var accent: RGBColor
 
+    private static let slotKeyPaths: [ThemeSlot: WritableKeyPath<Theme, RGBColor>] = [
+        .text: \.text,
+        .directoryText: \.directoryText,
+        .background: \.background,
+        .background2: \.background2,
+        .cursorBackground: \.cursorBackground,
+        .cursorText: \.cursorText,
+        .activePathBackground: \.activePathBackground,
+        .activePathText: \.activePathText,
+        .inactivePathBackground: \.inactivePathBackground,
+        .inactivePathText: \.inactivePathText,
+        .activeTabBackground: \.activeTabBackground,
+        .activeTabText: \.activeTabText,
+        .headerBackground: \.headerBackground,
+        .headerText: \.headerText,
+        .chrome: \.chrome,
+        .chromeText: \.chromeText,
+        .lines: \.lines,
+        .markText: \.markText,
+        .markOnCursorText: \.markOnCursorText,
+        .accent: \.accent,
+    ]
+
     public subscript(slot: ThemeSlot) -> RGBColor {
-        get {
-            switch slot {
-            case .text: return text
-            case .directoryText: return directoryText
-            case .background: return background
-            case .background2: return background2
-            case .cursorBackground: return cursorBackground
-            case .cursorText: return cursorText
-            case .activePathBackground: return activePathBackground
-            case .activePathText: return activePathText
-            case .inactivePathBackground: return inactivePathBackground
-            case .inactivePathText: return inactivePathText
-            case .activeTabBackground: return activeTabBackground
-            case .activeTabText: return activeTabText
-            case .headerBackground: return headerBackground
-            case .headerText: return headerText
-            case .chrome: return chrome
-            case .chromeText: return chromeText
-            case .lines: return lines
-            case .markText: return markText
-            case .markOnCursorText: return markOnCursorText
-            case .accent: return accent
-            }
-        }
-        set {
-            switch slot {
-            case .text: text = newValue
-            case .directoryText: directoryText = newValue
-            case .background: background = newValue
-            case .background2: background2 = newValue
-            case .cursorBackground: cursorBackground = newValue
-            case .cursorText: cursorText = newValue
-            case .activePathBackground: activePathBackground = newValue
-            case .activePathText: activePathText = newValue
-            case .inactivePathBackground: inactivePathBackground = newValue
-            case .inactivePathText: inactivePathText = newValue
-            case .activeTabBackground: activeTabBackground = newValue
-            case .activeTabText: activeTabText = newValue
-            case .headerBackground: headerBackground = newValue
-            case .headerText: headerText = newValue
-            case .chrome: chrome = newValue
-            case .chromeText: chromeText = newValue
-            case .lines: lines = newValue
-            case .markText: markText = newValue
-            case .markOnCursorText: markOnCursorText = newValue
-            case .accent: accent = newValue
-            }
-        }
+        get { self[keyPath: Self.slotKeyPaths[slot]!] }
+        set { self[keyPath: Self.slotKeyPaths[slot]!] = newValue }
     }
 
     /// Builds a theme from "#RRGGBB" strings; used for the built-in presets.

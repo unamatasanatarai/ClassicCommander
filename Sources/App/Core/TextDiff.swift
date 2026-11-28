@@ -95,36 +95,47 @@ public struct TextDiff: Equatable {
         let n = a.count, m = b.count
         if n == 0 { return Array(repeating: .insert, count: m) }
         if m == 0 { return Array(repeating: .delete, count: n) }
-        // Lines become integers so comparisons are cheap.
-        var ids: [String: Int] = [:]
-        let ai = a.map { s -> Int in if let v = ids[s] { return v }; let v = ids.count; ids[s] = v; return v }
-        let bi = b.map { s -> Int in if let v = ids[s] { return v }; let v = ids.count; ids[s] = v; return v }
+        let (ai, bi) = internLines(a, b)
         let maxD = min(n + m, editBudget)
+        guard let trace = findTrace(ai, bi, n: n, m: m, maxD: maxD) else {
+            return Array(repeating: .delete, count: n) + Array(repeating: .insert, count: m)
+        }
+        return backtrackMyers(trace: trace, n: n, m: m)
+    }
+
+    private static func findTrace(_ ai: [Int], _ bi: [Int], n: Int, m: Int, maxD: Int) -> [[Int]]? {
         let offset = maxD + 1
         var v = [Int](repeating: 0, count: 2 * maxD + 3)
         // trace[d] holds the diagonals -d…d of V as they were before step d (all that backtracking reads).
         var trace: [[Int]] = []
-        var found = false
         for d in 0...maxD {
             trace.append(Array(v[(offset - d)...(offset + d)]))
             var k = -d
             while k <= d {
-                var x: Int
-                if k == -d || (k != d && v[offset + k - 1] < v[offset + k + 1]) {
-                    x = v[offset + k + 1]
-                } else {
-                    x = v[offset + k - 1] + 1
-                }
+                let takeDown = k == -d || (k != d && v[offset + k - 1] < v[offset + k + 1])
+                var x = takeDown ? v[offset + k + 1] : v[offset + k - 1] + 1
                 var y = x - k
                 while x < n && y < m && ai[x] == bi[y] { x += 1; y += 1 }
                 v[offset + k] = x
-                if x >= n && y >= m { found = true; break }
+                if x >= n && y >= m { return trace }
                 k += 2
             }
-            if found { break }
         }
-        // Too different to search exactly: everything between the common prefix and suffix changed.
-        guard found else { return Array(repeating: .delete, count: n) + Array(repeating: .insert, count: m) }
+        return nil
+    }
+
+    private static func internLines(_ a: [String], _ b: [String]) -> ([Int], [Int]) {
+        var ids: [String: Int] = [:]
+        func id(for s: String) -> Int {
+            if let v = ids[s] { return v }
+            let v = ids.count
+            ids[s] = v
+            return v
+        }
+        return (a.map(id), b.map(id))
+    }
+
+    private static func backtrackMyers(trace: [[Int]], n: Int, m: Int) -> [Op] {
         var ops: [Op] = []
         ops.reserveCapacity(n + m)
         var x = n, y = m

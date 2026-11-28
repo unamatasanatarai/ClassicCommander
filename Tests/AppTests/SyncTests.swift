@@ -298,5 +298,26 @@ public enum SyncTests {
                 throw Fail(description: "line endings ignored")
             }
         }
+
+        testRunner("SyncEngine.sorted covers all sort keys, nil sides, ties, and directions") {
+            let t1 = Date(timeIntervalSince1970: 100)
+            let t2 = Date(timeIntervalSince1970: 200)
+            let fA = SyncFileInfo(url: URL(fileURLWithPath: "/l/a"), size: 10, modified: t1, isDirectory: false)
+            let fB = SyncFileInfo(url: URL(fileURLWithPath: "/l/b"), size: 20, modified: t2, isDirectory: false)
+            let rows: [SyncRow] = [
+                SyncRow(path: "b.txt", left: fB, right: nil, state: .leftOnly, action: .copyToRight, recommended: .copyToRight),
+                SyncRow(path: "a.txt", left: fA, right: fB, state: .different, action: .copyToLeft, recommended: .copyToLeft),
+                SyncRow(path: "c.txt", left: nil, right: fA, state: .rightOnly, action: .deleteRight, recommended: .deleteRight),
+                SyncRow(path: "d.txt", left: nil, right: nil, state: .identical, action: .none, recommended: .none),
+            ]
+            let idx = [0, 1, 2, 3]
+            for key: SyncEngine.SortKey in [.leftName, .rightName, .leftSize, .rightSize, .leftDate, .rightDate, .action] {
+                let asc = SyncEngine.sorted(idx, of: rows, by: key, ascending: true)
+                let desc = SyncEngine.sorted(idx, of: rows, by: key, ascending: false)
+                try expect(asc.count == 4 && desc.count == 4, "sorted count for \(key)")
+            }
+            let byLeftSize = SyncEngine.sorted(idx, of: rows, by: .leftSize, ascending: true)
+            try expect(rows[byLeftSize[0]].left == nil && rows[byLeftSize[3]].path == "b.txt", "nil leftSize sorts first, largest last")
+        }
     }
 }

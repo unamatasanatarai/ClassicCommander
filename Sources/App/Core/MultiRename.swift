@@ -134,35 +134,37 @@ public enum MultiRename {
         return out + rest
     }
 
-    private static func value(of token: String, _ v: Values) -> String? {
-        func dateParts() -> (year: String, month: String, day: String, hour: String, minute: String, second: String) {
-            let date = v.date ?? Date(timeIntervalSince1970: 0)
-            let c = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
-            func two(_ n: Int?) -> String { String(format: "%02d", n ?? 0) }
-            return (String(format: "%04d", c.year ?? 0), two(c.month), two(c.day), two(c.hour), two(c.minute), two(c.second))
-        }
+    private static func dateParts(for v: Values) -> (year: String, month: String, day: String, hour: String, minute: String, second: String) {
+        let date = v.date ?? Date(timeIntervalSince1970: 0)
+        let c = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+        func two(_ n: Int?) -> String { String(format: "%02d", n ?? 0) }
+        return (String(format: "%04d", c.year ?? 0), two(c.month), two(c.day), two(c.hour), two(c.minute), two(c.second))
+    }
 
-        switch token {
-        case "N": return v.name
-        case "E": return v.ext
-        case "C":
+    private static let fixedTokens: [String: (Values) -> String] = [
+        "N": { $0.name },
+        "E": { $0.ext },
+        "C": { v in
             let n = String(abs(v.counter))
             return (v.counter < 0 ? "-" : "") + String(repeating: "0", count: max(0, v.digits - n.count)) + n
-        case "YMD":
-            let dp = dateParts()
-            return dp.year + dp.month + dp.day
-        case "hms":
-            let dp = dateParts()
-            return dp.hour + dp.minute + dp.second
-        case "Y": return dateParts().year
-        case "M": return dateParts().month
-        case "D": return dateParts().day
-        case "h": return dateParts().hour
-        case "m": return dateParts().minute
-        case "s": return dateParts().second
-        default: break
-        }
-        // [N2-5], [N3-], [N4], [E1-2]: characters, counted from 1.
+        },
+        "YMD": { let dp = dateParts(for: $0); return dp.year + dp.month + dp.day },
+        "hms": { let dp = dateParts(for: $0); return dp.hour + dp.minute + dp.second },
+        "Y": { dateParts(for: $0).year },
+        "M": { dateParts(for: $0).month },
+        "D": { dateParts(for: $0).day },
+        "h": { dateParts(for: $0).hour },
+        "m": { dateParts(for: $0).minute },
+        "s": { dateParts(for: $0).second },
+    ]
+
+    private static func value(of token: String, _ v: Values) -> String? {
+        if let resolver = fixedTokens[token] { return resolver(v) }
+        return sliceToken(token, v)
+    }
+
+    /// [N2-5], [N3-], [N4], [E1-2]: characters, counted from 1.
+    private static func sliceToken(_ token: String, _ v: Values) -> String? {
         guard let kind = token.first, kind == "N" || kind == "E", token.count > 1 else { return nil }
         let source = Array(kind == "N" ? v.name : v.ext)
         let spec = token.dropFirst()

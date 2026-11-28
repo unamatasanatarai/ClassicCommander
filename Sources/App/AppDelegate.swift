@@ -43,13 +43,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         if activatesApp { NSApp.activate(ignoringOtherApps: true) }
     }
 
-    private func setupMainMenu() {
-        let mainMenu = NSMenu()
-
-        // Application Menu
-        let appMenuItem = NSMenuItem()
-        mainMenu.addItem(appMenuItem)
-
+    private func buildAppMenu() -> NSMenu {
         let appMenu = NSMenu()
         let aboutItem = NSMenuItem(title: "About \(AppConfig.appName)", action: #selector(showAboutPanel), keyEquivalent: "")
         aboutItem.target = self
@@ -59,42 +53,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         prefsItem.target = self
         appMenu.addItem(prefsItem)
         appMenu.addItem(NSMenuItem.separator())
-
-        let hideItem = NSMenuItem(title: "Hide \(AppConfig.appName)", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
-        appMenu.addItem(hideItem)
-
+        appMenu.addItem(NSMenuItem(title: "Hide \(AppConfig.appName)", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h"))
         let hideOthersItem = NSMenuItem(title: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
         hideOthersItem.keyEquivalentModifierMask = [.command, .option]
         appMenu.addItem(hideOthersItem)
-
         appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
-
         // ⌘Q must be pressed twice so a stray keystroke never closes the commander.
         let quitItem = NSMenuItem(title: "Quit \(AppConfig.appName)", action: #selector(quitPressed), keyEquivalent: "q")
         quitItem.target = self
         appMenu.addItem(quitItem)
-        appMenuItem.submenu = appMenu
+        return appMenu
+    }
 
-        // Edit Menu: text fields (FTP dialogs, Find Files, Options…) get ⌘X/⌘C/⌘V/⌘A/⌘Z only
-        // through these menu items, which go to whatever field has the focus.
-        let editMenuItem = NSMenuItem()
-        mainMenu.addItem(editMenuItem)
-        let editMenu = NSMenu(title: "Edit")
-        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
-        let redoItem = editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
-        redoItem.keyEquivalentModifierMask = [.command, .shift]
-        editMenu.addItem(.separator())
-        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        editMenu.addItem(withTitle: "Delete", action: #selector(NSText.delete(_:)), keyEquivalent: "")
-        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
-        editMenuItem.submenu = editMenu
-
-        // View Menu (Total Commander's "Show" menu): sorting, filters and what is shown, for the active panel.
-        let viewMenuItem = NSMenuItem()
-        mainMenu.addItem(viewMenuItem)
+    private func buildViewMenu() -> NSMenu {
         let viewMenu = NSMenu(title: "View")
         viewMenu.delegate = self
         let sortMenu: [CommandAction] = [.sortByName, .sortByExtension, .sortByDate, .sortBySize, .sortUnsorted, .reverseOrder]
@@ -109,7 +81,41 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
                 viewMenu.addItem(item)
             }
         }
-        viewMenuItem.submenu = viewMenu
+        return viewMenu
+    }
+
+    private func buildEditMenu() -> NSMenu {
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redoItem = editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Delete", action: #selector(NSText.delete(_:)), keyEquivalent: "")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        return editMenu
+    }
+
+    private func setupMainMenu() {
+        let mainMenu = NSMenu()
+
+        // Application Menu
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+        appMenuItem.submenu = buildAppMenu()
+
+        // Edit Menu: text fields (FTP dialogs, Find Files, Options…) get ⌘X/⌘C/⌘V/⌘A/⌘Z only
+        // through these menu items, which go to whatever field has the focus.
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+        editMenuItem.submenu = buildEditMenu()
+
+        // View Menu (Total Commander's "Show" menu): sorting, filters and what is shown, for the active panel.
+        let viewMenuItem = NSMenuItem()
+        mainMenu.addItem(viewMenuItem)
+        viewMenuItem.submenu = buildViewMenu()
 
         // Select Menu (Total Commander's "Mark" menu): every way to select, copy names, compare folders.
         let selectMenuItem = NSMenuItem()
@@ -394,29 +400,26 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
     }
 
     /// Ticks for the active panel's sort, Show filter and the View toggles.
+    private static let menuChecks: [CommandAction: (PanelModel, DisplayOptions) -> Bool] = [
+        .sortByName: { p, _ in p.sortOrder.column == .name },
+        .sortByExtension: { p, _ in p.sortOrder.column == .ext },
+        .sortByDate: { p, _ in p.sortOrder.column == .date },
+        .sortBySize: { p, _ in p.sortOrder.column == .size },
+        .sortUnsorted: { p, _ in p.sortOrder.column == .unsorted },
+        .reverseOrder: { p, _ in !p.sortOrder.ascending },
+        .showAllFiles: { p, _ in p.showFilter == .all },
+        .showPrograms: { p, _ in p.showFilter == .programs },
+        .showCustomFilter: { p, _ in if case .mask = p.showFilter { return true }; return false },
+        .toggleHiddenFiles: { _, d in d.showHiddenFiles },
+        .toggleFunctionKeyBar: { _, d in d.showFunctionKeyBar },
+        .toggleFolderBrackets: { _, d in d.showFolderBrackets },
+        .showMarkedOnly: { p, _ in p.showsMarkedOnly },
+    ]
+
     public func validateMenuItem(_ item: NSMenuItem) -> Bool {
         guard let raw = item.representedObject as? String, let action = CommandAction(rawValue: raw),
-              let commander = commanderView else { return true }
-        let panel = commander.activeView.model
-        let display = commander.settings.display
-        var on: Bool?
-        switch action {
-        case .sortByName: on = panel.sortOrder.column == .name
-        case .sortByExtension: on = panel.sortOrder.column == .ext
-        case .sortByDate: on = panel.sortOrder.column == .date
-        case .sortBySize: on = panel.sortOrder.column == .size
-        case .sortUnsorted: on = panel.sortOrder.column == .unsorted
-        case .reverseOrder: on = !panel.sortOrder.ascending
-        case .showAllFiles: on = panel.showFilter == .all
-        case .showPrograms: on = panel.showFilter == .programs
-        case .showCustomFilter: if case .mask = panel.showFilter { on = true } else { on = false }
-        case .toggleHiddenFiles: on = display.showHiddenFiles
-        case .toggleFunctionKeyBar: on = display.showFunctionKeyBar
-        case .toggleFolderBrackets: on = display.showFolderBrackets
-        case .showMarkedOnly: on = panel.showsMarkedOnly
-        default: break
-        }
-        if let on = on { item.state = on ? .on : .off }
+              let commander = commanderView, let check = Self.menuChecks[action] else { return true }
+        item.state = check(commander.activeView.model, commander.settings.display) ? .on : .off
         return true
     }
 

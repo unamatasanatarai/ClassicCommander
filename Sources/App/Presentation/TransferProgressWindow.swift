@@ -220,45 +220,17 @@ public final class TransferProgressWindowController: NSWindowController {
     public func update() {
         guard let window = window, window.isVisible, !isPreparing, let job = job else { return }
         let verb = job.isMove ? "Move" : "Copy"
-        let speed = job.speed
-        let speedStr: String
-        if speed > 1_048_576 {
-            speedStr = String(format: "%.1f MB/s", speed / 1_048_576)
-        } else if speed > 1024 {
-            speedStr = String(format: "%.0f kbytes/s", speed / 1024)
-        } else {
-            speedStr = "0 kbytes/s"
-        }
-
+        let speedStr = Self.formatSpeed(job.speed)
         let remainingBytes = max(0, job.bytesTotal - job.bytesProcessed)
-        let timeStr: String
-        if speed > 1024 && remainingBytes > 0 {
-            let secs = Int(Double(remainingBytes) / speed)
-            if secs < 60 {
-                timeStr = "\(secs) s"
-            } else if secs < 3600 {
-                timeStr = "\(secs / 60) m"
-            } else {
-                timeStr = "\(secs / 3600) h \((secs % 3600) / 60) m"
-            }
-        } else {
-            timeStr = ""
-        }
+        let timeStr = Self.formatETA(remainingBytes: remainingBytes, speed: job.speed)
+        statusLabel.stringValue = timeStr.isEmpty ? "\(verb): \(speedStr)" : "\(verb): \(speedStr), \(timeStr)"
 
-        if timeStr.isEmpty {
-            statusLabel.stringValue = "\(verb): \(speedStr)"
-        } else {
-            statusLabel.stringValue = "\(verb): \(speedStr), \(timeStr)"
-        }
-
-        let activeIdx = job.active.first
-        if let idx = activeIdx, job.items.indices.contains(idx) {
+        if let idx = job.active.first, job.items.indices.contains(idx) {
             let item = job.items[idx]
             fromLabel.stringValue = "From: " + item.source.displayPath
             toLabel.stringValue = "To: " + item.destination.displayPath
             let fDone = job.partial[idx] ?? 0
-            let fTotal = item.size
-            let fPct = fTotal > 0 ? min(100, Int((Double(fDone) / Double(fTotal)) * 100)) : 0
+            let fPct = item.size > 0 ? min(100, Int((Double(fDone) / Double(item.size)) * 100)) : 0
             fileProgress.doubleValue = Double(fPct)
             filePercentLabel.stringValue = "\(fPct) %"
         } else {
@@ -274,14 +246,26 @@ public final class TransferProgressWindowController: NSWindowController {
         totalProgress.doubleValue = Double(tPct)
         totalPercentLabel.stringValue = "\(tPct) %"
 
-        if job.skippedCount > 0 {
-            filesCountLabel.stringValue = "\(job.processedCount) / \(job.items.count)  (\(job.skippedCount) skipped)"
-        } else {
-            filesCountLabel.stringValue = "\(job.processedCount) / \(job.items.count)"
-        }
+        filesCountLabel.stringValue = job.skippedCount > 0
+            ? "\(job.processedCount) / \(job.items.count)  (\(job.skippedCount) skipped)"
+            : "\(job.processedCount) / \(job.items.count)"
         bytesCountLabel.stringValue = "\(EntryFormatter.shared.size(tDone, as: .readable)) / \(EntryFormatter.shared.size(tTotal, as: .readable))"
 
         pauseButton.title = job.isPaused ? "Resume" : "Pause"
+    }
+
+    static func formatSpeed(_ speed: Double) -> String {
+        if speed > 1_048_576 { return String(format: "%.1f MB/s", speed / 1_048_576) }
+        if speed > 1024 { return String(format: "%.0f kbytes/s", speed / 1024) }
+        return "0 kbytes/s"
+    }
+
+    static func formatETA(remainingBytes: Int64, speed: Double) -> String {
+        guard speed > 1024 && remainingBytes > 0 else { return "" }
+        let secs = Int(Double(remainingBytes) / speed)
+        if secs < 60 { return "\(secs) s" }
+        if secs < 3600 { return "\(secs / 60) m" }
+        return "\(secs / 3600) h \((secs % 3600) / 60) m"
     }
 
     @objc private func pausePressed() {

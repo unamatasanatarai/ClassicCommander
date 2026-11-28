@@ -231,16 +231,20 @@ public final class FTPConnectionManagerController: NSWindowController, NSOutline
             status.stringValue = "Select a saved profile (not a folder) to connect."
             return NSSound.beep()
         }
-        var password = profile.anonymous ? nil : repository.credentials.password(for: profile.id)
-        // A key file only needs a passphrase when it is protected by one.
-        let needsSecret = profile.usesKeyFile ? SFTPClient.keyNeedsPassphrase(profile.keyFilePath) : !profile.anonymous
-        var remember = false
-        if needsSecret && password == nil {
-            guard let typed = askPassword(for: profile) else { return }
-            password = typed.password.isEmpty ? nil : typed.password
-            remember = typed.save && password != nil
-        }
+        guard let (password, remember) = resolveCredentials(for: profile) else { return }
         connect(profile, password: password, remember: remember)
+    }
+
+    private func resolveCredentials(for profile: FTPProfile) -> (password: String?, remember: Bool)? {
+        let existing = profile.anonymous ? nil : repository.credentials.password(for: profile.id)
+        guard requiresSecret(profile) && existing == nil else { return (existing, false) }
+        guard let typed = askPassword(for: profile) else { return nil }
+        let password = typed.password.isEmpty ? nil : typed.password
+        return (password, typed.save && password != nil)
+    }
+
+    private func requiresSecret(_ profile: FTPProfile) -> Bool {
+        profile.usesKeyFile ? SFTPClient.keyNeedsPassphrase(profile.keyFilePath) : !profile.anonymous
     }
 
     /// `remember`: once the login works, the password typed in the prompt goes into the Keychain.
